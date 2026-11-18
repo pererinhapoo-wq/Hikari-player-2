@@ -5,13 +5,18 @@ import { nitro } from 'nitro/vite';
 import path from 'path';
 import { defineConfig } from 'vite';
 
-export default defineConfig(() => {
+export default defineConfig(({ command }) => {
+  if (command === 'build' && process.env.NODE_ENV === 'development') {
+    process.env.NODE_ENV = 'production';
+  }
+
   return {
     plugins: [
       tailwindcss(),
       tanstackStart(),
       nitro({
         compatibilityDate: '2025-07-15',
+        inlineDynamicImports: true,
       }),
       react(),
     ],

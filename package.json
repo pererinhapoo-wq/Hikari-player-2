@@ -3,10 +3,12 @@
   "private": true,
   "version": "1.0.0",
   "type": "module",
+  "engines": {
+    "node": "22.x"
+  },
   "scripts": {
     "dev": "vite dev --port=3000 --host=0.0.0.0",
-    "build": "vite build",
-    "build:vercel": "NITRO_PRESET=vercel vite build && node -e 'const fs = require(\"fs\"); const path = require(\"path\"); const src = path.resolve(\".output/server/_libs\"); const dest = path.resolve(\".vercel/output/functions/__server.func/_libs\"); if (fs.existsSync(src)) { fs.mkdirSync(dest, { recursive: true }); fs.cpSync(src, dest, { recursive: true, force: true }); } const reactMjs = path.resolve(dest, \"react.mjs\"); if (fs.existsSync(reactMjs)) { let c = fs.readFileSync(reactMjs, \"utf8\"); c = c.replace(\"require_react_jsx_dev_runtime_production()\", \"require(\\\"react/jsx-dev-runtime\\\")\"); fs.writeFileSync(reactMjs, c); }'",
+    "build": "NODE_ENV=production vite build",
     "start": "node .output/server/index.mjs",
     "preview": "vite preview --port=3000 --host=0.0.0.0",
     "clean": "rm -rf dist .output .vercel .nitro src/routeTree.gen.ts",
