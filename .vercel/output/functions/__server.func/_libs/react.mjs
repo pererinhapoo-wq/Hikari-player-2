@@ -15,6 +15,6 @@ var require_react_jsx_dev_runtime_production = /* @__PURE__ */ __commonJSMin(((e
 }));
 // node_modules/react/jsx-dev-runtime.js
 var require_jsx_dev_runtime = /* @__PURE__ */ __commonJSMin(((exports, module) => {
-	module.exports = require_react_jsx_dev_runtime_production();
+	module.exports = require("react/jsx-dev-runtime");
 }));
 export { require_jsx_dev_runtime };
