@@ -1,0 +1,6 @@
+{
+  "name": "Player",
+  "description": "Independent anime episode video player by external URL with multi-source fallback and admin management.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
