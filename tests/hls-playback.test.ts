@@ -330,8 +330,8 @@ describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () =
       },
     });
     const upstreamHeaders = getUpstreamHeaders(new URL(MAXIMAIMG_TEST_URL), clientReq);
-    expect(upstreamHeaders['Referer']).not.toContain('evil-client.example.com');
-    expect(upstreamHeaders['Origin']).not.toContain('evil-client.example.com');
+    expect(upstreamHeaders['Referer']).toBe('https://api.anivideo.net/');
+    expect(upstreamHeaders['Origin']).toBe('https://api.anivideo.net');
     expect(upstreamHeaders['Range']).toBe('bytes=0-100');
   });
 });

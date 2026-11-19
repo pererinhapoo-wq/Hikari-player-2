@@ -20,12 +20,12 @@ export function getUpstreamHeaders(targetUrl: URL, incomingRequest: Request): Re
 
   if (isMaximaimgHost(targetUrl.hostname)) {
     const configuredReferer =
-      process.env.PLAYER_MAXIMAIMG_REFERER?.trim() || 'https://maximaimg.online/';
+      process.env.PLAYER_MAXIMAIMG_REFERER?.trim() || 'https://api.anivideo.net/';
     headers['Referer'] = configuredReferer;
     try {
       headers['Origin'] = new URL(configuredReferer).origin;
     } catch {
-      headers['Origin'] = 'https://maximaimg.online';
+      headers['Origin'] = 'https://api.anivideo.net';
     }
   } else {
     headers['Referer'] = `${targetUrl.origin}/`;
