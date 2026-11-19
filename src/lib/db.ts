@@ -18,6 +18,11 @@ export interface PlayerEpisode {
   video_url_3: string | null;
   video_url_4: string | null;
   video_url_5: string | null;
+  force_proxy: boolean | null;
+  force_proxy_2: boolean | null;
+  force_proxy_3: boolean | null;
+  force_proxy_4: boolean | null;
+  force_proxy_5: boolean | null;
   created_at: string;
   updated_at: string;
 }
@@ -30,6 +35,11 @@ export interface EpisodeWriteInput {
   video_url_3?: string | null;
   video_url_4?: string | null;
   video_url_5?: string | null;
+  force_proxy?: boolean | null;
+  force_proxy_2?: boolean | null;
+  force_proxy_3?: boolean | null;
+  force_proxy_4?: boolean | null;
+  force_proxy_5?: boolean | null;
 }
 
 export class DatabaseNotConfiguredError extends Error {
@@ -89,7 +99,7 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
   const sanitizedOptional: Record<string, string | null> = {};
   for (const [key, label] of optionalSlots) {
     const raw = input[key];
-    if (!raw || !raw.trim()) {
+    if (!raw || typeof raw !== 'string' || !raw.trim()) {
       sanitizedOptional[key] = null;
       continue;
     }
@@ -108,6 +118,11 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
     video_url_3: sanitizedOptional.video_url_3,
     video_url_4: sanitizedOptional.video_url_4,
     video_url_5: sanitizedOptional.video_url_5,
+    force_proxy: input.force_proxy ? true : null,
+    force_proxy_2: input.force_proxy_2 ? true : null,
+    force_proxy_3: input.force_proxy_3 ? true : null,
+    force_proxy_4: input.force_proxy_4 ? true : null,
+    force_proxy_5: input.force_proxy_5 ? true : null,
   };
 }
 
@@ -121,6 +136,11 @@ function mapEpisodeRow(row: Record<string, unknown>): PlayerEpisode {
     video_url_3: row.video_url_3 ? String(row.video_url_3) : null,
     video_url_4: row.video_url_4 ? String(row.video_url_4) : null,
     video_url_5: row.video_url_5 ? String(row.video_url_5) : null,
+    force_proxy: row.force_proxy === true ? true : null,
+    force_proxy_2: row.force_proxy_2 === true ? true : null,
+    force_proxy_3: row.force_proxy_3 === true ? true : null,
+    force_proxy_4: row.force_proxy_4 === true ? true : null,
+    force_proxy_5: row.force_proxy_5 === true ? true : null,
     created_at: new Date(String(row.created_at)).toISOString(),
     updated_at: new Date(String(row.updated_at)).toISOString(),
   };
@@ -129,7 +149,8 @@ function mapEpisodeRow(row: Record<string, unknown>): PlayerEpisode {
 export async function listEpisodes(): Promise<PlayerEpisode[]> {
   const sql = getSql();
   const rows = await sql`
-    SELECT id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5, created_at, updated_at
+    SELECT id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+           force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5, created_at, updated_at
     FROM public.player_episodes
     ORDER BY created_at DESC
   `;
@@ -147,7 +168,8 @@ export async function getEpisodeById(id: string): Promise<PlayerEpisode | null> 
 
   const sql = getSql();
   const rows = await sql`
-    SELECT id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5, created_at, updated_at
+    SELECT id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+           force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5, created_at, updated_at
     FROM public.player_episodes
     WHERE id = ${cleanId}
     LIMIT 1
@@ -163,7 +185,8 @@ export async function createEpisode(rawInput: EpisodeWriteInput): Promise<Player
 
   const rows = await sql`
     INSERT INTO public.player_episodes (
-      id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5
+      id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+      force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5
     ) VALUES (
       ${id},
       ${input.title},
@@ -172,9 +195,15 @@ export async function createEpisode(rawInput: EpisodeWriteInput): Promise<Player
       ${input.video_url_2 ?? null},
       ${input.video_url_3 ?? null},
       ${input.video_url_4 ?? null},
-      ${input.video_url_5 ?? null}
+      ${input.video_url_5 ?? null},
+      ${input.force_proxy ?? null},
+      ${input.force_proxy_2 ?? null},
+      ${input.force_proxy_3 ?? null},
+      ${input.force_proxy_4 ?? null},
+      ${input.force_proxy_5 ?? null}
     )
-    RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5, created_at, updated_at
+    RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+              force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5, created_at, updated_at
   `;
 
   return mapEpisodeRow((rows as Array<Record<string, unknown>>)[0]);
@@ -202,9 +231,15 @@ export async function updateEpisode(
       video_url_3 = ${input.video_url_3 ?? null},
       video_url_4 = ${input.video_url_4 ?? null},
       video_url_5 = ${input.video_url_5 ?? null},
+      force_proxy = ${input.force_proxy ?? null},
+      force_proxy_2 = ${input.force_proxy_2 ?? null},
+      force_proxy_3 = ${input.force_proxy_3 ?? null},
+      force_proxy_4 = ${input.force_proxy_4 ?? null},
+      force_proxy_5 = ${input.force_proxy_5 ?? null},
       updated_at = NOW()
     WHERE id = ${cleanId}
-    RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5, created_at, updated_at
+    RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+              force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5, created_at, updated_at
   `;
 
   const row = (rows as Array<Record<string, unknown>>)[0];
