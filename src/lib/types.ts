@@ -52,33 +52,60 @@ export interface AdminDashboardState {
   errorMessage?: string;
 }
 
+export type DatabaseDiagnosisCode =
+  | 'ok'
+  | 'env_missing'
+  | 'env_invalid'
+  | 'connection_failed'
+  | 'result_interpretation_error'
+  | 'table_missing_in_public'
+  | 'search_path_mismatch'
+  | 'query_failed';
+
+export interface SanitizedDbError {
+  name: string;
+  code: string | null;
+  message: string;
+}
+
 export interface DatabaseEnvDiagnostic {
   configured: boolean;
   validUrl: boolean;
+  parseError: string | null;
   hostname: string | null;
   database: string | null;
-  username: string | null;
+  hasUserInUrl: boolean;
+  hasPasswordInUrl: boolean;
   hasPooling: boolean;
   vercelEnv: string | null;
+  nodeEnv: string | null;
 }
 
 export interface DatabaseQueryDiagnostic {
-  database: string | null;
-  schema: string | null;
-  user: string | null;
+  current_database: string | null;
+  current_schema: string | null;
+  current_user: string | null;
   search_path: string | null;
   public_table: string | null;
   resolved_table: string | null;
-  server_address: string | null;
-  server_port: number | null;
 }
 
 export interface DatabaseDiagnosticResult {
   checkedAt: string;
+  diagnosisCode: DatabaseDiagnosisCode;
+  diagnosisSummary: string;
   env: DatabaseEnvDiagnostic;
-  queryOk: boolean;
+  connectionEstablished: boolean;
+  diagnosticQueryExecuted: boolean;
+  rawResultShape: string | null;
+  connectionError: SanitizedDbError | null;
   connection: DatabaseQueryDiagnostic | null;
-  queryError: string | null;
-  queryErrorCode: string | null;
+  diagnosticQueryError: SanitizedDbError | null;
+  tableReadExecuted: boolean;
+  episodeCount: number | null;
+  tableReadError: SanitizedDbError | null;
+  unqualifiedTableReadOk: boolean | null;
+  unqualifiedTableReadError: SanitizedDbError | null;
 }
+
 

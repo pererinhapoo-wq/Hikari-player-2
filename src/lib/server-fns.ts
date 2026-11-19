@@ -27,6 +27,7 @@ import {
   isDatabaseConfigured,
   listEpisodes,
   type PlayerEpisode,
+  sanitizeDiagnosticError,
   updateEpisode,
 } from '@/lib/db';
 import { buildSignedProxyPath } from '@/lib/proxy-signing';
@@ -139,10 +140,14 @@ export const getAdminDashboardFn = createServerFn({ method: 'GET' }).handler(
         episodes: episodes.map(toEpisodeDto),
       };
     } catch (err) {
-      const message =
-        err instanceof DatabaseNotConfiguredError
-          ? err.message
-          : 'Erro ao consultar episódios no banco Neon. Verifique se a migration 0001_player_episodes.sql foi aplicada.';
+      let message: string;
+      if (err instanceof DatabaseNotConfiguredError) {
+        message = err.message;
+      } else {
+        const sanitized = sanitizeDiagnosticError(err);
+        const codeTag = sanitized.code ? ` [${sanitized.code}]` : '';
+        message = `Erro ao consultar episódios no banco Neon (${sanitized.name}${codeTag}): ${sanitized.message}`;
+      }
       return {
         authenticated: true,
         databaseConfigured: true,

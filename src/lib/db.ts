@@ -1,6 +1,12 @@
 import crypto from 'node:crypto';
 import { neon } from '@neondatabase/serverless';
-import type { DatabaseDiagnosticResult, DatabaseEnvDiagnostic } from '@/lib/types';
+import type {
+  DatabaseDiagnosisCode,
+  DatabaseDiagnosticResult,
+  DatabaseEnvDiagnostic,
+  DatabaseQueryDiagnostic,
+  SanitizedDbError,
+} from '@/lib/types';
 import { validateHttpUrl } from '@/lib/video-sources';
 
 export interface PlayerEpisode {
@@ -35,7 +41,7 @@ export class DatabaseNotConfiguredError extends Error {
 
 export function isDatabaseConfigured(): boolean {
   const url = process.env.DATABASE_URL?.trim();
-  return Boolean(url && url.startsWith('postgres'));
+  return Boolean(url && /^postgres(?:ql)?:\/\//i.test(url));
 }
 
 function getSql() {
@@ -124,9 +130,12 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
   const sql = getSql();
   const rows = await sql`
     SELECT id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5, created_at, updated_at
-    FROM player_episodes
+    FROM public.player_episodes
     ORDER BY created_at DESC
   `;
+  if (!Array.isArray(rows)) {
+    throw new Error('Formato inesperado de resposta retornado pelo driver Neon ao listar episódios.');
+  }
   return (rows as Array<Record<string, unknown>>).map(mapEpisodeRow);
 }
 
@@ -139,11 +148,11 @@ export async function getEpisodeById(id: string): Promise<PlayerEpisode | null> 
   const sql = getSql();
   const rows = await sql`
     SELECT id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5, created_at, updated_at
-    FROM player_episodes
+    FROM public.player_episodes
     WHERE id = ${cleanId}
     LIMIT 1
   `;
-  const row = (rows as Array<Record<string, unknown>>)[0];
+  const row = Array.isArray(rows) ? (rows as Array<Record<string, unknown>>)[0] : undefined;
   return row ? mapEpisodeRow(row) : null;
 }
 
@@ -153,7 +162,7 @@ export async function createEpisode(rawInput: EpisodeWriteInput): Promise<Player
   const sql = getSql();
 
   const rows = await sql`
-    INSERT INTO player_episodes (
+    INSERT INTO public.player_episodes (
       id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5
     ) VALUES (
       ${id},
@@ -184,7 +193,7 @@ export async function updateEpisode(
   const sql = getSql();
 
   const rows = await sql`
-    UPDATE player_episodes
+    UPDATE public.player_episodes
     SET
       title = ${input.title},
       poster_url = ${input.poster_url},
@@ -210,7 +219,7 @@ export async function deleteEpisode(id: string): Promise<boolean> {
 
   const sql = getSql();
   const rows = await sql`
-    DELETE FROM player_episodes
+    DELETE FROM public.player_episodes
     WHERE id = ${cleanId}
     RETURNING id
   `;
@@ -220,79 +229,134 @@ export async function deleteEpisode(id: string): Promise<boolean> {
 export function inspectDatabaseUrlSafely(rawUrl = process.env.DATABASE_URL): DatabaseEnvDiagnostic {
   const trimmed = rawUrl?.trim() ?? '';
   const vercelEnv = process.env.VERCEL_ENV?.trim() || null;
+  const nodeEnv = process.env.NODE_ENV?.trim() || null;
 
   if (!trimmed) {
     return {
       configured: false,
       validUrl: false,
+      parseError: 'DATABASE_URL não definida no ambiente do servidor.',
       hostname: null,
       database: null,
-      username: null,
+      hasUserInUrl: false,
+      hasPasswordInUrl: false,
       hasPooling: false,
       vercelEnv,
+      nodeEnv,
     };
   }
 
+  let parsed: URL;
+  let scheme: string;
   try {
-    const parsed = new URL(trimmed);
-    const isPostgres = parsed.protocol === 'postgres:' || parsed.protocol === 'postgresql:';
-    if (!isPostgres) {
-      return {
-        configured: true,
-        validUrl: false,
-        hostname: null,
-        database: null,
-        username: null,
-        hasPooling: false,
-        vercelEnv,
-      };
-    }
-
-    const dbName = parsed.pathname.replace(/^\/+/, '');
-    const username = parsed.username ? decodeURIComponent(parsed.username) : null;
-    const hasPooling =
-      parsed.hostname.includes('-pooler') ||
-      parsed.searchParams.has('pgbouncer') ||
-      parsed.searchParams.has('pooler');
-
-    return {
-      configured: true,
-      validUrl: Boolean(parsed.hostname),
-      hostname: parsed.hostname || null,
-      database: dbName || null,
-      username,
-      hasPooling,
-      vercelEnv,
-    };
+    const rawParsed = new URL(trimmed);
+    scheme = rawParsed.protocol.toLowerCase();
+    // Parse with http: mirror just like @neondatabase/serverless so special-scheme rules apply consistently.
+    parsed = new URL(`http:${trimmed.slice(rawParsed.protocol.length)}`);
   } catch {
     return {
       configured: true,
       validUrl: false,
+      parseError:
+        'DATABASE_URL não possui formato de URL válido (verifique se não há aspas extras, prefixo "psql" ou caracteres não escapados).',
       hostname: null,
       database: null,
-      username: null,
+      hasUserInUrl: false,
+      hasPasswordInUrl: false,
       hasPooling: false,
       vercelEnv,
+      nodeEnv,
     };
   }
+
+  const isPostgres = scheme === 'postgres:' || scheme === 'postgresql:';
+  if (!isPostgres) {
+    return {
+      configured: true,
+      validUrl: false,
+      parseError: `Esquema inválido na DATABASE_URL (${scheme}); esperado postgres:// ou postgresql://.`,
+      hostname: null,
+      database: null,
+      hasUserInUrl: false,
+      hasPasswordInUrl: false,
+      hasPooling: false,
+      vercelEnv,
+      nodeEnv,
+    };
+  }
+
+  const hostname = parsed.hostname && parsed.hostname !== '-' ? parsed.hostname : null;
+  const dbName = parsed.pathname.replace(/^\/+/, '') || null;
+  const hasUserInUrl = Boolean(parsed.username);
+  const hasPasswordInUrl = Boolean(parsed.password);
+  const hasPooling =
+    Boolean(hostname?.includes('-pooler')) ||
+    parsed.searchParams.has('pgbouncer') ||
+    parsed.searchParams.has('pooler');
+
+  const missingParts: string[] = [];
+  if (!hostname) missingParts.push('hostname');
+  if (!hasUserInUrl) missingParts.push('usuário');
+  if (!dbName) missingParts.push('nome do banco (/neondb)');
+
+  const validUrl = missingParts.length === 0;
+  const parseError = validUrl
+    ? null
+    : `DATABASE_URL incompleta: ausente ${missingParts.join(', ')}.`;
+
+  return {
+    configured: true,
+    validUrl,
+    parseError,
+    hostname,
+    database: dbName,
+    hasUserInUrl,
+    hasPasswordInUrl,
+    hasPooling,
+    vercelEnv,
+    nodeEnv,
+  };
 }
 
-export function sanitizeDiagnosticError(err: unknown, rawUrl = process.env.DATABASE_URL): {
-  message: string;
-  code: string | null;
-} {
-  let message = err instanceof Error ? err.message : 'Erro desconhecido ao consultar o Neon.';
+export function sanitizeDiagnosticError(
+  err: unknown,
+  rawUrl = process.env.DATABASE_URL
+): SanitizedDbError {
+  const name =
+    err instanceof Error && err.name ? err.name : 'DatabaseError';
+  let message =
+    err instanceof Error && err.message
+      ? err.message
+      : 'Erro desconhecido ao consultar o Neon.';
   const trimmed = rawUrl?.trim();
 
   if (trimmed) {
     message = message.split(trimmed).join('[REDACTED_URL]');
     try {
-      const parsed = new URL(trimmed);
+      const rawParsed = new URL(trimmed);
+      const parsed = new URL(`http:${trimmed.slice(rawParsed.protocol.length)}`);
+
       if (parsed.password) {
         message = message.split(parsed.password).join('[REDACTED]');
-        const decodedPassword = decodeURIComponent(parsed.password);
-        if (decodedPassword) {
-          message = message.split(decodedPassword).join('[REDACTED]');
+        try {
+          const decodedPassword = decodeURIComponent(parsed.password);
+          if (decodedPassword) {
+            message = message.split(decodedPassword).join('[REDACTED]');
+          }
+        } catch {
+          // Ignore invalid percent-encoding
+        }
+      }
+
+      if (parsed.username) {
+        message = message.split(parsed.username).join('[REDACTED_USER]');
+        try {
+          const decodedUser = decodeURIComponent(parsed.username);
+          if (decodedUser) {
+            message = message.split(decodedUser).join('[REDACTED_USER]');
+          }
+        } catch {
+          // Ignore invalid percent-encoding
         }
       }
     } catch {
@@ -308,71 +372,287 @@ export function sanitizeDiagnosticError(err: unknown, rawUrl = process.env.DATAB
       : null;
   const code = typeof rawCode === 'string' && rawCode.trim() ? rawCode.trim() : null;
 
-  return { message, code };
+  return { name, code, message };
+}
+
+export type DiagnosticSqlTag = (
+  strings: TemplateStringsArray,
+  ...values: unknown[]
+) => Promise<unknown>;
+
+function describeDriverShape(rows: unknown): string {
+  if (Array.isArray(rows)) {
+    const first = rows[0];
+    const keys =
+      first && typeof first === 'object' ? Object.keys(first as Record<string, unknown>) : [];
+    return `array(${rows.length})${keys.length ? ` [${keys.join(', ')}]` : ''}`;
+  }
+  if (rows && typeof rows === 'object') {
+    return `object(${Object.keys(rows as Record<string, unknown>).join(', ')})`;
+  }
+  return typeof rows;
+}
+
+export async function runDiagnosticWithSql(
+  sql: DiagnosticSqlTag | null,
+  env: DatabaseEnvDiagnostic,
+  checkedAt = new Date().toISOString(),
+  rawUrl = process.env.DATABASE_URL
+): Promise<DatabaseDiagnosticResult> {
+  if (!env.configured) {
+    return {
+      checkedAt,
+      diagnosisCode: 'env_missing',
+      diagnosisSummary: 'DATABASE_URL não está configurada no ambiente do servidor.',
+      env,
+      connectionEstablished: false,
+      diagnosticQueryExecuted: false,
+      rawResultShape: null,
+      connectionError: {
+        name: 'DatabaseNotConfiguredError',
+        code: null,
+        message: 'DATABASE_URL do Neon não está configurada no ambiente do servidor.',
+      },
+      connection: null,
+      diagnosticQueryError: null,
+      tableReadExecuted: false,
+      episodeCount: null,
+      tableReadError: null,
+      unqualifiedTableReadOk: null,
+      unqualifiedTableReadError: null,
+    };
+  }
+
+  if (!env.validUrl || !sql) {
+    return {
+      checkedAt,
+      diagnosisCode: 'env_invalid',
+      diagnosisSummary:
+        env.parseError ?? 'DATABASE_URL está configurada, mas não pôde ser interpretada.',
+      env,
+      connectionEstablished: false,
+      diagnosticQueryExecuted: false,
+      rawResultShape: null,
+      connectionError: {
+        name: 'InvalidDatabaseUrlError',
+        code: null,
+        message: env.parseError ?? 'Formato inválido de DATABASE_URL.',
+      },
+      connection: null,
+      diagnosticQueryError: null,
+      tableReadExecuted: false,
+      episodeCount: null,
+      tableReadError: null,
+      unqualifiedTableReadOk: null,
+      unqualifiedTableReadError: null,
+    };
+  }
+
+  let currentDb: string | null = null;
+  let currentSchema: string | null = null;
+  let currentUser: string | null = null;
+  let searchPath: string | null = null;
+  let rawResultShape: string | null = null;
+
+  // Etapa 2: Validar conexão e contexto da sessão no Neon
+  try {
+    const sessionRows = await sql`
+      SELECT
+        current_database() AS current_database,
+        current_schema() AS current_schema,
+        current_user AS current_user,
+        current_setting('search_path') AS search_path
+    `;
+    rawResultShape = describeDriverShape(sessionRows);
+
+    if (!Array.isArray(sessionRows) || sessionRows.length === 0 || typeof sessionRows[0] !== 'object' || sessionRows[0] === null) {
+      return {
+        checkedAt,
+        diagnosisCode: 'result_interpretation_error',
+        diagnosisSummary: `Conexão respondeu, mas o driver Neon retornou um formato inesperado (${rawResultShape}).`,
+        env,
+        connectionEstablished: true,
+        diagnosticQueryExecuted: true,
+        rawResultShape,
+        connectionError: null,
+        connection: null,
+        diagnosticQueryError: {
+          name: 'UnexpectedDriverResultError',
+          code: null,
+          message: `Esperado array não vazio de linhas do Neon; recebido: ${rawResultShape}.`,
+        },
+        tableReadExecuted: false,
+        episodeCount: null,
+        tableReadError: null,
+        unqualifiedTableReadOk: null,
+        unqualifiedTableReadError: null,
+      };
+    }
+
+    const row = sessionRows[0] as Record<string, unknown>;
+    currentDb = row.current_database !== null && row.current_database !== undefined ? String(row.current_database) : null;
+    currentSchema = row.current_schema !== null && row.current_schema !== undefined ? String(row.current_schema) : null;
+    currentUser = row.current_user !== null && row.current_user !== undefined ? String(row.current_user) : null;
+    searchPath = row.search_path !== null && row.search_path !== undefined ? String(row.search_path) : null;
+  } catch (err) {
+    const connectionError = sanitizeDiagnosticError(err, rawUrl);
+    return {
+      checkedAt,
+      diagnosisCode: 'connection_failed',
+      diagnosisSummary: `DATABASE_URL está configurada (host ${env.hostname ?? 'desconhecido'}), mas a conexão/consulta inicial ao Neon falhou: ${connectionError.message}`,
+      env,
+      connectionEstablished: false,
+      diagnosticQueryExecuted: false,
+      rawResultShape,
+      connectionError,
+      connection: null,
+      diagnosticQueryError: null,
+      tableReadExecuted: false,
+      episodeCount: null,
+      tableReadError: null,
+      unqualifiedTableReadOk: null,
+      unqualifiedTableReadError: null,
+    };
+  }
+
+  // Etapa 3: Verificar existência da tabela em public e no search_path
+  let publicTable: string | null = null;
+  let resolvedTable: string | null = null;
+  let diagnosticQueryExecuted = false;
+  let diagnosticQueryError: SanitizedDbError | null = null;
+
+  try {
+    const regRows = await sql`
+      SELECT
+        to_regclass('public.player_episodes')::text AS public_table,
+        to_regclass('player_episodes')::text AS resolved_table
+    `;
+    diagnosticQueryExecuted = true;
+    if (Array.isArray(regRows) && regRows[0] && typeof regRows[0] === 'object') {
+      const regRow = regRows[0] as Record<string, unknown>;
+      publicTable =
+        regRow.public_table !== null && regRow.public_table !== undefined
+          ? String(regRow.public_table)
+          : null;
+      resolvedTable =
+        regRow.resolved_table !== null && regRow.resolved_table !== undefined
+          ? String(regRow.resolved_table)
+          : null;
+    }
+  } catch (err) {
+    diagnosticQueryError = sanitizeDiagnosticError(err, rawUrl);
+  }
+
+  const connection: DatabaseQueryDiagnostic = {
+    current_database: currentDb,
+    current_schema: currentSchema,
+    current_user: currentUser,
+    search_path: searchPath,
+    public_table: publicTable,
+    resolved_table: resolvedTable,
+  };
+
+  // Etapa 4: Consulta simples somente leitura à tabela public.player_episodes e player_episodes
+  let tableReadExecuted = false;
+  let episodeCount: number | null = null;
+  let tableReadError: SanitizedDbError | null = null;
+
+  try {
+    const countRows = await sql`
+      SELECT COUNT(*)::int AS episode_count
+      FROM public.player_episodes
+    `;
+    tableReadExecuted = true;
+    if (Array.isArray(countRows) && countRows[0] && typeof countRows[0] === 'object') {
+      const val = (countRows[0] as Record<string, unknown>).episode_count;
+      episodeCount = val !== null && val !== undefined && !Number.isNaN(Number(val)) ? Number(val) : null;
+    }
+  } catch (err) {
+    tableReadError = sanitizeDiagnosticError(err, rawUrl);
+  }
+
+  let unqualifiedTableReadOk: boolean | null = null;
+  let unqualifiedTableReadError: SanitizedDbError | null = null;
+
+  try {
+    await sql`
+      SELECT COUNT(*)::int AS episode_count
+      FROM player_episodes
+    `;
+    unqualifiedTableReadOk = true;
+  } catch (err) {
+    unqualifiedTableReadOk = false;
+    unqualifiedTableReadError = sanitizeDiagnosticError(err, rawUrl);
+  }
+
+  let diagnosisCode: DatabaseDiagnosisCode = 'ok';
+  let diagnosisSummary = `Conexão ativa no banco "${currentDb ?? '?'}" (schema "${currentSchema ?? '?'}") e leitura de public.player_episodes bem-sucedida (${episodeCount ?? 0} registro(s)).`;
+
+  if (diagnosticQueryError) {
+    diagnosisCode = 'query_failed';
+    diagnosisSummary = `Conexão estabelecida no banco "${currentDb ?? '?'}", mas a consulta de metadados falhou: ${diagnosticQueryError.message}`;
+  } else if (!publicTable) {
+    diagnosisCode = 'table_missing_in_public';
+    diagnosisSummary = `Conexão estabelecida no banco "${currentDb ?? '?'}" (host "${env.hostname ?? '?'}"), mas public.player_episodes retornou NULL. Isso indica que o ambiente está conectado a outro banco, projeto ou branch do Neon onde a migration não foi aplicada.`;
+  } else if (tableReadError) {
+    diagnosisCode = 'query_failed';
+    diagnosisSummary = `Tabela public.player_episodes encontrada (${publicTable}), mas SELECT COUNT(*) falhou: ${tableReadError.message}`;
+  } else if (unqualifiedTableReadOk === false || !resolvedTable) {
+    diagnosisCode = 'search_path_mismatch';
+    diagnosisSummary = `Tabela public.player_episodes acessível (${episodeCount ?? 0} registro(s)), porém a consulta sem schema ("player_episodes") falhou com search_path="${searchPath ?? 'desconhecido'}".`;
+  }
+
+  return {
+    checkedAt,
+    diagnosisCode,
+    diagnosisSummary,
+    env,
+    connectionEstablished: true,
+    diagnosticQueryExecuted,
+    rawResultShape,
+    connectionError: null,
+    connection,
+    diagnosticQueryError,
+    tableReadExecuted,
+    episodeCount,
+    tableReadError,
+    unqualifiedTableReadOk,
+    unqualifiedTableReadError,
+  };
 }
 
 export async function diagnoseDatabaseConnection(): Promise<DatabaseDiagnosticResult> {
   const checkedAt = new Date().toISOString();
   const env = inspectDatabaseUrlSafely();
 
+  if (!env.configured || !env.validUrl) {
+    return runDiagnosticWithSql(null, env, checkedAt);
+  }
+
+  let sql: DiagnosticSqlTag;
   try {
-    const sql = getSql();
-    const rows = await sql`
-      SELECT
-        current_database() AS database,
-        current_schema() AS schema,
-        current_user AS user,
-        current_setting('search_path') AS search_path,
-        to_regclass('public.player_episodes') AS public_table,
-        to_regclass('player_episodes') AS resolved_table,
-        inet_server_addr()::text AS server_address,
-        inet_server_port() AS server_port
-    `;
-
-    const row = (rows as Array<Record<string, unknown>>)[0] ?? {};
-    const portVal = row.server_port;
-    const serverPort =
-      portVal !== null && portVal !== undefined && !Number.isNaN(Number(portVal))
-        ? Number(portVal)
-        : null;
-
-    return {
-      checkedAt,
-      env,
-      queryOk: true,
-      connection: {
-        database: row.database !== null && row.database !== undefined ? String(row.database) : null,
-        schema: row.schema !== null && row.schema !== undefined ? String(row.schema) : null,
-        user: row.user !== null && row.user !== undefined ? String(row.user) : null,
-        search_path:
-          row.search_path !== null && row.search_path !== undefined ? String(row.search_path) : null,
-        public_table:
-          row.public_table !== null && row.public_table !== undefined
-            ? String(row.public_table)
-            : null,
-        resolved_table:
-          row.resolved_table !== null && row.resolved_table !== undefined
-            ? String(row.resolved_table)
-            : null,
-        server_address:
-          row.server_address !== null && row.server_address !== undefined
-            ? String(row.server_address)
-            : null,
-        server_port: serverPort,
-      },
-      queryError: null,
-      queryErrorCode: null,
-    };
+    sql = getSql() as unknown as DiagnosticSqlTag;
   } catch (err) {
-    const sanitized = sanitizeDiagnosticError(err);
+    const connectionError = sanitizeDiagnosticError(err);
     return {
       checkedAt,
+      diagnosisCode: env.configured ? 'connection_failed' : 'env_missing',
+      diagnosisSummary: connectionError.message,
       env,
-      queryOk: false,
+      connectionEstablished: false,
+      diagnosticQueryExecuted: false,
+      rawResultShape: null,
+      connectionError,
       connection: null,
-      queryError: sanitized.message,
-      queryErrorCode: sanitized.code,
+      diagnosticQueryError: null,
+      tableReadExecuted: false,
+      episodeCount: null,
+      tableReadError: null,
+      unqualifiedTableReadOk: null,
+      unqualifiedTableReadError: null,
     };
   }
+
+  return runDiagnosticWithSql(sql, env, checkedAt);
 }
 

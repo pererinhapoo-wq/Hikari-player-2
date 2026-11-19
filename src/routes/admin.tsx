@@ -628,11 +628,15 @@ function AdminPage() {
                       Diagnóstico da conexão Neon (somente leitura)
                     </h3>
                     {diagnostic && (
-                      <span className="text-[11px] font-mono text-slate-500">
-                        {diagnostic.env.vercelEnv ?? 'local'}
+                      <span className="text-[11px] font-mono text-slate-400">
+                        {diagnostic.env.vercelEnv ?? 'local'} · {diagnostic.diagnosisCode}
                       </span>
                     )}
                   </div>
+
+                  {diagnosticBusy && !diagnostic && (
+                    <p className="text-xs text-slate-400">Executando diagnóstico no servidor...</p>
+                  )}
 
                   {diagnosticError && (
                     <p className="text-xs text-rose-400" role="alert">
@@ -642,14 +646,28 @@ function AdminPage() {
 
                   {diagnostic && (
                     <div className="space-y-3 text-xs">
+                      <div
+                        className={`rounded-lg border p-3 ${
+                          diagnostic.diagnosisCode === 'ok'
+                            ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-200'
+                            : 'bg-amber-950/30 border-amber-500/30 text-amber-200'
+                        }`}
+                      >
+                        <div className="font-semibold">
+                          Diagnóstico ({diagnostic.diagnosisCode})
+                        </div>
+                        <p className="mt-1 leading-relaxed">{diagnostic.diagnosisSummary}</p>
+                      </div>
+
+                      {/* Etapa 1: Variável DATABASE_URL */}
                       <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 bg-[#090B10] border border-white/10 rounded-lg p-3 font-mono">
                         <div className="flex justify-between gap-2">
                           <dt className="text-slate-400">DATABASE_URL:</dt>
                           <dd className="text-slate-200">
                             {diagnostic.env.configured
                               ? diagnostic.env.validUrl
-                                ? 'Configurada'
-                                : 'Inválida'
+                                ? 'Configurada (válida)'
+                                : 'Configurada (inválida/incompleta)'
                               : 'Ausente'}
                           </dd>
                         </div>
@@ -662,87 +680,178 @@ function AdminPage() {
                         <div className="flex justify-between gap-2 sm:col-span-2">
                           <dt className="text-slate-400 shrink-0">Host (URL):</dt>
                           <dd className="text-slate-200 truncate">
-                            {diagnostic.env.hostname ?? '—'}
+                            {diagnostic.env.hostname ?? 'Não extraído'}
                           </dd>
                         </div>
                         <div className="flex justify-between gap-2">
                           <dt className="text-slate-400">Banco (URL):</dt>
-                          <dd className="text-slate-200">{diagnostic.env.database ?? '—'}</dd>
+                          <dd className="text-slate-200">
+                            {diagnostic.env.database ?? 'Não informado na URL'}
+                          </dd>
                         </div>
                         <div className="flex justify-between gap-2">
-                          <dt className="text-slate-400">Usuário (URL):</dt>
-                          <dd className="text-slate-200">{diagnostic.env.username ?? '—'}</dd>
+                          <dt className="text-slate-400">Credenciais (URL):</dt>
+                          <dd className="text-slate-200">
+                            {diagnostic.env.hasUserInUrl ? 'Usuário OK' : 'Sem usuário'} ·{' '}
+                            {diagnostic.env.hasPasswordInUrl ? 'Senha OK' : 'Sem senha'}
+                          </dd>
                         </div>
+                        {diagnostic.env.parseError && (
+                          <div className="sm:col-span-2 text-rose-300 pt-1 border-t border-white/10">
+                            Erro na URL: {diagnostic.env.parseError}
+                          </div>
+                        )}
                       </dl>
 
-                      {diagnostic.queryOk && diagnostic.connection ? (
-                        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 bg-[#090B10] border border-white/10 rounded-lg p-3 font-mono">
-                          <div className="flex justify-between gap-2">
-                            <dt className="text-slate-400">current_database:</dt>
-                            <dd className="text-slate-200">
-                              {diagnostic.connection.database ?? 'null'}
-                            </dd>
+                      {/* Etapas 2 e 3: Conexão e consulta de contexto SQL */}
+                      <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 bg-[#090B10] border border-white/10 rounded-lg p-3 font-mono">
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-slate-400">Conexão Neon:</dt>
+                          <dd
+                            className={
+                              diagnostic.connectionEstablished
+                                ? 'text-emerald-400'
+                                : 'text-rose-400'
+                            }
+                          >
+                            {diagnostic.connectionEstablished ? 'Estabelecida' : 'Falhou'}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-slate-400">Consulta diagnóstico:</dt>
+                          <dd
+                            className={
+                              diagnostic.diagnosticQueryExecuted
+                                ? 'text-emerald-400'
+                                : 'text-rose-400'
+                            }
+                          >
+                            {diagnostic.diagnosticQueryExecuted ? 'Executada' : 'Não executada'}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-slate-400">current_database:</dt>
+                          <dd className="text-slate-200">
+                            {diagnostic.connection?.current_database ??
+                              (diagnostic.connectionEstablished ? 'null' : 'Sem conexão')}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-slate-400">current_schema:</dt>
+                          <dd className="text-slate-200">
+                            {diagnostic.connection?.current_schema ??
+                              (diagnostic.connectionEstablished ? 'null' : 'Sem conexão')}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-slate-400">current_user:</dt>
+                          <dd className="text-slate-200">
+                            {diagnostic.connection?.current_user ??
+                              (diagnostic.connectionEstablished ? 'null' : 'Sem conexão')}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-slate-400">search_path:</dt>
+                          <dd className="text-slate-200">
+                            {diagnostic.connection?.search_path ??
+                              (diagnostic.connectionEstablished ? 'null' : 'Sem conexão')}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-slate-400">to_regclass(public):</dt>
+                          <dd
+                            className={
+                              diagnostic.connection?.public_table
+                                ? 'text-emerald-400'
+                                : 'text-rose-400'
+                            }
+                          >
+                            {diagnostic.connection
+                              ? diagnostic.connection.public_table ?? 'null (ausente)'
+                              : 'Não verificado'}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-slate-400">to_regclass(sem schema):</dt>
+                          <dd
+                            className={
+                              diagnostic.connection?.resolved_table
+                                ? 'text-emerald-400'
+                                : 'text-rose-400'
+                            }
+                          >
+                            {diagnostic.connection
+                              ? diagnostic.connection.resolved_table ?? 'null (não resolvida)'
+                              : 'Não verificado'}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2 sm:col-span-2">
+                          <dt className="text-slate-400">SELECT COUNT(*) public:</dt>
+                          <dd
+                            className={
+                              diagnostic.tableReadExecuted && !diagnostic.tableReadError
+                                ? 'text-emerald-400'
+                                : 'text-rose-400'
+                            }
+                          >
+                            {diagnostic.tableReadExecuted && !diagnostic.tableReadError
+                              ? `${diagnostic.episodeCount ?? 0} registro(s)`
+                              : diagnostic.connectionEstablished
+                                ? 'Falhou'
+                                : 'Não executado (sem conexão)'}
+                          </dd>
+                        </div>
+                        {diagnostic.rawResultShape && (
+                          <div className="flex justify-between gap-2 sm:col-span-2 text-slate-400">
+                            <dt>Retorno driver Neon:</dt>
+                            <dd className="text-slate-300 truncate">{diagnostic.rawResultShape}</dd>
                           </div>
-                          <div className="flex justify-between gap-2">
-                            <dt className="text-slate-400">current_schema:</dt>
-                            <dd className="text-slate-200">
-                              {diagnostic.connection.schema ?? 'null'}
-                            </dd>
-                          </div>
-                          <div className="flex justify-between gap-2">
-                            <dt className="text-slate-400">current_user:</dt>
-                            <dd className="text-slate-200">
-                              {diagnostic.connection.user ?? 'null'}
-                            </dd>
-                          </div>
-                          <div className="flex justify-between gap-2">
-                            <dt className="text-slate-400">search_path:</dt>
-                            <dd className="text-slate-200">
-                              {diagnostic.connection.search_path ?? 'null'}
-                            </dd>
-                          </div>
-                          <div className="flex justify-between gap-2">
-                            <dt className="text-slate-400">public.player_episodes:</dt>
-                            <dd
-                              className={
-                                diagnostic.connection.public_table
-                                  ? 'text-emerald-400'
-                                  : 'text-rose-400'
-                              }
-                            >
-                              {diagnostic.connection.public_table ?? 'null'}
-                            </dd>
-                          </div>
-                          <div className="flex justify-between gap-2">
-                            <dt className="text-slate-400">player_episodes:</dt>
-                            <dd
-                              className={
-                                diagnostic.connection.resolved_table
-                                  ? 'text-emerald-400'
-                                  : 'text-rose-400'
-                              }
-                            >
-                              {diagnostic.connection.resolved_table ?? 'null'}
-                            </dd>
-                          </div>
-                          <div className="flex justify-between gap-2">
-                            <dt className="text-slate-400">inet_server_addr:</dt>
-                            <dd className="text-slate-200">
-                              {diagnostic.connection.server_address ?? 'null'}
-                            </dd>
-                          </div>
-                          <div className="flex justify-between gap-2">
-                            <dt className="text-slate-400">inet_server_port:</dt>
-                            <dd className="text-slate-200">
-                              {diagnostic.connection.server_port ?? 'null'}
-                            </dd>
-                          </div>
-                        </dl>
-                      ) : (
-                        <div className="bg-rose-950/30 border border-rose-500/30 rounded-lg p-3 font-mono text-rose-300">
-                          Falha na consulta de diagnóstico
-                          {diagnostic.queryErrorCode ? ` [${diagnostic.queryErrorCode}]` : ''}:{' '}
-                          {diagnostic.queryError ?? 'Erro desconhecido'}
+                        )}
+                      </dl>
+
+                      {(diagnostic.connectionError ||
+                        diagnostic.diagnosticQueryError ||
+                        diagnostic.tableReadError ||
+                        diagnostic.unqualifiedTableReadError) && (
+                        <div className="bg-rose-950/30 border border-rose-500/30 rounded-lg p-3 font-mono text-rose-300 space-y-1.5">
+                          {diagnostic.connectionError && (
+                            <div>
+                              Falha na conexão ({diagnostic.connectionError.name}
+                              {diagnostic.connectionError.code
+                                ? ` [${diagnostic.connectionError.code}]`
+                                : ''}
+                              ): {diagnostic.connectionError.message}
+                            </div>
+                          )}
+                          {diagnostic.diagnosticQueryError && (
+                            <div>
+                              Falha na consulta de diagnóstico ({diagnostic.diagnosticQueryError.name}
+                              {diagnostic.diagnosticQueryError.code
+                                ? ` [${diagnostic.diagnosticQueryError.code}]`
+                                : ''}
+                              ): {diagnostic.diagnosticQueryError.message}
+                            </div>
+                          )}
+                          {diagnostic.tableReadError && (
+                            <div>
+                              Falha em SELECT COUNT(*) public.player_episodes (
+                              {diagnostic.tableReadError.name}
+                              {diagnostic.tableReadError.code
+                                ? ` [${diagnostic.tableReadError.code}]`
+                                : ''}
+                              ): {diagnostic.tableReadError.message}
+                            </div>
+                          )}
+                          {diagnostic.unqualifiedTableReadError && (
+                            <div>
+                              Falha em SELECT COUNT(*) player_episodes (
+                              {diagnostic.unqualifiedTableReadError.name}
+                              {diagnostic.unqualifiedTableReadError.code
+                                ? ` [${diagnostic.unqualifiedTableReadError.code}]`
+                                : ''}
+                              ): {diagnostic.unqualifiedTableReadError.message}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
