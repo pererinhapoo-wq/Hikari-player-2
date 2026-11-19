@@ -65,7 +65,7 @@ export async function runMigrations(): Promise<void> {
       console.log(`[MIGRATION RUNNER OK] 5/5 colunas force_proxy verificadas e ativas no banco Neon.`);
     } else {
       const fixSql = missing
-        .map((c) => `ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS ${c} boolean DEFAULT NULL;`)
+        .map((c) => `ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS ${c} boolean DEFAULT true;`)
         .join('\n');
       console.warn(
         `[MIGRATION RUNNER WARNING] Atenção: ${presentCount}/5 colunas force_proxy presentes. Faltam: ${missing.join(', ')}\n` +

@@ -7,6 +7,7 @@ import {
   decideHlsErrorAction,
 } from '@/lib/hls-playback';
 import { buildSignedProxyPath, rewriteM3u8Playlist } from '@/lib/proxy-signing';
+import { diagnoseEpisodeSources, diagnoseVideoSource } from '@/lib/source-diagnostics';
 import { getUpstreamHeaders, handleProxyStreamRequest } from '@/lib/stream-proxy';
 import type { PlayableSource } from '@/lib/types';
 import {
@@ -331,7 +332,214 @@ describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () =
     });
     const upstreamHeaders = getUpstreamHeaders(new URL(MAXIMAIMG_TEST_URL), clientReq);
     expect(upstreamHeaders['Referer']).toBe('https://api.anivideo.net/');
-    expect(upstreamHeaders['Origin']).toBe('https://api.anivideo.net');
+    expect(upstreamHeaders['Origin']).toBeUndefined();
     expect(upstreamHeaders['Range']).toBe('bytes=0-100');
+  });
+
+  it('11. aplica mapa de Referer (vazio para mywallpaper-4k-image.net, fallback origin) sem nunca enviar Origin', () => {
+    const wallpaperReq = new Request('http://localhost/api/proxy/stream');
+    const wallpaperHeaders = getUpstreamHeaders(
+      new URL('https://cdn-s01.mywallpaper-4k-image.net/stream/01/index.m3u8'),
+      wallpaperReq
+    );
+    expect(wallpaperHeaders['Referer']).toBeUndefined();
+    expect(wallpaperHeaders['Origin']).toBeUndefined();
+    expect(wallpaperHeaders['User-Agent']).toContain('Chrome/');
+
+    const genericHeaders = getUpstreamHeaders(
+      new URL('https://cdn.outroprovedor.com/video/ep1.mp4'),
+      wallpaperReq
+    );
+    expect(genericHeaders['Referer']).toBe('https://cdn.outroprovedor.com/');
+    expect(genericHeaders['Origin']).toBeUndefined();
+  });
+
+  it('12. faz pass-through binário de segmento .webp contendo video/MP2T (200 e 206 Range) e reescreve URIs relativas .webp no manifesto', async () => {
+    const manifestUrl = 'https://cdn-s01.mywallpaper-4k-image.net/stream/anime/01/index.m3u8';
+    const rawM3u8 = [
+      '#EXTM3U',
+      '#EXT-X-TARGETDURATION:6',
+      '#EXTINF:6.0,',
+      'seg-001.webp',
+      '#EXTINF:6.0,',
+      '720p/seg-002.webp?tok=1',
+      '#EXT-X-ENDLIST',
+    ].join('\n');
+
+    const signedManifest = buildSignedProxyPath(manifestUrl);
+    const manifestRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${signedManifest}`),
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(rawM3u8, {
+            status: 200,
+            headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+          }),
+        }),
+      }
+    );
+    expect(manifestRes.status).toBe(200);
+    const rewrittenBody = await manifestRes.text();
+    expect(rewrittenBody).toContain(
+      encodeURIComponent('https://cdn-s01.mywallpaper-4k-image.net/stream/anime/01/seg-001.webp')
+    );
+    expect(rewrittenBody).toContain(
+      encodeURIComponent('https://cdn-s01.mywallpaper-4k-image.net/stream/anime/01/720p/seg-002.webp?tok=1')
+    );
+
+    // Segmento .webp com MPEG-TS (sync byte 0x47) servido como image/webp pela CDN
+    const tsBytes = new Uint8Array([0x47, 0x40, 0x00, 0x10, 0xff, 0xfe, 0x80, 0x01, 0x02, 0x03]);
+    const segUrl = 'https://cdn-s01.mywallpaper-4k-image.net/stream/anime/01/seg-001.webp';
+    const signedSeg = buildSignedProxyPath(segUrl);
+
+    const seg200 = await handleProxyStreamRequest(
+      new Request(`http://localhost${signedSeg}`),
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(tsBytes, {
+            status: 200,
+            headers: {
+              'content-type': 'image/webp',
+              'content-length': String(tsBytes.byteLength),
+            },
+          }),
+        }),
+      }
+    );
+    expect(seg200.status).toBe(200);
+    expect(seg200.headers.get('content-type')).toBe('video/mp2t');
+    expect(seg200.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(Array.from(new Uint8Array(await seg200.arrayBuffer()))).toEqual(Array.from(tsBytes));
+
+    // Requisição com Range -> 206
+    const seg206 = await handleProxyStreamRequest(
+      new Request(`http://localhost${signedSeg}`, { headers: { Range: 'bytes=0-3' } }),
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(tsBytes.slice(0, 4), {
+            status: 206,
+            headers: {
+              'content-type': 'image/webp',
+              'content-length': '4',
+              'content-range': 'bytes 0-3/10',
+              'accept-ranges': 'bytes',
+            },
+          }),
+        }),
+      }
+    );
+    expect(seg206.status).toBe(206);
+    expect(seg206.headers.get('content-type')).toBe('video/mp2t');
+    expect(seg206.headers.get('content-range')).toBe('bytes 0-3/10');
+    expect(Array.from(new Uint8Array(await seg206.arrayBuffer()))).toEqual(Array.from(tsBytes.slice(0, 4)));
+  });
+
+  it('13. classifica corretamente fontes no diagnóstico do servidor (maximaimg, mywallpaper-4k-image, direto ok e bloqueado)', async () => {
+    const reports = await diagnoseEpisodeSources(
+      [
+        {
+          slot: 1,
+          url: 'https://cdn-sv01.maximaimg.online/stream/b/ep01/index.m3u8',
+        },
+        {
+          slot: 2,
+          url: 'https://cdn-s01.mywallpaper-4k-image.net/stream/ep01/index.m3u8',
+        },
+        {
+          slot: 3,
+          url: 'https://cdn.cors-ok.example.com/ep01/index.m3u8',
+        },
+        {
+          slot: 4,
+          url: 'https://cdn.dead.example.com/ep01/index.m3u8',
+        },
+      ],
+      {
+        fetchWithRedirects: async (url, options) => {
+          const headers = options?.headers ?? {};
+          const hasUa = Boolean(headers['User-Agent']);
+          const referer = headers['Referer'];
+
+          if (url.includes('maximaimg.online')) {
+            if (referer === 'https://api.anivideo.net/' && hasUa) {
+              return {
+                finalUrl: url,
+                response: new Response('#EXTM3U\n#EXT-X-VERSION:3\nseg1.ts', {
+                  status: 200,
+                  headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+                }),
+              };
+            }
+            return { finalUrl: url, response: new Response('Forbidden', { status: 403 }) };
+          }
+
+          if (url.includes('mywallpaper-4k-image.net')) {
+            // Não envia Referer; responde 200 sem ACAO
+            expect(referer).toBeUndefined();
+            return {
+              finalUrl: url,
+              response: new Response('#EXTM3U\n#EXT-X-TARGETDURATION:6\nseg1.webp', {
+                status: 200,
+                headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+              }),
+            };
+          }
+
+          if (url.includes('cors-ok.example.com')) {
+            return {
+              finalUrl: url,
+              response: new Response('#EXTM3U\nseg1.ts', {
+                status: 200,
+                headers: {
+                  'content-type': 'application/vnd.apple.mpegurl',
+                  'access-control-allow-origin': '*',
+                },
+              }),
+            };
+          }
+
+          return { finalUrl: url, response: new Response('Forbidden', { status: 403 }) };
+        },
+      }
+    );
+
+    expect(reports).toHaveLength(4);
+    expect(reports[0].verdictLabel).toBe('proxy necessário');
+    expect(reports[0].noHeaders.status).toBe(403);
+    expect(reports[0].withHeaders.status).toBe(200);
+    expect(reports[0].withHeaders.sentReferer).toBe('https://api.anivideo.net/');
+    expect(reports[0].withHeaders.firstLine).toBe('#EXTM3U');
+
+    expect(reports[1].verdictLabel).toBe('proxy necessário');
+    expect(reports[1].noHeaders.status).toBe(200);
+    expect(reports[1].noHeaders.hasAcao).toBe(false);
+    expect(reports[1].withHeaders.status).toBe(200);
+    expect(reports[1].withHeaders.sentReferer).toBeNull();
+    expect(reports[1].withHeaders.firstLine).toBe('#EXTM3U');
+
+    expect(reports[2].verdictLabel).toBe('direto ok');
+    expect(reports[2].noHeaders.accessControlAllowOrigin).toBe('*');
+
+    expect(reports[3].verdictLabel).toBe('bloqueado');
+    expect(reports[3].withHeaders.status).toBe(403);
+
+    // Fonte iframe responde direto ok quando 200 mesmo sem ACAO
+    const iframeReport = await diagnoseVideoSource(
+      { slot: 5, url: 'https://www.anitube22.vip/playerricas.php?name=1.mp4' },
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response('<!doctype html><html></html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html' },
+          }),
+        }),
+      }
+    );
+    expect(iframeReport.detectedKind).toBe('iframe');
+    expect(iframeReport.verdictLabel).toBe('direto ok');
   });
 });

@@ -1,5 +1,6 @@
 import { createFileRoute, useRouter } from '@tanstack/react-router';
 import {
+  Activity,
   AlertTriangle,
   Check,
   Copy,
@@ -20,10 +21,17 @@ import {
   adminDiagnoseDatabaseFn,
   adminLoginFn,
   adminLogoutFn,
+  adminTestEpisodeSourcesFn,
+  adminTestSourceFn,
   adminUpdateEpisodeFn,
   getAdminDashboardFn,
 } from '@/lib/server-fns';
-import type { DatabaseDiagnosticResult, EpisodeDto, EpisodeFormPayload } from '@/lib/types';
+import type {
+  DatabaseDiagnosticResult,
+  EpisodeDto,
+  EpisodeFormPayload,
+  SourceTestReport,
+} from '@/lib/types';
 import {
   detectSourceKind,
   type ExplicitSourceKind,
@@ -120,6 +128,17 @@ function AdminPage() {
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
 
+  const [slotTests, setSlotTests] = useState<Record<number, SourceTestReport>>({});
+  const [slotTesting, setSlotTesting] = useState<Record<number, boolean>>({});
+  const [slotTestErrors, setSlotTestErrors] = useState<Record<number, string>>({});
+  const [formAllTesting, setFormAllTesting] = useState(false);
+  const [formAllReports, setFormAllReports] = useState<SourceTestReport[] | null>(null);
+  const [formAllError, setFormAllError] = useState<string | null>(null);
+
+  const [episodeTests, setEpisodeTests] = useState<Record<string, SourceTestReport[]>>({});
+  const [episodeTestingId, setEpisodeTestingId] = useState<string | null>(null);
+  const [episodeTestErrors, setEpisodeTestErrors] = useState<Record<string, string>>({});
+
   const runDiagnostic = async () => {
     setDiagnosticBusy(true);
     setDiagnosticError(null);
@@ -211,6 +230,10 @@ function AdminPage() {
     });
     setFormError(null);
     setPosterPreviewError(false);
+    setSlotTests({});
+    setSlotTestErrors({});
+    setFormAllReports(null);
+    setFormAllError(null);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
 
@@ -219,6 +242,109 @@ function AdminPage() {
     setForm(EMPTY_FORM);
     setFormError(null);
     setPosterPreviewError(false);
+    setSlotTests({});
+    setSlotTestErrors({});
+    setFormAllReports(null);
+    setFormAllError(null);
+  };
+
+  const handleTestFormSlot = async (
+    slot: 1 | 2 | 3 | 4 | 5,
+    label: string,
+    url: string,
+    kind: ExplicitSourceKind | ''
+  ) => {
+    setSlotTesting((prev) => ({ ...prev, [slot]: true }));
+    setSlotTestErrors((prev) => {
+      const next = { ...prev };
+      delete next[slot];
+      return next;
+    });
+    try {
+      const res = await adminTestSourceFn({
+        data: { slot, label, url, kind },
+      });
+      if (!res.ok) {
+        setSlotTestErrors((prev) => ({ ...prev, [slot]: res.error }));
+      } else {
+        setSlotTests((prev) => ({ ...prev, [slot]: res.report }));
+      }
+    } catch (err) {
+      setSlotTestErrors((prev) => ({
+        ...prev,
+        [slot]: err instanceof Error ? err.message : 'Falha ao testar fonte.',
+      }));
+    } finally {
+      setSlotTesting((prev) => ({ ...prev, [slot]: false }));
+    }
+  };
+
+  const handleTestAllFormSources = async () => {
+    const sources = PLAYER_SLOTS.map(({ field, kindField, slot, label }) => ({
+      slot,
+      label,
+      url: String(form[field] ?? '').trim(),
+      kind: (form[kindField] ?? '') as ExplicitSourceKind | '',
+    })).filter((item) => item.url.length > 0);
+
+    if (sources.length === 0) return;
+
+    setFormAllTesting(true);
+    setFormAllError(null);
+    try {
+      const res = await adminTestEpisodeSourcesFn({ data: { sources } });
+      if (!res.ok) {
+        setFormAllError(res.error);
+        setFormAllReports(null);
+      } else {
+        setFormAllReports(res.reports);
+        const bySlot: Record<number, SourceTestReport> = {};
+        for (const r of res.reports) {
+          bySlot[r.slot] = r;
+        }
+        setSlotTests((prev) => ({ ...prev, ...bySlot }));
+      }
+    } catch (err) {
+      setFormAllError(
+        err instanceof Error ? err.message : 'Falha ao testar todas as fontes.'
+      );
+    } finally {
+      setFormAllTesting(false);
+    }
+  };
+
+  const handleTestEpisodeSources = async (ep: EpisodeDto) => {
+    const sources = [
+      { slot: 1 as const, label: 'Player 1', url: ep.video_url, kind: (ep.source_kind ?? '') as ExplicitSourceKind | '' },
+      { slot: 2 as const, label: 'Player 2', url: ep.video_url_2 ?? '', kind: (ep.source_kind_2 ?? '') as ExplicitSourceKind | '' },
+      { slot: 3 as const, label: 'Player 3', url: ep.video_url_3 ?? '', kind: (ep.source_kind_3 ?? '') as ExplicitSourceKind | '' },
+      { slot: 4 as const, label: 'Player 4', url: ep.video_url_4 ?? '', kind: (ep.source_kind_4 ?? '') as ExplicitSourceKind | '' },
+      { slot: 5 as const, label: 'Player 5', url: ep.video_url_5 ?? '', kind: (ep.source_kind_5 ?? '') as ExplicitSourceKind | '' },
+    ].filter((item) => item.url.trim().length > 0);
+
+    if (sources.length === 0) return;
+
+    setEpisodeTestingId(ep.id);
+    setEpisodeTestErrors((prev) => {
+      const next = { ...prev };
+      delete next[ep.id];
+      return next;
+    });
+    try {
+      const res = await adminTestEpisodeSourcesFn({ data: { sources } });
+      if (!res.ok) {
+        setEpisodeTestErrors((prev) => ({ ...prev, [ep.id]: res.error }));
+      } else {
+        setEpisodeTests((prev) => ({ ...prev, [ep.id]: res.reports }));
+      }
+    } catch (err) {
+      setEpisodeTestErrors((prev) => ({
+        ...prev,
+        [ep.id]: err instanceof Error ? err.message : 'Falha ao testar fontes.',
+      }));
+    } finally {
+      setEpisodeTestingId(null);
+    }
   };
 
   const handleSaveEpisode = async (e: FormEvent) => {
@@ -524,13 +650,27 @@ function AdminPage() {
                 </div>
 
                 <div className="pt-2 border-t border-white/10 space-y-3.5">
-                  <div className="flex flex-col gap-0.5">
-                    <span className="text-xs font-medium text-slate-200">
-                      Fontes de vídeo (até 5 URLs)
-                    </span>
-                    <span className="text-[11px] text-slate-400">
-                      Aceita URL direta de mídia (.m3u8, .mp4, .webm) ou página de player do provedor (playerricas.php, .php, embed). Se kind ficar vazio, a detecção é automática.
-                    </span>
+                  <div className="flex items-start justify-between gap-2">
+                    <div className="flex flex-col gap-0.5">
+                      <span className="text-xs font-medium text-slate-200">
+                        Fontes de vídeo (até 5 URLs)
+                      </span>
+                      <span className="text-[11px] text-slate-400">
+                        Aceita URL direta de mídia (.m3u8, .mp4, .webm) ou página de player do provedor (playerricas.php, .php, embed). Fontes hls/mp4 usam proxy por padrão; iframe toca direto.
+                      </span>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={
+                        formAllTesting ||
+                        !PLAYER_SLOTS.some(({ field }) => String(form[field] ?? '').trim().length > 0)
+                      }
+                      onClick={() => void handleTestAllFormSources()}
+                      className="h-8 px-2.5 rounded-lg border border-white/10 text-[11px] font-medium text-slate-200 hover:bg-white/5 disabled:opacity-40 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                    >
+                      <Activity className="w-3.5 h-3.5" />
+                      {formAllTesting ? 'Testando...' : 'Testar todas as fontes'}
+                    </button>
                   </div>
 
                   {PLAYER_SLOTS.map(({ field, kindField, slot, label, required }) => {
@@ -544,10 +684,13 @@ function AdminPage() {
                     const detectedKind = trimmed
                       ? detectSourceKind(trimmed, selectedKind || null)
                       : null;
+                    const slotReport = slotTests[slot];
+                    const slotTestingNow = Boolean(slotTesting[slot]);
+                    const slotError = slotTestErrors[slot];
 
                     return (
-                      <div key={field}>
-                        <div className="flex items-center justify-between gap-2 mb-1">
+                      <div key={field} className="space-y-1.5">
+                        <div className="flex items-center justify-between gap-2">
                           <label
                             htmlFor={`ep-${field}`}
                             className="text-xs font-medium text-slate-300"
@@ -569,6 +712,19 @@ function AdminPage() {
                                 URL inválida
                               </span>
                             ) : null}
+                            {trimmed && (
+                              <button
+                                type="button"
+                                disabled={slotTestingNow || Boolean(check && !check.valid)}
+                                onClick={() =>
+                                  void handleTestFormSlot(slot, label, trimmed, selectedKind)
+                                }
+                                className="px-2 py-0.5 rounded border border-white/15 bg-[#090B10] hover:bg-white/5 disabled:opacity-40 text-[11px] font-medium text-slate-200 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                              >
+                                <Activity className="w-3 h-3" />
+                                {slotTestingNow ? 'Testando...' : 'Testar fonte'}
+                              </button>
+                            )}
                           </div>
                         </div>
                         <div className="flex items-center gap-2">
@@ -605,9 +761,71 @@ function AdminPage() {
                             <option value="mp4">mp4</option>
                           </select>
                         </div>
+
+                        {slotError && (
+                          <p className="text-[11px] text-rose-400" role="alert">
+                            {slotError}
+                          </p>
+                        )}
+
+                        {slotReport && (
+                          <div className="rounded-lg bg-[#090B10] border border-white/10 p-2.5 text-[11px] space-y-1 font-mono">
+                            <div className="flex items-center justify-between gap-2">
+                              <span
+                                className={`font-semibold ${
+                                  slotReport.verdict === 'direto_ok'
+                                    ? 'text-emerald-400'
+                                    : slotReport.verdict === 'proxy_necessario'
+                                      ? 'text-amber-300'
+                                      : 'text-rose-400'
+                                }`}
+                              >
+                                Veredito: {slotReport.verdictLabel}
+                              </span>
+                              <span className="text-slate-400">
+                                kind: {slotReport.detectedKind}
+                              </span>
+                            </div>
+                            <p className="font-sans text-slate-300 leading-snug">
+                              {slotReport.verdictReason}
+                            </p>
+                            <div className="text-slate-300">
+                              Sem cabeçalhos:{' '}
+                              {slotReport.noHeaders.status !== null
+                                ? `HTTP ${slotReport.noHeaders.status}`
+                                : slotReport.noHeaders.error ?? 'erro'}{' '}
+                              · ACAO:{' '}
+                              {slotReport.noHeaders.accessControlAllowOrigin ?? 'ausente'}
+                            </div>
+                            <div className="text-slate-300">
+                              UA + Referer ({slotReport.withHeaders.sentReferer ?? 'vazio'}):{' '}
+                              {slotReport.withHeaders.status !== null
+                                ? `HTTP ${slotReport.withHeaders.status}`
+                                : slotReport.withHeaders.error ?? 'erro'}{' '}
+                              · ACAO:{' '}
+                              {slotReport.withHeaders.accessControlAllowOrigin ?? 'ausente'}
+                            </div>
+                            {(slotReport.withHeaders.firstLine || slotReport.noHeaders.firstLine) && (
+                              <div className="text-emerald-300/90 truncate">
+                                1ª linha:{' '}
+                                {slotReport.withHeaders.firstLine ?? slotReport.noHeaders.firstLine}
+                              </div>
+                            )}
+                          </div>
+                        )}
                       </div>
                     );
                   })}
+
+                  {formAllError && (
+                    <p className="text-xs text-rose-400" role="alert">
+                      {formAllError}
+                    </p>
+                  )}
+
+                  {formAllReports && formAllReports.length > 0 && (
+                    <SourceDiagnosticTable reports={formAllReports} />
+                  )}
                 </div>
 
                 {formError && (
@@ -988,7 +1206,20 @@ function AdminPage() {
                             </p>
                           </div>
 
-                          <div className="flex items-center gap-1.5 shrink-0">
+                          <div className="flex flex-wrap items-center gap-1.5 shrink-0">
+                            <button
+                              type="button"
+                              disabled={episodeTestingId === ep.id}
+                              onClick={() => void handleTestEpisodeSources(ep)}
+                              aria-label={`Testar todas as fontes de ${ep.title}`}
+                              className="h-8 px-2.5 rounded-lg border border-white/10 text-xs text-slate-200 hover:bg-white/5 disabled:opacity-50 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                            >
+                              <Activity className="w-3.5 h-3.5" />
+                              {episodeTestingId === ep.id
+                                ? 'Testando...'
+                                : 'Testar todas as fontes'}
+                            </button>
+
                             <button
                               type="button"
                               onClick={() => handleEditStart(ep)}
@@ -1067,6 +1298,16 @@ function AdminPage() {
                             Abrir
                           </a>
                         </div>
+
+                        {episodeTestErrors[ep.id] && (
+                          <p className="text-xs text-rose-400" role="alert">
+                            {episodeTestErrors[ep.id]}
+                          </p>
+                        )}
+
+                        {episodeTests[ep.id] && episodeTests[ep.id].length > 0 && (
+                          <SourceDiagnosticTable reports={episodeTests[ep.id]} />
+                        )}
                       </li>
                     );
                   })}
@@ -1076,6 +1317,77 @@ function AdminPage() {
           </div>
         )}
       </main>
+    </div>
+  );
+}
+
+function SourceDiagnosticTable({ reports }: { reports: SourceTestReport[] }) {
+  return (
+    <div className="overflow-x-auto rounded-lg border border-white/10 bg-[#090B10]">
+      <table className="w-full text-left border-collapse text-[11px]">
+        <thead>
+          <tr className="border-b border-white/10 text-slate-400">
+            <th className="px-2.5 py-2 font-medium">Fonte</th>
+            <th className="px-2.5 py-2 font-medium">Sem cabeçalhos</th>
+            <th className="px-2.5 py-2 font-medium">UA + Referer</th>
+            <th className="px-2.5 py-2 font-medium">Veredito</th>
+            <th className="px-2.5 py-2 font-medium">1ª linha (200)</th>
+          </tr>
+        </thead>
+        <tbody className="divide-y divide-white/10 font-mono">
+          {reports.map((report) => {
+            const firstLine =
+              report.withHeaders.firstLine ?? report.noHeaders.firstLine ?? '—';
+            return (
+              <tr key={`${report.slot}-${report.url}`} className="align-top text-slate-200">
+                <td className="px-2.5 py-2 whitespace-nowrap">
+                  <div className="font-semibold text-white">{report.label}</div>
+                  <div className="text-[10px] text-slate-400">{report.detectedKind}</div>
+                </td>
+                <td className="px-2.5 py-2 whitespace-nowrap">
+                  <div>
+                    {report.noHeaders.status !== null
+                      ? `HTTP ${report.noHeaders.status}`
+                      : report.noHeaders.error ?? 'erro'}
+                  </div>
+                  <div className="text-[10px] text-slate-400">
+                    ACAO: {report.noHeaders.accessControlAllowOrigin ?? 'ausente'}
+                  </div>
+                </td>
+                <td className="px-2.5 py-2 whitespace-nowrap">
+                  <div>
+                    {report.withHeaders.status !== null
+                      ? `HTTP ${report.withHeaders.status}`
+                      : report.withHeaders.error ?? 'erro'}
+                  </div>
+                  <div className="text-[10px] text-slate-400">
+                    ACAO: {report.withHeaders.accessControlAllowOrigin ?? 'ausente'}
+                  </div>
+                  <div className="text-[10px] text-slate-500">
+                    Ref: {report.withHeaders.sentReferer ?? 'vazio'}
+                  </div>
+                </td>
+                <td className="px-2.5 py-2 whitespace-nowrap">
+                  <span
+                    className={`font-semibold ${
+                      report.verdict === 'direto_ok'
+                        ? 'text-emerald-400'
+                        : report.verdict === 'proxy_necessario'
+                          ? 'text-amber-300'
+                          : 'text-rose-400'
+                    }`}
+                  >
+                    {report.verdictLabel}
+                  </span>
+                </td>
+                <td className="px-2.5 py-2 max-w-[200px] truncate text-emerald-300/90" title={firstLine}>
+                  {firstLine}
+                </td>
+              </tr>
+            );
+          })}
+        </tbody>
+      </table>
     </div>
   );
 }

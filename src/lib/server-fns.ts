@@ -31,6 +31,11 @@ import {
   updateEpisode,
 } from '@/lib/db';
 import { buildSignedProxyPath, createProxySignature } from '@/lib/proxy-signing';
+import {
+  diagnoseEpisodeSources,
+  diagnoseVideoSource,
+  type SourceTestInput,
+} from '@/lib/source-diagnostics';
 import type {
   AdminDashboardState,
   DatabaseDiagnosticResult,
@@ -38,8 +43,9 @@ import type {
   EpisodeFormPayload,
   PlayableSource,
   PublicEpisodeResult,
+  SourceTestReport,
 } from '@/lib/types';
-import { collectEpisodeSources } from '@/lib/video-sources';
+import { collectEpisodeSources, type ExplicitSourceKind } from '@/lib/video-sources';
 
 const WORKER_EXP_BUCKET_SECONDS = 60 * 60 * 6; // Janela de 6h para chave de cache estável no Worker
 
@@ -111,14 +117,29 @@ export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
       return { status: 'not_found' };
     }
 
+    const forceProxyBySlot: Record<1 | 2 | 3 | 4 | 5, boolean | null> = {
+      1: episode.force_proxy,
+      2: episode.force_proxy_2,
+      3: episode.force_proxy_3,
+      4: episode.force_proxy_4,
+      5: episode.force_proxy_5,
+    };
+
     const normalizedSources = collectEpisodeSources(episode);
-    const sources: PlayableSource[] = normalizedSources.map((src) => ({
-      ...src,
-      playUrl:
-        src.kind !== 'iframe' && src.needsProxy
+    const sources: PlayableSource[] = normalizedSources.map((src) => {
+      const shouldProxy =
+        src.kind !== 'iframe' &&
+        !src.requiresServerResolve &&
+        forceProxyBySlot[src.slot] !== false &&
+        src.needsProxy;
+      return {
+        ...src,
+        needsProxy: shouldProxy,
+        playUrl: shouldProxy
           ? resolveProxyPlayUrl(src.resolvedUrl)
           : src.resolvedUrl,
-    }));
+      };
+    });
 
     return {
       status: 'ok',
@@ -325,4 +346,65 @@ export const adminDiagnoseDatabaseFn = createServerFn({ method: 'POST' }).handle
     }
   }
 );
+
+export const adminTestSourceFn = createServerFn({ method: 'POST' })
+  .validator(
+    (data: {
+      slot?: number;
+      label?: string;
+      url: string;
+      kind?: ExplicitSourceKind | '' | null;
+    }) => ({
+      slot: ([1, 2, 3, 4, 5].includes(Number(data?.slot)) ? Number(data?.slot) : 1) as
+        | 1
+        | 2
+        | 3
+        | 4
+        | 5,
+      label: typeof data?.label === 'string' ? data.label : undefined,
+      url: typeof data?.url === 'string' ? data.url : '',
+      kind: data?.kind ?? null,
+    })
+  )
+  .handler(
+    async ({
+      data,
+    }): Promise<{ ok: true; report: SourceTestReport } | { ok: false; error: string }> => {
+      try {
+        requireAdminSession();
+        const report = await diagnoseVideoSource(data);
+        return { ok: true, report };
+      } catch (err) {
+        return {
+          ok: false,
+          error:
+            err instanceof Error ? err.message : 'Falha ao testar fonte no servidor.',
+        };
+      }
+    }
+  );
+
+export const adminTestEpisodeSourcesFn = createServerFn({ method: 'POST' })
+  .validator((data: { sources: SourceTestInput[] }) => ({
+    sources: Array.isArray(data?.sources) ? data.sources : [],
+  }))
+  .handler(
+    async ({
+      data,
+    }): Promise<{ ok: true; reports: SourceTestReport[] } | { ok: false; error: string }> => {
+      try {
+        requireAdminSession();
+        const reports = await diagnoseEpisodeSources(data.sources);
+        return { ok: true, reports };
+      } catch (err) {
+        return {
+          ok: false,
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Falha ao testar fontes do episódio no servidor.',
+        };
+      }
+    }
+  );
 

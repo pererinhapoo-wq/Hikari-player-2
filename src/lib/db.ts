@@ -133,11 +133,11 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
     source_kind_3: normalizeExplicitSourceKind(input.source_kind_3),
     source_kind_4: normalizeExplicitSourceKind(input.source_kind_4),
     source_kind_5: normalizeExplicitSourceKind(input.source_kind_5),
-    force_proxy: input.force_proxy ? true : null,
-    force_proxy_2: input.force_proxy_2 ? true : null,
-    force_proxy_3: input.force_proxy_3 ? true : null,
-    force_proxy_4: input.force_proxy_4 ? true : null,
-    force_proxy_5: input.force_proxy_5 ? true : null,
+    force_proxy: typeof input.force_proxy === 'boolean' ? input.force_proxy : true,
+    force_proxy_2: typeof input.force_proxy_2 === 'boolean' ? input.force_proxy_2 : true,
+    force_proxy_3: typeof input.force_proxy_3 === 'boolean' ? input.force_proxy_3 : true,
+    force_proxy_4: typeof input.force_proxy_4 === 'boolean' ? input.force_proxy_4 : true,
+    force_proxy_5: typeof input.force_proxy_5 === 'boolean' ? input.force_proxy_5 : true,
   };
 }
 
@@ -156,11 +156,11 @@ function mapEpisodeRow(row: Record<string, unknown>): PlayerEpisode {
     source_kind_3: normalizeExplicitSourceKind(row.source_kind_3),
     source_kind_4: normalizeExplicitSourceKind(row.source_kind_4),
     source_kind_5: normalizeExplicitSourceKind(row.source_kind_5),
-    force_proxy: row.force_proxy === true ? true : null,
-    force_proxy_2: row.force_proxy_2 === true ? true : null,
-    force_proxy_3: row.force_proxy_3 === true ? true : null,
-    force_proxy_4: row.force_proxy_4 === true ? true : null,
-    force_proxy_5: row.force_proxy_5 === true ? true : null,
+    force_proxy: row.force_proxy === false ? false : true,
+    force_proxy_2: row.force_proxy_2 === false ? false : true,
+    force_proxy_3: row.force_proxy_3 === false ? false : true,
+    force_proxy_4: row.force_proxy_4 === false ? false : true,
+    force_proxy_5: row.force_proxy_5 === false ? false : true,
     created_at: new Date(String(row.created_at)).toISOString(),
     updated_at: new Date(String(row.updated_at)).toISOString(),
   };
@@ -172,11 +172,11 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
     const rows = await sql`
       SELECT id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
              source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
-             COALESCE(force_proxy, false) AS force_proxy,
-             COALESCE(force_proxy_2, false) AS force_proxy_2,
-             COALESCE(force_proxy_3, false) AS force_proxy_3,
-             COALESCE(force_proxy_4, false) AS force_proxy_4,
-             COALESCE(force_proxy_5, false) AS force_proxy_5,
+             COALESCE(force_proxy, true) AS force_proxy,
+             COALESCE(force_proxy_2, true) AS force_proxy_2,
+             COALESCE(force_proxy_3, true) AS force_proxy_3,
+             COALESCE(force_proxy_4, true) AS force_proxy_4,
+             COALESCE(force_proxy_5, true) AS force_proxy_5,
              created_at, updated_at
       FROM public.player_episodes
       ORDER BY created_at DESC
@@ -206,11 +206,11 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
           source_kind_3: data.source_kind_3 ?? null,
           source_kind_4: data.source_kind_4 ?? null,
           source_kind_5: data.source_kind_5 ?? null,
-          force_proxy: data.force_proxy === true ? true : null,
-          force_proxy_2: data.force_proxy_2 === true ? true : null,
-          force_proxy_3: data.force_proxy_3 === true ? true : null,
-          force_proxy_4: data.force_proxy_4 === true ? true : null,
-          force_proxy_5: data.force_proxy_5 === true ? true : null,
+          force_proxy: data.force_proxy === false ? false : true,
+          force_proxy_2: data.force_proxy_2 === false ? false : true,
+          force_proxy_3: data.force_proxy_3 === false ? false : true,
+          force_proxy_4: data.force_proxy_4 === false ? false : true,
+          force_proxy_5: data.force_proxy_5 === false ? false : true,
         });
       });
     }
@@ -229,11 +229,11 @@ export async function getEpisodeById(id: string): Promise<PlayerEpisode | null> 
     const rows = await sql`
       SELECT id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
              source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
-             COALESCE(force_proxy, false) AS force_proxy,
-             COALESCE(force_proxy_2, false) AS force_proxy_2,
-             COALESCE(force_proxy_3, false) AS force_proxy_3,
-             COALESCE(force_proxy_4, false) AS force_proxy_4,
-             COALESCE(force_proxy_5, false) AS force_proxy_5,
+             COALESCE(force_proxy, true) AS force_proxy,
+             COALESCE(force_proxy_2, true) AS force_proxy_2,
+             COALESCE(force_proxy_3, true) AS force_proxy_3,
+             COALESCE(force_proxy_4, true) AS force_proxy_4,
+             COALESCE(force_proxy_5, true) AS force_proxy_5,
              created_at, updated_at
       FROM public.player_episodes
       WHERE id = ${cleanId}
@@ -261,11 +261,11 @@ export async function getEpisodeById(id: string): Promise<PlayerEpisode | null> 
         source_kind_3: data.source_kind_3 ?? null,
         source_kind_4: data.source_kind_4 ?? null,
         source_kind_5: data.source_kind_5 ?? null,
-        force_proxy: data.force_proxy === true ? true : null,
-        force_proxy_2: data.force_proxy_2 === true ? true : null,
-        force_proxy_3: data.force_proxy_3 === true ? true : null,
-        force_proxy_4: data.force_proxy_4 === true ? true : null,
-        force_proxy_5: data.force_proxy_5 === true ? true : null,
+        force_proxy: data.force_proxy === false ? false : true,
+        force_proxy_2: data.force_proxy_2 === false ? false : true,
+        force_proxy_3: data.force_proxy_3 === false ? false : true,
+        force_proxy_4: data.force_proxy_4 === false ? false : true,
+        force_proxy_5: data.force_proxy_5 === false ? false : true,
       });
     }
     throw err;
@@ -297,19 +297,19 @@ export async function createEpisode(rawInput: EpisodeWriteInput): Promise<Player
         ${input.source_kind_3 ?? null},
         ${input.source_kind_4 ?? null},
         ${input.source_kind_5 ?? null},
-        ${input.force_proxy ?? null},
-        ${input.force_proxy_2 ?? null},
-        ${input.force_proxy_3 ?? null},
-        ${input.force_proxy_4 ?? null},
-        ${input.force_proxy_5 ?? null}
+        ${input.force_proxy ?? true},
+        ${input.force_proxy_2 ?? true},
+        ${input.force_proxy_3 ?? true},
+        ${input.force_proxy_4 ?? true},
+        ${input.force_proxy_5 ?? true}
       )
       RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
                 source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
-                COALESCE(force_proxy, false) AS force_proxy,
-                COALESCE(force_proxy_2, false) AS force_proxy_2,
-                COALESCE(force_proxy_3, false) AS force_proxy_3,
-                COALESCE(force_proxy_4, false) AS force_proxy_4,
-                COALESCE(force_proxy_5, false) AS force_proxy_5,
+                COALESCE(force_proxy, true) AS force_proxy,
+                COALESCE(force_proxy_2, true) AS force_proxy_2,
+                COALESCE(force_proxy_3, true) AS force_proxy_3,
+                COALESCE(force_proxy_4, true) AS force_proxy_4,
+                COALESCE(force_proxy_5, true) AS force_proxy_5,
                 created_at, updated_at
     `;
     return mapEpisodeRow((rows as Array<Record<string, unknown>>)[0]);
@@ -365,20 +365,20 @@ export async function updateEpisode(
         source_kind_3 = ${input.source_kind_3 ?? null},
         source_kind_4 = ${input.source_kind_4 ?? null},
         source_kind_5 = ${input.source_kind_5 ?? null},
-        force_proxy = ${input.force_proxy ?? null},
-        force_proxy_2 = ${input.force_proxy_2 ?? null},
-        force_proxy_3 = ${input.force_proxy_3 ?? null},
-        force_proxy_4 = ${input.force_proxy_4 ?? null},
-        force_proxy_5 = ${input.force_proxy_5 ?? null},
+        force_proxy = ${input.force_proxy ?? true},
+        force_proxy_2 = ${input.force_proxy_2 ?? true},
+        force_proxy_3 = ${input.force_proxy_3 ?? true},
+        force_proxy_4 = ${input.force_proxy_4 ?? true},
+        force_proxy_5 = ${input.force_proxy_5 ?? true},
         updated_at = NOW()
       WHERE id = ${cleanId}
       RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
                 source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
-                COALESCE(force_proxy, false) AS force_proxy,
-                COALESCE(force_proxy_2, false) AS force_proxy_2,
-                COALESCE(force_proxy_3, false) AS force_proxy_3,
-                COALESCE(force_proxy_4, false) AS force_proxy_4,
-                COALESCE(force_proxy_5, false) AS force_proxy_5,
+                COALESCE(force_proxy, true) AS force_proxy,
+                COALESCE(force_proxy_2, true) AS force_proxy_2,
+                COALESCE(force_proxy_3, true) AS force_proxy_3,
+                COALESCE(force_proxy_4, true) AS force_proxy_4,
+                COALESCE(force_proxy_5, true) AS force_proxy_5,
                 created_at, updated_at
     `;
     const row = (rows as Array<Record<string, unknown>>)[0];
@@ -845,7 +845,7 @@ export async function runDiagnosticWithSql(
 
   const missingColumns = expectedColumns.filter((c) => !existingColumns.includes(c));
   const correctionSql = missingColumns.length > 0
-    ? missingColumns.map((c) => `ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS ${c} ${c.startsWith('force_proxy') ? 'boolean DEFAULT NULL' : 'TEXT'};`).join('\n')
+    ? missingColumns.map((c) => `ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS ${c} ${c.startsWith('force_proxy') ? 'boolean DEFAULT true' : 'TEXT'};`).join('\n')
     : null;
 
   if (missingColumns.length > 0 && diagnosisCode === 'ok') {
@@ -967,7 +967,7 @@ export async function verifySchemaOnBoot(): Promise<{
 
     const correctionSql = missing.length > 0
       ? missing
-          .map((c) => `ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS ${c} boolean DEFAULT NULL;`)
+          .map((c) => `ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS ${c} boolean DEFAULT true;`)
           .join('\n')
       : null;
 

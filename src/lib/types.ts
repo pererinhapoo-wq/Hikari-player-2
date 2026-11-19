@@ -123,4 +123,27 @@ export interface DatabaseDiagnosticResult {
   correctionSql: string | null;
 }
 
+export type SourceTestVerdict = 'direto_ok' | 'proxy_necessario' | 'bloqueado';
 
+export interface SourceAttemptDiagnostic {
+  status: number | null;
+  ok: boolean;
+  accessControlAllowOrigin: string | null;
+  hasAcao: boolean;
+  firstLine: string | null;
+  contentType: string | null;
+  sentReferer: string | null;
+  error: string | null;
+}
+
+export interface SourceTestReport {
+  slot: 1 | 2 | 3 | 4 | 5;
+  label: string;
+  url: string;
+  detectedKind: ExplicitSourceKind;
+  noHeaders: SourceAttemptDiagnostic;
+  withHeaders: SourceAttemptDiagnostic;
+  verdict: SourceTestVerdict;
+  verdictLabel: 'direto ok' | 'proxy necessário' | 'bloqueado';
+  verdictReason: string;
+}

@@ -315,4 +315,39 @@ describe('Cloudflare Worker Edge Proxy', () => {
       resolveUpstreamReferer(new URL('https://cdn.generico.com/video.mp4'), fallbackEnv)
     ).toBe('https://cdn.generico.com/');
   });
+
+  it('omite Referer para mywallpaper-4k-image.net e faz pass-through binário video/mp2t de segmentos .webp', async () => {
+    const segUrl = 'https://cdn-s01.mywallpaper-4k-image.net/stream/ep01/seg-001.webp';
+    const exp = 2_000_000_000;
+    const sig = await createWorkerProxySignature(segUrl, exp, TEST_SECRET);
+    const workerUrl = `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(segUrl)}&exp=${exp}&sig=${sig}`;
+
+    const tsBytes = new Uint8Array([0x47, 0x40, 0x00, 0x10, 0xaa, 0xbb]);
+    let capturedHeaders: Headers | null = null;
+
+    const fetcher = vi.fn(async (_input: string, init?: CfRequestInit) => {
+      capturedHeaders = new Headers(init?.headers);
+      return new Response(tsBytes, {
+        status: 200,
+        headers: {
+          'content-type': 'image/webp',
+          'content-length': String(tsBytes.byteLength),
+        },
+      });
+    });
+
+    const res = await handleWorkerProxyRequest(
+      new Request(workerUrl, { headers: { Origin: 'https://hikari-player-2.vercel.app' } }),
+      env,
+      undefined,
+      { fetcher, edgeCache: createMemoryEdgeCache(), nowSeconds: () => 1_795_000_000 }
+    );
+
+    expect(capturedHeaders).not.toBeNull();
+    expect(capturedHeaders!.has('referer')).toBe(false);
+    expect(capturedHeaders!.has('origin')).toBe(false);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toBe('video/mp2t');
+    expect(Array.from(new Uint8Array(await res.arrayBuffer()))).toEqual(Array.from(tsBytes));
+  });
 });

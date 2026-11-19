@@ -20,7 +20,13 @@ import {
   verifyProxySignature,
   rewriteM3u8Playlist,
 } from '@/lib/proxy-signing';
-import { assertSafeExternalUrl, isPrivateOrReservedIp } from '@/lib/ssrf';
+import {
+  ALLOWED_MEDIA_EXTENSIONS,
+  assertSafeExternalUrl,
+  isAllowedProxyMediaUrl,
+  isPrivateOrReservedIp,
+  isTrustedMediaHost,
+} from '@/lib/ssrf';
 
 describe('Autenticação administrativa e URL pública canônica', () => {
   const originalEnv = { ...process.env };
@@ -151,6 +157,20 @@ describe('Segurança de Proxy, SSRF e Reescrita M3U8', () => {
     expect(rewritten).toContain(
       '/api/proxy/stream?url=https%3A%2F%2Fedge.maximaimg.online%2Fseg-002.ts%3Ftok%3D1'
     );
+  });
+
+  it('inclui hosts confiáveis e extensões .m3u8, .ts, .m4s, .webp, .mp4, .webm na allowlist SSRF/proxy', () => {
+    expect(isTrustedMediaHost('cdn-sv01.maximaimg.online')).toBe(true);
+    expect(isTrustedMediaHost('cdn-s01.mywallpaper-4k-image.net')).toBe(true);
+    expect(isTrustedMediaHost('evil.example.com')).toBe(false);
+
+    for (const ext of ['.m3u8', '.ts', '.m4s', '.webp', '.mp4', '.webm']) {
+      expect(ALLOWED_MEDIA_EXTENSIONS).toContain(ext);
+      expect(isAllowedProxyMediaUrl(new URL(`https://cdn-s01.mywallpaper-4k-image.net/v/file${ext}`))).toBe(true);
+    }
+
+    expect(isAllowedProxyMediaUrl(new URL('https://example.com/player.php'))).toBe(false);
+    expect(isAllowedProxyMediaUrl(new URL('https://example.com/embed.html'))).toBe(false);
   });
 });
 
@@ -432,8 +452,8 @@ describe('Diagnóstico seguro da variável DATABASE_URL e etapas Neon', () => {
     expect(result.forceProxyColumnsTotal).toBe(5);
     expect(result.missingColumns).toContain('force_proxy_3');
     expect(result.missingColumns).toContain('force_proxy_5');
-    expect(result.correctionSql).toContain('ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS force_proxy_3 boolean DEFAULT NULL;');
-    expect(result.correctionSql).toContain('ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS force_proxy_5 boolean DEFAULT NULL;');
+    expect(result.correctionSql).toContain('ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS force_proxy_3 boolean DEFAULT true;');
+    expect(result.correctionSql).toContain('ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS force_proxy_5 boolean DEFAULT true;');
   });
 });
 

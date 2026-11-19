@@ -10,6 +10,67 @@ const BLOCKED_HOSTNAMES = new Set([
   'metadata',
 ]);
 
+export const TRUSTED_MEDIA_HOSTS = [
+  'maximaimg.online',
+  'mywallpaper-4k-image.net',
+] as const;
+
+export const ALLOWED_MEDIA_EXTENSIONS = [
+  '.m3u8',
+  '.m3u',
+  '.ts',
+  '.m4s',
+  '.webp',
+  '.mp4',
+  '.webm',
+  '.key',
+  '.aac',
+  '.vtt',
+] as const;
+
+const DISALLOWED_PROXY_EXTENSIONS = new Set([
+  '.html',
+  '.htm',
+  '.php',
+  '.asp',
+  '.aspx',
+  '.jsp',
+  '.js',
+  '.mjs',
+  '.css',
+  '.svg',
+  '.xml',
+  '.exe',
+  '.sh',
+  '.bat',
+  '.cmd',
+]);
+
+export function isTrustedMediaHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase().replace(/\.+$/, '');
+  return TRUSTED_MEDIA_HOSTS.some(
+    (allowed) => lower === allowed || lower.endsWith(`.${allowed}`)
+  );
+}
+
+export function isAllowedProxyMediaUrl(url: URL): boolean {
+  const pathname = url.pathname.toLowerCase();
+  for (const ext of ALLOWED_MEDIA_EXTENSIONS) {
+    if (pathname.endsWith(ext)) {
+      return true;
+    }
+  }
+  const lastSegment = pathname.split('/').pop() ?? '';
+  const dotIdx = lastSegment.lastIndexOf('.');
+  if (dotIdx > 0) {
+    const ext = lastSegment.slice(dotIdx);
+    if (DISALLOWED_PROXY_EXTENSIONS.has(ext)) {
+      return false;
+    }
+  }
+  return true;
+}
+
 function isPrivateIpv4(ip: string): boolean {
   const parts = ip.split('.').map((part) => Number(part));
   if (parts.length !== 4 || parts.some((n) => !Number.isInteger(n) || n < 0 || n > 255)) {
@@ -116,6 +177,14 @@ export async function assertSafeExternalUrl(rawUrl: string): Promise<URL> {
     }
   }
 
+  return parsed;
+}
+
+export async function assertSafeMediaProxyUrl(rawUrl: string): Promise<URL> {
+  const parsed = await assertSafeExternalUrl(rawUrl);
+  if (!isAllowedProxyMediaUrl(parsed)) {
+    throw new Error('Extensão de destino não permitida no proxy de mídia.');
+  }
   return parsed;
 }
 

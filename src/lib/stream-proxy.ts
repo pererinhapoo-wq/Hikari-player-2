@@ -3,14 +3,70 @@ import {
   rewriteM3u8Playlist,
   verifyProxySignature,
 } from '@/lib/proxy-signing';
-import { safeFetchWithRedirects } from '@/lib/ssrf';
-import { isMaximaimgHost, validateHttpUrl } from '@/lib/video-sources';
+import { isAllowedProxyMediaUrl, safeFetchWithRedirects } from '@/lib/ssrf';
+import { validateHttpUrl } from '@/lib/video-sources';
 
-const BROWSER_UA =
+export const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+const DEFAULT_MAXIMAIMG_REFERER = 'https://api.anivideo.net/';
 const EXTM3U_BYTES = [0x23, 0x45, 0x58, 0x54, 0x4d, 0x33, 0x55] as const; // "#EXTM3U"
 const MAX_PEEK_BYTES = 512;
+
+export function resolveUpstreamReferer(
+  targetUrl: URL,
+  refererMapJson = process.env.PLAYER_REFERER_MAP,
+  maximaimgReferer = process.env.PLAYER_MAXIMAIMG_REFERER
+): string {
+  const hostname = targetUrl.hostname.toLowerCase();
+
+  const rules = new Map<string, string>([
+    ['maximaimg.online', maximaimgReferer?.trim() || DEFAULT_MAXIMAIMG_REFERER],
+    ['mywallpaper-4k-image.net', ''],
+  ]);
+
+  const rawMap = refererMapJson?.trim();
+  if (rawMap) {
+    try {
+      const parsed = JSON.parse(rawMap) as Record<string, unknown>;
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        for (const [rawPattern, rawRef] of Object.entries(parsed)) {
+          if (typeof rawRef !== 'string') continue;
+          const pattern = rawPattern.trim().toLowerCase().replace(/^\*\./, '').replace(/^\./, '');
+          if (!pattern) continue;
+          const trimmedRef = rawRef.trim();
+          if (trimmedRef === '') {
+            rules.set(pattern, '');
+            continue;
+          }
+          const check = validateHttpUrl(trimmedRef);
+          if (check.valid && check.normalizedUrl) {
+            rules.set(pattern, check.normalizedUrl);
+          }
+        }
+      }
+    } catch {
+      // Ignora JSON inválido e mantém mapa padrão
+    }
+  }
+
+  let bestMatchLen = -1;
+  let bestReferer: string | null = null;
+  for (const [pattern, refValue] of rules.entries()) {
+    if (hostname === pattern || hostname.endsWith(`.${pattern}`)) {
+      if (pattern.length > bestMatchLen) {
+        bestMatchLen = pattern.length;
+        bestReferer = refValue;
+      }
+    }
+  }
+
+  if (bestReferer !== null) {
+    return bestReferer;
+  }
+
+  return `${targetUrl.origin}/`;
+}
 
 export function getUpstreamHeaders(targetUrl: URL, incomingRequest: Request): Record<string, string> {
   const headers: Record<string, string> = {
@@ -18,20 +74,12 @@ export function getUpstreamHeaders(targetUrl: URL, incomingRequest: Request): Re
     Accept: '*/*',
   };
 
-  if (isMaximaimgHost(targetUrl.hostname)) {
-    const configuredReferer =
-      process.env.PLAYER_MAXIMAIMG_REFERER?.trim() || 'https://api.anivideo.net/';
-    headers['Referer'] = configuredReferer;
-    try {
-      headers['Origin'] = new URL(configuredReferer).origin;
-    } catch {
-      headers['Origin'] = 'https://api.anivideo.net';
-    }
-  } else {
-    headers['Referer'] = `${targetUrl.origin}/`;
+  const referer = resolveUpstreamReferer(targetUrl);
+  if (referer) {
+    headers['Referer'] = referer;
   }
 
-  // Encaminhar apenas Range para seeking; nunca repassar Referer/Origin arbitrários do cliente.
+  // Encaminhar apenas Range para seeking; nunca enviar Origin nem repassar Referer/Origin do cliente.
   const range = incomingRequest.headers.get('range');
   if (range) {
     headers['Range'] = range;
@@ -43,9 +91,20 @@ export function getUpstreamHeaders(targetUrl: URL, incomingRequest: Request): Re
 export function shouldInspectForHlsManifest(contentType: string, targetUrl: URL): boolean {
   const lowerCt = contentType.toLowerCase();
   const lowerPath = targetUrl.pathname.toLowerCase();
+  if (lowerCt.includes('mpegurl') || lowerCt.includes('m3u8')) {
+    return true;
+  }
+  if (
+    lowerPath.endsWith('.webp') ||
+    lowerPath.endsWith('.ts') ||
+    lowerPath.endsWith('.m4s') ||
+    lowerPath.endsWith('.mp4') ||
+    lowerPath.endsWith('.webm') ||
+    lowerPath.endsWith('.aac')
+  ) {
+    return false;
+  }
   return (
-    lowerCt.includes('mpegurl') ||
-    lowerCt.includes('m3u8') ||
     lowerCt.includes('text/') ||
     lowerPath.endsWith('.m3u8') ||
     lowerPath.endsWith('.m3u')
@@ -126,11 +185,27 @@ function hasEnoughBytesToDecide(prefix: Uint8Array): boolean {
   return prefix.length - offset >= EXTM3U_BYTES.length || prefix.length >= MAX_PEEK_BYTES;
 }
 
-function buildBinaryResponseHeaders(upstream: Response, contentType: string): Headers {
+function resolveBinaryContentType(contentType: string, targetUrl?: URL): string {
+  const lowerCt = contentType.toLowerCase();
+  if (targetUrl && targetUrl.pathname.toLowerCase().endsWith('.webp')) {
+    if (!lowerCt || lowerCt.startsWith('image/') || lowerCt === 'application/octet-stream') {
+      return 'video/mp2t';
+    }
+  }
+  return contentType || 'application/octet-stream';
+}
+
+function buildBinaryResponseHeaders(
+  upstream: Response,
+  contentType: string,
+  targetUrl?: URL
+): Headers {
   const outHeaders = new Headers();
-  outHeaders.set('Content-Type', contentType);
+  outHeaders.set('Content-Type', resolveBinaryContentType(contentType, targetUrl));
   outHeaders.set('Cache-Control', 'private, max-age=300');
+  outHeaders.set('X-Content-Type-Options', 'nosniff');
   outHeaders.set('Access-Control-Allow-Origin', '*');
+  outHeaders.set('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Length, Content-Range');
 
   const passthroughHeaders = ['content-length', 'content-range', 'accept-ranges'];
   for (const h of passthroughHeaders) {
@@ -146,6 +221,7 @@ async function handleInspectedUpstreamResponse(
   finalUrl: string,
   contentType: string
 ): Promise<Response> {
+  const finalParsed = new URL(finalUrl);
   if (!upstream.body) {
     const rawBytes = new Uint8Array(await upstream.arrayBuffer());
     if (bytesStartWithExtM3u(rawBytes)) {
@@ -163,7 +239,7 @@ async function handleInspectedUpstreamResponse(
       });
     }
 
-    const outHeaders = buildBinaryResponseHeaders(upstream, contentType);
+    const outHeaders = buildBinaryResponseHeaders(upstream, contentType, finalParsed);
     return new Response(rawBytes, {
       status: upstream.status,
       headers: outHeaders,
@@ -218,7 +294,7 @@ async function handleInspectedUpstreamResponse(
 
   // Não é manifesto #EXTM3U (ex.: segmento binário ou chave servido com Content-Type: text/plain):
   // retransmitir os bytes originais intactos via stream sem decodificação UTF-8.
-  const outHeaders = buildBinaryResponseHeaders(upstream, contentType);
+  const outHeaders = buildBinaryResponseHeaders(upstream, contentType, finalParsed);
   let chunkIndex = 0;
 
   const passthroughStream = new ReadableStream<Uint8Array>({
@@ -282,6 +358,9 @@ export async function handleProxyStreamRequest(
 
   try {
     const targetUrl = new URL(urlCheck.normalizedUrl);
+    if (!isAllowedProxyMediaUrl(targetUrl)) {
+      return new Response('Extensão de destino não permitida no proxy.', { status: 403 });
+    }
     const upstreamHeaders = getUpstreamHeaders(targetUrl, request);
     const { response: upstream, finalUrl } = await fetchWithRedirects(
       targetUrl.toString(),
@@ -296,12 +375,15 @@ export async function handleProxyStreamRequest(
 
     const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
     const finalParsed = new URL(finalUrl);
+    if (!isAllowedProxyMediaUrl(finalParsed)) {
+      return new Response('Extensão de destino não permitida no proxy.', { status: 403 });
+    }
 
-    if (shouldInspectForHlsManifest(contentType, finalParsed)) {
+    if (upstream.status !== 206 && shouldInspectForHlsManifest(contentType, finalParsed)) {
       return await handleInspectedUpstreamResponse(upstream, finalUrl, contentType);
     }
 
-    const outHeaders = buildBinaryResponseHeaders(upstream, contentType);
+    const outHeaders = buildBinaryResponseHeaders(upstream, contentType, finalParsed);
     return new Response(upstream.body, {
       status: upstream.status,
       headers: outHeaders,

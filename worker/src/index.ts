@@ -231,32 +231,29 @@ export function getStableSegmentExpiry(nowSeconds = Math.floor(Date.now() / 1000
 
 export function resolveUpstreamReferer(targetUrl: URL, env: WorkerEnv): string {
   const hostname = targetUrl.hostname.toLowerCase();
-  const rawMap = env.PLAYER_REFERER_MAP?.trim();
+  const rules = new Map<string, string>([
+    ['maximaimg.online', env.PLAYER_MAXIMAIMG_REFERER?.trim() || DEFAULT_MAXIMAIMG_REFERER],
+    ['mywallpaper-4k-image.net', ''],
+  ]);
 
+  const rawMap = env.PLAYER_REFERER_MAP?.trim();
   if (rawMap) {
     try {
       const parsed = JSON.parse(rawMap) as Record<string, unknown>;
       if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
-        let bestMatchLen = -1;
-        let bestReferer: string | null = null;
-
         for (const [rawPattern, rawRef] of Object.entries(parsed)) {
           if (typeof rawRef !== 'string') continue;
           const pattern = rawPattern.trim().toLowerCase().replace(/^\*\./, '').replace(/^\./, '');
           if (!pattern) continue;
-          const refCheck = validateHttpUrl(rawRef);
-          if (!refCheck.valid || !refCheck.normalizedUrl) continue;
-
-          if (hostname === pattern || hostname.endsWith(`.${pattern}`)) {
-            if (pattern.length > bestMatchLen) {
-              bestMatchLen = pattern.length;
-              bestReferer = refCheck.normalizedUrl;
-            }
+          const trimmedRef = rawRef.trim();
+          if (trimmedRef === '') {
+            rules.set(pattern, '');
+            continue;
           }
-        }
-
-        if (bestReferer) {
-          return bestReferer;
+          const refCheck = validateHttpUrl(trimmedRef);
+          if (refCheck.valid && refCheck.normalizedUrl) {
+            rules.set(pattern, refCheck.normalizedUrl);
+          }
         }
       }
     } catch {
@@ -264,8 +261,19 @@ export function resolveUpstreamReferer(targetUrl: URL, env: WorkerEnv): string {
     }
   }
 
-  if (isMaximaimgHost(hostname)) {
-    return env.PLAYER_MAXIMAIMG_REFERER?.trim() || DEFAULT_MAXIMAIMG_REFERER;
+  let bestMatchLen = -1;
+  let bestReferer: string | null = null;
+  for (const [pattern, refValue] of rules.entries()) {
+    if (hostname === pattern || hostname.endsWith(`.${pattern}`)) {
+      if (pattern.length > bestMatchLen) {
+        bestMatchLen = pattern.length;
+        bestReferer = refValue;
+      }
+    }
+  }
+
+  if (bestReferer !== null) {
+    return bestReferer;
   }
 
   return `${targetUrl.origin}/`;
@@ -279,7 +287,11 @@ export function getUpstreamHeaders(
   const headers = new Headers();
   headers.set('User-Agent', BROWSER_UA);
   headers.set('Accept', '*/*');
-  headers.set('Referer', resolveUpstreamReferer(targetUrl, env));
+
+  const referer = resolveUpstreamReferer(targetUrl, env);
+  if (referer) {
+    headers.set('Referer', referer);
+  }
 
   // Encaminhar apenas Range para seeking; remover explicitamente Origin.
   const range = incomingRequest.headers.get('range');
@@ -294,9 +306,20 @@ export function getUpstreamHeaders(
 export function shouldInspectForHlsManifest(contentType: string, targetUrl: URL): boolean {
   const lowerCt = contentType.toLowerCase();
   const lowerPath = targetUrl.pathname.toLowerCase();
+  if (lowerCt.includes('mpegurl') || lowerCt.includes('m3u8')) {
+    return true;
+  }
+  if (
+    lowerPath.endsWith('.webp') ||
+    lowerPath.endsWith('.ts') ||
+    lowerPath.endsWith('.m4s') ||
+    lowerPath.endsWith('.mp4') ||
+    lowerPath.endsWith('.webm') ||
+    lowerPath.endsWith('.aac')
+  ) {
+    return false;
+  }
   return (
-    lowerCt.includes('mpegurl') ||
-    lowerCt.includes('m3u8') ||
     lowerCt.includes('text/') ||
     lowerPath.endsWith('.m3u8') ||
     lowerPath.endsWith('.m3u')
@@ -421,10 +444,25 @@ async function rewriteM3u8PlaylistAsync(
   return output.join('\n');
 }
 
-function buildBinaryResponseHeaders(upstream: Response, contentType: string): Headers {
+function resolveBinaryContentType(contentType: string, targetUrl?: URL): string {
+  const lowerCt = contentType.toLowerCase();
+  if (targetUrl && targetUrl.pathname.toLowerCase().endsWith('.webp')) {
+    if (!lowerCt || lowerCt.startsWith('image/') || lowerCt === 'application/octet-stream') {
+      return 'video/mp2t';
+    }
+  }
+  return contentType || 'application/octet-stream';
+}
+
+function buildBinaryResponseHeaders(
+  upstream: Response,
+  contentType: string,
+  targetUrl?: URL
+): Headers {
   const outHeaders = new Headers(getCorsHeaders());
-  outHeaders.set('Content-Type', contentType);
+  outHeaders.set('Content-Type', resolveBinaryContentType(contentType, targetUrl));
   outHeaders.set('Cache-Control', `public, max-age=${SEGMENT_CACHE_TTL_SECONDS}, immutable`);
+  outHeaders.set('X-Content-Type-Options', 'nosniff');
 
   const passthroughHeaders = [
     'content-length',
@@ -645,7 +683,7 @@ export async function handleWorkerProxyRequest(
       return res;
     };
 
-    if (request.method === 'GET' && shouldInspectForHlsManifest(contentType, finalParsed)) {
+    if (request.method === 'GET' && upstream.status !== 206 && shouldInspectForHlsManifest(contentType, finalParsed)) {
       if (!upstream.body) {
         const rawBytes = new Uint8Array(await upstream.arrayBuffer());
         if (bytesStartWithExtM3u(rawBytes)) {
@@ -661,7 +699,7 @@ export async function handleWorkerProxyRequest(
         return cacheIfEligible(
           new Response(rawBytes, {
             status: upstream.status,
-            headers: buildBinaryResponseHeaders(upstream, contentType),
+            headers: buildBinaryResponseHeaders(upstream, contentType, finalParsed),
           })
         );
       }
@@ -706,7 +744,7 @@ export async function handleWorkerProxyRequest(
         );
       }
 
-      const outHeaders = buildBinaryResponseHeaders(upstream, contentType);
+      const outHeaders = buildBinaryResponseHeaders(upstream, contentType, finalParsed);
       let chunkIndex = 0;
       const passthroughStream = new ReadableStream<Uint8Array>({
         async pull(controller) {
@@ -746,7 +784,7 @@ export async function handleWorkerProxyRequest(
       );
     }
 
-    const outHeaders = buildBinaryResponseHeaders(upstream, contentType);
+    const outHeaders = buildBinaryResponseHeaders(upstream, contentType, finalParsed);
     return cacheIfEligible(
       new Response(upstream.body, {
         status: upstream.status,

@@ -32,7 +32,7 @@ describe('normalizeVideoSource', () => {
     const mp4 = normalizeVideoSource('https://cdn.example.com/anime/ep01.mp4?token=abc', 1);
     expect(mp4?.kind).toBe('mp4');
     expect(mp4?.provider).toBe('direct');
-    expect(mp4?.needsProxy).toBe(false);
+    expect(mp4?.needsProxy).toBe(true);
 
     const webm = normalizeVideoSource('https://cdn.example.com/anime/ep01.webm', 2);
     expect(webm?.kind).toBe('webm');
@@ -177,5 +177,22 @@ describe('collectEpisodeSources e seleção/fallback de fontes', () => {
 
     const withoutTime = 'https://embeds.example.com/e/12345?runtime=900';
     expect(buildIframeSrcWithFreshTime(withoutTime, 1795120001)).toBe(withoutTime);
+  });
+
+  it('ativa needsProxy=true por padrão para fontes hls/mp4 (incluindo mywallpaper-4k-image.net) e mantém false apenas para iframe', () => {
+    const wallpaperHls = normalizeVideoSource(
+      'https://cdn-s01.mywallpaper-4k-image.net/stream/anime/01/index.m3u8',
+      1
+    );
+    expect(wallpaperHls?.kind).toBe('hls');
+    expect(wallpaperHls?.needsProxy).toBe(true);
+
+    const genericMp4 = normalizeVideoSource('https://cdn.example.com/ep01.mp4', 2);
+    expect(genericMp4?.kind).toBe('mp4');
+    expect(genericMp4?.needsProxy).toBe(true);
+
+    const iframe = normalizeVideoSource('https://embeds.example.com/player.html', 3);
+    expect(iframe?.kind).toBe('iframe');
+    expect(iframe?.needsProxy).toBe(false);
   });
 });

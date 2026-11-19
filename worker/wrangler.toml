@@ -4,7 +4,7 @@ compatibility_date = "2025-07-15"
 
 [vars]
 PLAYER_MAXIMAIMG_REFERER = "https://api.anivideo.net/"
-PLAYER_REFERER_MAP = '{"maximaimg.online":"https://api.anivideo.net/"}'
+PLAYER_REFERER_MAP = '{"maximaimg.online":"https://api.anivideo.net/","mywallpaper-4k-image.net":""}'
 
 # Defina o mesmo segredo usado na Vercel em PLAYER_SESSION_SECRET:
 # npx wrangler secret put PLAYER_SESSION_SECRET

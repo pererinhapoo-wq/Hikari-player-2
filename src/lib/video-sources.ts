@@ -278,7 +278,7 @@ export function normalizeVideoSource(
       resolvedUrl: normalizedUrl,
       kind: 'hls',
       provider: maxima ? 'maximaimg' : 'hls',
-      needsProxy: maxima,
+      needsProxy: true,
       requiresServerResolve: false,
       formatLabel: maxima ? 'Maximaimg · HLS' : 'HLS',
     };
@@ -293,7 +293,7 @@ export function normalizeVideoSource(
       resolvedUrl: normalizedUrl,
       kind: 'mp4',
       provider: maxima ? 'maximaimg' : 'direct',
-      needsProxy: maxima,
+      needsProxy: true,
       requiresServerResolve: false,
       formatLabel: maxima ? 'Maximaimg · MP4' : 'MP4',
     };
@@ -310,7 +310,7 @@ export function normalizeVideoSource(
       fallbackIframeUrl: mux.embedUrl,
       kind: 'hls',
       provider: 'mux',
-      needsProxy: false,
+      needsProxy: true,
       requiresServerResolve: false,
       formatLabel: 'Mux · HLS',
     };
@@ -342,13 +342,13 @@ export function normalizeVideoSource(
       resolvedUrl: normalizedUrl,
       kind: 'hls',
       provider: 'bunny',
-      needsProxy: false,
+      needsProxy: true,
       requiresServerResolve: false,
       formatLabel: 'Bunny · HLS',
     };
   }
 
-  // 3. Special source: maximaimg.online (proxied with Referer/Origin/User-Agent + M3U8 rewrite)
+  // 3. Special source: maximaimg.online (proxied with Referer + User-Agent + M3U8 rewrite)
   if (isMaximaimgHost(host)) {
     const directKind = detectDirectOrStreamKind(parsed);
     const kind: SourceKind = isLikelyHtmlPage(parsed)
@@ -368,7 +368,7 @@ export function normalizeVideoSource(
     };
   }
 
-  // 4. Direct video (MP4 / WebM) & Streaming (HLS / M3U8 / M3U)
+  // 4. Direct video (MP4 / WebM) & Streaming (HLS / M3U8 / M3U) -> proxy ativo por padrão
   if (!isLikelyHtmlPage(parsed)) {
     const mediaKind = detectDirectOrStreamKind(parsed);
     if (mediaKind === 'mp4') {
@@ -379,7 +379,7 @@ export function normalizeVideoSource(
         resolvedUrl: normalizedUrl,
         kind: 'mp4',
         provider: 'direct',
-        needsProxy: false,
+        needsProxy: true,
         requiresServerResolve: false,
         formatLabel: 'MP4',
       };
@@ -392,7 +392,7 @@ export function normalizeVideoSource(
         resolvedUrl: normalizedUrl,
         kind: 'webm',
         provider: 'direct',
-        needsProxy: false,
+        needsProxy: true,
         requiresServerResolve: false,
         formatLabel: 'WebM',
       };
@@ -405,7 +405,7 @@ export function normalizeVideoSource(
         resolvedUrl: normalizedUrl,
         kind: 'hls',
         provider: 'hls',
-        needsProxy: false,
+        needsProxy: true,
         requiresServerResolve: false,
         formatLabel: 'HLS',
       };
