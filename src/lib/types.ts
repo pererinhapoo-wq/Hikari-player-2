@@ -51,3 +51,34 @@ export interface AdminDashboardState {
   episodes: EpisodeDto[];
   errorMessage?: string;
 }
+
+export interface DatabaseEnvDiagnostic {
+  configured: boolean;
+  validUrl: boolean;
+  hostname: string | null;
+  database: string | null;
+  username: string | null;
+  hasPooling: boolean;
+  vercelEnv: string | null;
+}
+
+export interface DatabaseQueryDiagnostic {
+  database: string | null;
+  schema: string | null;
+  user: string | null;
+  search_path: string | null;
+  public_table: string | null;
+  resolved_table: string | null;
+  server_address: string | null;
+  server_port: number | null;
+}
+
+export interface DatabaseDiagnosticResult {
+  checkedAt: string;
+  env: DatabaseEnvDiagnostic;
+  queryOk: boolean;
+  connection: DatabaseQueryDiagnostic | null;
+  queryError: string | null;
+  queryErrorCode: string | null;
+}
+

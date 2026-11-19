@@ -9,9 +9,14 @@ import {
   verifySessionToken,
 } from '@/lib/auth';
 import {
+  diagnoseDatabaseConnection,
+  inspectDatabaseUrlSafely,
+  sanitizeDiagnosticError,
+} from '@/lib/db';
+import {
   buildSignedProxyPath,
-  rewriteM3u8Playlist,
   verifyProxySignature,
+  rewriteM3u8Playlist,
 } from '@/lib/proxy-signing';
 import { assertSafeExternalUrl, isPrivateOrReservedIp } from '@/lib/ssrf';
 
@@ -146,3 +151,69 @@ describe('Segurança de Proxy, SSRF e Reescrita M3U8', () => {
     );
   });
 });
+
+describe('Diagnóstico seguro da variável DATABASE_URL do Neon', () => {
+  const originalDbUrl = process.env.DATABASE_URL;
+  const originalVercelEnv = process.env.VERCEL_ENV;
+
+  afterEach(() => {
+    if (originalDbUrl === undefined) {
+      delete process.env.DATABASE_URL;
+    } else {
+      process.env.DATABASE_URL = originalDbUrl;
+    }
+    if (originalVercelEnv === undefined) {
+      delete process.env.VERCEL_ENV;
+    } else {
+      process.env.VERCEL_ENV = originalVercelEnv;
+    }
+  });
+
+  it('extrai apenas metadados seguros de URL pooled sem expor senha, tokens ou URL completa', () => {
+    const secretUrl =
+      'postgresql://neondb_owner:npg_SecretPass123!@ep-hikari-player-123456-pooler.us-east-2.aws.neon.tech/neondb?sslmode=require&pgbouncer=true&secret_tok=abc';
+    process.env.VERCEL_ENV = 'production';
+
+    const info = inspectDatabaseUrlSafely(secretUrl);
+    expect(info).toEqual({
+      configured: true,
+      validUrl: true,
+      hostname: 'ep-hikari-player-123456-pooler.us-east-2.aws.neon.tech',
+      database: 'neondb',
+      username: 'neondb_owner',
+      hasPooling: true,
+      vercelEnv: 'production',
+    });
+
+    const serialized = JSON.stringify(info);
+    expect(serialized).not.toContain('npg_SecretPass123!');
+    expect(serialized).not.toContain('secret_tok');
+    expect(serialized).not.toContain('postgresql://');
+  });
+
+  it('remove credenciais e URLs completas caso ocorram em mensagens de erro', () => {
+    const secretUrl =
+      'postgresql://neondb_owner:UltraSecret99@ep-test.aws.neon.tech/neondb?sslmode=require';
+    const err = Object.assign(
+      new Error(`Falha ao conectar em ${secretUrl} com senha UltraSecret99`),
+      { code: '42P01' }
+    );
+
+    const sanitized = sanitizeDiagnosticError(err, secretUrl);
+    expect(sanitized.code).toBe('42P01');
+    expect(sanitized.message).not.toContain('UltraSecret99');
+    expect(sanitized.message).not.toContain(secretUrl);
+  });
+
+  it('retorna diagnóstico seguro quando DATABASE_URL não está configurada', async () => {
+    delete process.env.DATABASE_URL;
+    const result = await diagnoseDatabaseConnection();
+
+    expect(result.env.configured).toBe(false);
+    expect(result.env.validUrl).toBe(false);
+    expect(result.queryOk).toBe(false);
+    expect(result.connection).toBeNull();
+    expect(result.queryError).toContain('DATABASE_URL');
+  });
+});
+

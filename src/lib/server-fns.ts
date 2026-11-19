@@ -22,6 +22,7 @@ import {
   createEpisode,
   DatabaseNotConfiguredError,
   deleteEpisode,
+  diagnoseDatabaseConnection,
   getEpisodeById,
   isDatabaseConfigured,
   listEpisodes,
@@ -31,6 +32,7 @@ import {
 import { buildSignedProxyPath } from '@/lib/proxy-signing';
 import type {
   AdminDashboardState,
+  DatabaseDiagnosticResult,
   EpisodeDto,
   EpisodeFormPayload,
   PlayableSource,
@@ -262,3 +264,24 @@ export const adminDeleteEpisodeFn = createServerFn({ method: 'POST' })
       };
     }
   });
+
+export const adminDiagnoseDatabaseFn = createServerFn({ method: 'POST' }).handler(
+  async (): Promise<
+    { ok: true; diagnostic: DatabaseDiagnosticResult } | { ok: false; error: string }
+  > => {
+    try {
+      requireAdminSession();
+      const diagnostic = await diagnoseDatabaseConnection();
+      return { ok: true, diagnostic };
+    } catch (err) {
+      return {
+        ok: false,
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Sessão administrativa expirada ou não autenticada.',
+      };
+    }
+  }
+);
+

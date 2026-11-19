@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { neon } from '@neondatabase/serverless';
+import type { DatabaseDiagnosticResult, DatabaseEnvDiagnostic } from '@/lib/types';
 import { validateHttpUrl } from '@/lib/video-sources';
 
 export interface PlayerEpisode {
@@ -215,3 +216,163 @@ export async function deleteEpisode(id: string): Promise<boolean> {
   `;
   return (rows as Array<Record<string, unknown>>).length > 0;
 }
+
+export function inspectDatabaseUrlSafely(rawUrl = process.env.DATABASE_URL): DatabaseEnvDiagnostic {
+  const trimmed = rawUrl?.trim() ?? '';
+  const vercelEnv = process.env.VERCEL_ENV?.trim() || null;
+
+  if (!trimmed) {
+    return {
+      configured: false,
+      validUrl: false,
+      hostname: null,
+      database: null,
+      username: null,
+      hasPooling: false,
+      vercelEnv,
+    };
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    const isPostgres = parsed.protocol === 'postgres:' || parsed.protocol === 'postgresql:';
+    if (!isPostgres) {
+      return {
+        configured: true,
+        validUrl: false,
+        hostname: null,
+        database: null,
+        username: null,
+        hasPooling: false,
+        vercelEnv,
+      };
+    }
+
+    const dbName = parsed.pathname.replace(/^\/+/, '');
+    const username = parsed.username ? decodeURIComponent(parsed.username) : null;
+    const hasPooling =
+      parsed.hostname.includes('-pooler') ||
+      parsed.searchParams.has('pgbouncer') ||
+      parsed.searchParams.has('pooler');
+
+    return {
+      configured: true,
+      validUrl: Boolean(parsed.hostname),
+      hostname: parsed.hostname || null,
+      database: dbName || null,
+      username,
+      hasPooling,
+      vercelEnv,
+    };
+  } catch {
+    return {
+      configured: true,
+      validUrl: false,
+      hostname: null,
+      database: null,
+      username: null,
+      hasPooling: false,
+      vercelEnv,
+    };
+  }
+}
+
+export function sanitizeDiagnosticError(err: unknown, rawUrl = process.env.DATABASE_URL): {
+  message: string;
+  code: string | null;
+} {
+  let message = err instanceof Error ? err.message : 'Erro desconhecido ao consultar o Neon.';
+  const trimmed = rawUrl?.trim();
+
+  if (trimmed) {
+    message = message.split(trimmed).join('[REDACTED_URL]');
+    try {
+      const parsed = new URL(trimmed);
+      if (parsed.password) {
+        message = message.split(parsed.password).join('[REDACTED]');
+        const decodedPassword = decodeURIComponent(parsed.password);
+        if (decodedPassword) {
+          message = message.split(decodedPassword).join('[REDACTED]');
+        }
+      }
+    } catch {
+      // Ignore malformed URL during redaction
+    }
+  }
+
+  message = message.replace(/postgres(?:ql)?:\/\/[^\s'"]+/gi, '[REDACTED_POSTGRES_URL]');
+
+  const rawCode =
+    err && typeof err === 'object' && 'code' in err
+      ? (err as { code?: unknown }).code
+      : null;
+  const code = typeof rawCode === 'string' && rawCode.trim() ? rawCode.trim() : null;
+
+  return { message, code };
+}
+
+export async function diagnoseDatabaseConnection(): Promise<DatabaseDiagnosticResult> {
+  const checkedAt = new Date().toISOString();
+  const env = inspectDatabaseUrlSafely();
+
+  try {
+    const sql = getSql();
+    const rows = await sql`
+      SELECT
+        current_database() AS database,
+        current_schema() AS schema,
+        current_user AS user,
+        current_setting('search_path') AS search_path,
+        to_regclass('public.player_episodes') AS public_table,
+        to_regclass('player_episodes') AS resolved_table,
+        inet_server_addr()::text AS server_address,
+        inet_server_port() AS server_port
+    `;
+
+    const row = (rows as Array<Record<string, unknown>>)[0] ?? {};
+    const portVal = row.server_port;
+    const serverPort =
+      portVal !== null && portVal !== undefined && !Number.isNaN(Number(portVal))
+        ? Number(portVal)
+        : null;
+
+    return {
+      checkedAt,
+      env,
+      queryOk: true,
+      connection: {
+        database: row.database !== null && row.database !== undefined ? String(row.database) : null,
+        schema: row.schema !== null && row.schema !== undefined ? String(row.schema) : null,
+        user: row.user !== null && row.user !== undefined ? String(row.user) : null,
+        search_path:
+          row.search_path !== null && row.search_path !== undefined ? String(row.search_path) : null,
+        public_table:
+          row.public_table !== null && row.public_table !== undefined
+            ? String(row.public_table)
+            : null,
+        resolved_table:
+          row.resolved_table !== null && row.resolved_table !== undefined
+            ? String(row.resolved_table)
+            : null,
+        server_address:
+          row.server_address !== null && row.server_address !== undefined
+            ? String(row.server_address)
+            : null,
+        server_port: serverPort,
+      },
+      queryError: null,
+      queryErrorCode: null,
+    };
+  } catch (err) {
+    const sanitized = sanitizeDiagnosticError(err);
+    return {
+      checkedAt,
+      env,
+      queryOk: false,
+      connection: null,
+      queryError: sanitized.message,
+      queryErrorCode: sanitized.code,
+    };
+  }
+}
+

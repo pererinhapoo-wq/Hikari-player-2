@@ -3,6 +3,7 @@ import {
   AlertTriangle,
   Check,
   Copy,
+  Database,
   ExternalLink,
   Eye,
   EyeOff,
@@ -12,16 +13,17 @@ import {
   Plus,
   Trash2,
 } from 'lucide-react';
-import { type FormEvent, useMemo, useState } from 'react';
+import { type FormEvent, useEffect, useMemo, useState } from 'react';
 import {
   adminCreateEpisodeFn,
   adminDeleteEpisodeFn,
+  adminDiagnoseDatabaseFn,
   adminLoginFn,
   adminLogoutFn,
   adminUpdateEpisodeFn,
   getAdminDashboardFn,
 } from '@/lib/server-fns';
-import type { EpisodeDto, EpisodeFormPayload } from '@/lib/types';
+import type { DatabaseDiagnosticResult, EpisodeDto, EpisodeFormPayload } from '@/lib/types';
 import { normalizeVideoSource, validateHttpUrl } from '@/lib/video-sources';
 
 export const Route = createFileRoute('/admin')({
@@ -103,6 +105,37 @@ function AdminPage() {
   const [deleteBusyId, setDeleteBusyId] = useState<string | null>(null);
   const [posterPreviewError, setPosterPreviewError] = useState(false);
 
+  const [diagnostic, setDiagnostic] = useState<DatabaseDiagnosticResult | null>(null);
+  const [diagnosticBusy, setDiagnosticBusy] = useState(false);
+  const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
+
+  const runDiagnostic = async () => {
+    setDiagnosticBusy(true);
+    setDiagnosticError(null);
+    try {
+      const res = await adminDiagnoseDatabaseFn();
+      if (!res.ok) {
+        setDiagnosticError(res.error);
+        setDiagnostic(null);
+        return;
+      }
+      setDiagnostic(res.diagnostic);
+    } catch (err) {
+      setDiagnosticError(
+        err instanceof Error ? err.message : 'Falha ao executar diagnóstico do Neon.'
+      );
+      setDiagnostic(null);
+    } finally {
+      setDiagnosticBusy(false);
+    }
+  };
+
+  useEffect(() => {
+    if (initialState.authenticated && initialState.errorMessage) {
+      void runDiagnostic();
+    }
+  }, [initialState.authenticated, initialState.errorMessage]);
+
   const posterValidation = useMemo(() => {
     if (!form.poster_url.trim()) return null;
     return validateHttpUrl(form.poster_url);
@@ -144,6 +177,8 @@ function AdminPage() {
     setEditingId(null);
     setForm(EMPTY_FORM);
     setSavedBanner(null);
+    setDiagnostic(null);
+    setDiagnosticError(null);
     await router.invalidate();
   };
 
@@ -568,11 +603,150 @@ function AdminPage() {
                     </span>
                   </p>
                 </div>
+
+                <button
+                  type="button"
+                  onClick={() => void runDiagnostic()}
+                  disabled={diagnosticBusy}
+                  className="h-8 px-3 rounded-lg border border-white/10 text-xs font-medium text-slate-200 hover:bg-white/5 disabled:opacity-50 inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                >
+                  <Database className="w-3.5 h-3.5" />
+                  {diagnosticBusy ? 'Diagnosticando...' : 'Diagnóstico Neon'}
+                </button>
               </div>
 
               {initialState.errorMessage && (
                 <div className="px-6 py-4 border-b border-white/10 bg-rose-950/30 text-sm text-rose-300">
                   {initialState.errorMessage}
+                </div>
+              )}
+
+              {(diagnostic || diagnosticError || diagnosticBusy) && (
+                <div className="px-6 py-4 border-b border-white/10 bg-[#0D1018] space-y-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-300">
+                      Diagnóstico da conexão Neon (somente leitura)
+                    </h3>
+                    {diagnostic && (
+                      <span className="text-[11px] font-mono text-slate-500">
+                        {diagnostic.env.vercelEnv ?? 'local'}
+                      </span>
+                    )}
+                  </div>
+
+                  {diagnosticError && (
+                    <p className="text-xs text-rose-400" role="alert">
+                      {diagnosticError}
+                    </p>
+                  )}
+
+                  {diagnostic && (
+                    <div className="space-y-3 text-xs">
+                      <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 bg-[#090B10] border border-white/10 rounded-lg p-3 font-mono">
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-slate-400">DATABASE_URL:</dt>
+                          <dd className="text-slate-200">
+                            {diagnostic.env.configured
+                              ? diagnostic.env.validUrl
+                                ? 'Configurada'
+                                : 'Inválida'
+                              : 'Ausente'}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-slate-400">Pooling:</dt>
+                          <dd className="text-slate-200">
+                            {diagnostic.env.hasPooling ? 'Sim' : 'Não'}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2 sm:col-span-2">
+                          <dt className="text-slate-400 shrink-0">Host (URL):</dt>
+                          <dd className="text-slate-200 truncate">
+                            {diagnostic.env.hostname ?? '—'}
+                          </dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-slate-400">Banco (URL):</dt>
+                          <dd className="text-slate-200">{diagnostic.env.database ?? '—'}</dd>
+                        </div>
+                        <div className="flex justify-between gap-2">
+                          <dt className="text-slate-400">Usuário (URL):</dt>
+                          <dd className="text-slate-200">{diagnostic.env.username ?? '—'}</dd>
+                        </div>
+                      </dl>
+
+                      {diagnostic.queryOk && diagnostic.connection ? (
+                        <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 bg-[#090B10] border border-white/10 rounded-lg p-3 font-mono">
+                          <div className="flex justify-between gap-2">
+                            <dt className="text-slate-400">current_database:</dt>
+                            <dd className="text-slate-200">
+                              {diagnostic.connection.database ?? 'null'}
+                            </dd>
+                          </div>
+                          <div className="flex justify-between gap-2">
+                            <dt className="text-slate-400">current_schema:</dt>
+                            <dd className="text-slate-200">
+                              {diagnostic.connection.schema ?? 'null'}
+                            </dd>
+                          </div>
+                          <div className="flex justify-between gap-2">
+                            <dt className="text-slate-400">current_user:</dt>
+                            <dd className="text-slate-200">
+                              {diagnostic.connection.user ?? 'null'}
+                            </dd>
+                          </div>
+                          <div className="flex justify-between gap-2">
+                            <dt className="text-slate-400">search_path:</dt>
+                            <dd className="text-slate-200">
+                              {diagnostic.connection.search_path ?? 'null'}
+                            </dd>
+                          </div>
+                          <div className="flex justify-between gap-2">
+                            <dt className="text-slate-400">public.player_episodes:</dt>
+                            <dd
+                              className={
+                                diagnostic.connection.public_table
+                                  ? 'text-emerald-400'
+                                  : 'text-rose-400'
+                              }
+                            >
+                              {diagnostic.connection.public_table ?? 'null'}
+                            </dd>
+                          </div>
+                          <div className="flex justify-between gap-2">
+                            <dt className="text-slate-400">player_episodes:</dt>
+                            <dd
+                              className={
+                                diagnostic.connection.resolved_table
+                                  ? 'text-emerald-400'
+                                  : 'text-rose-400'
+                              }
+                            >
+                              {diagnostic.connection.resolved_table ?? 'null'}
+                            </dd>
+                          </div>
+                          <div className="flex justify-between gap-2">
+                            <dt className="text-slate-400">inet_server_addr:</dt>
+                            <dd className="text-slate-200">
+                              {diagnostic.connection.server_address ?? 'null'}
+                            </dd>
+                          </div>
+                          <div className="flex justify-between gap-2">
+                            <dt className="text-slate-400">inet_server_port:</dt>
+                            <dd className="text-slate-200">
+                              {diagnostic.connection.server_port ?? 'null'}
+                            </dd>
+                          </div>
+                        </dl>
+                      ) : (
+                        <div className="bg-rose-950/30 border border-rose-500/30 rounded-lg p-3 font-mono text-rose-300">
+                          Falha na consulta de diagnóstico
+                          {diagnostic.queryErrorCode ? ` [${diagnostic.queryErrorCode}]` : ''}:{' '}
+                          {diagnostic.queryError ?? 'Erro desconhecido'}
+                        </div>
+                      )}
+                    </div>
+                  )}
                 </div>
               )}
 
