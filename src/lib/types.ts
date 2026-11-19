@@ -106,6 +106,9 @@ export interface DatabaseDiagnosticResult {
   tableReadError: SanitizedDbError | null;
   unqualifiedTableReadOk: boolean | null;
   unqualifiedTableReadError: SanitizedDbError | null;
+  expectedColumns: string[];
+  missingColumns: string[];
+  correctionSql: string | null;
 }
 
 

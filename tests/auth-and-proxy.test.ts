@@ -352,6 +352,25 @@ describe('Diagnóstico seguro da variável DATABASE_URL e etapas Neon', () => {
       if (q.includes('to_regclass')) {
         return [{ public_table: 'player_episodes', resolved_table: 'player_episodes' }];
       }
+      if (q.includes('information_schema.columns')) {
+        return [
+          'id',
+          'title',
+          'poster_url',
+          'video_url',
+          'video_url_2',
+          'video_url_3',
+          'video_url_4',
+          'video_url_5',
+          'force_proxy',
+          'force_proxy_2',
+          'force_proxy_3',
+          'force_proxy_4',
+          'force_proxy_5',
+          'created_at',
+          'updated_at',
+        ].map((column_name) => ({ column_name }));
+      }
       return [{ episode_count: 5 }];
     };
 

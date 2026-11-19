@@ -809,6 +809,42 @@ function AdminPage() {
                         )}
                       </dl>
 
+                      {diagnostic.missingColumns && diagnostic.missingColumns.length > 0 && (
+                        <div className="bg-amber-950/40 border border-amber-500/40 rounded-lg p-3 space-y-2">
+                          <div className="text-xs font-semibold text-amber-200">
+                            Colunas ausentes na tabela player_episodes: {diagnostic.missingColumns.join(', ')}
+                          </div>
+                          <p className="text-[11px] text-slate-300">
+                            Copie e execute o comando SQL abaixo no seu painel Neon para corrigir o schema:
+                          </p>
+                          <div className="flex items-center gap-2">
+                            <textarea
+                              readOnly
+                              rows={3}
+                              value={diagnostic.correctionSql ?? ''}
+                              className="flex-1 w-full p-2 rounded bg-[#090B10] border border-white/10 font-mono text-[11px] text-amber-200 select-all"
+                            />
+                            <button
+                              type="button"
+                              onClick={() => void copyLink('sql-fix', diagnostic.correctionSql ?? '')}
+                              className="h-8 px-3 rounded bg-amber-600 hover:bg-amber-500 text-xs font-medium text-white inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                            >
+                              {copiedId === 'sql-fix' ? (
+                                <>
+                                  <Check className="w-3.5 h-3.5" />
+                                  Copiado
+                                </>
+                              ) : (
+                                <>
+                                  <Copy className="w-3.5 h-3.5" />
+                                  Copiar SQL
+                                </>
+                              )}
+                            </button>
+                          </div>
+                        </div>
+                      )}
+
                       {(diagnostic.connectionError ||
                         diagnostic.diagnosticQueryError ||
                         diagnostic.tableReadError ||
