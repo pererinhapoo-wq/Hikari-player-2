@@ -807,6 +807,18 @@ function AdminPage() {
                             <dd className="text-slate-300 truncate">{diagnostic.rawResultShape}</dd>
                           </div>
                         )}
+                        <div className="flex justify-between gap-2 sm:col-span-2">
+                          <dt className="text-slate-400">Colunas force_proxy:</dt>
+                          <dd
+                            className={
+                              diagnostic.forceProxyColumnsCount === 5
+                                ? 'text-emerald-400'
+                                : 'text-amber-400 font-semibold'
+                            }
+                          >
+                            {diagnostic.forceProxyColumnsCount}/5 {diagnostic.forceProxyColumnsCount === 5 ? 'presentes' : 'presentes (atenção)'}
+                          </dd>
+                        </div>
                       </dl>
 
                       {diagnostic.missingColumns && diagnostic.missingColumns.length > 0 && (

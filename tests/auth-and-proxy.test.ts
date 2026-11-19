@@ -381,6 +381,59 @@ describe('Diagnóstico seguro da variável DATABASE_URL e etapas Neon', () => {
     expect(result.tableReadExecuted).toBe(true);
     expect(result.episodeCount).toBe(5);
     expect(result.unqualifiedTableReadOk).toBe(true);
+    expect(result.forceProxyColumnsCount).toBe(5);
+    expect(result.forceProxyColumnsTotal).toBe(5);
+    expect(result.missingColumns).toEqual([]);
+    expect(result.correctionSql).toBeNull();
+  });
+
+  it('detecta colunas ausentes no schema, sinaliza contagem e gera SQL de correção pronto', async () => {
+    const url = 'postgresql://u_secret:p_secret@ep-hikari-pooler.neon.tech/neondb';
+    const env = inspectDatabaseUrlSafely(url);
+    const mockSql: DiagnosticSqlTag = async (strings) => {
+      const q = strings.join(' ');
+      if (q.includes('current_database()')) {
+        return [
+          {
+            current_database: 'neondb',
+            current_schema: 'public',
+            current_user: 'neondb_owner',
+            search_path: '"$user", public',
+          },
+        ];
+      }
+      if (q.includes('to_regclass')) {
+        return [{ public_table: 'player_episodes', resolved_table: 'player_episodes' }];
+      }
+      if (q.includes('information_schema.columns')) {
+        // Simula ausência de force_proxy_3 e force_proxy_5
+        return [
+          'id',
+          'title',
+          'poster_url',
+          'video_url',
+          'video_url_2',
+          'video_url_3',
+          'video_url_4',
+          'video_url_5',
+          'force_proxy',
+          'force_proxy_2',
+          'force_proxy_4',
+          'created_at',
+          'updated_at',
+        ].map((column_name) => ({ column_name }));
+      }
+      return [{ episode_count: 5 }];
+    };
+
+    const result = await runDiagnosticWithSql(mockSql, env, '2026-11-19T00:00:00.000Z', url);
+    expect(result.connectionEstablished).toBe(true);
+    expect(result.forceProxyColumnsCount).toBe(3);
+    expect(result.forceProxyColumnsTotal).toBe(5);
+    expect(result.missingColumns).toContain('force_proxy_3');
+    expect(result.missingColumns).toContain('force_proxy_5');
+    expect(result.correctionSql).toContain('ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS force_proxy_3 boolean DEFAULT NULL;');
+    expect(result.correctionSql).toContain('ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS force_proxy_5 boolean DEFAULT NULL;');
   });
 });
 

@@ -8,7 +8,8 @@
   },
   "scripts": {
     "dev": "vite dev --port=3000 --host=0.0.0.0",
-    "build": "NODE_ENV=production vite build",
+    "prebuild": "tsx scripts/migrate.ts",
+    "build": "tsx scripts/migrate.ts && NODE_ENV=production vite build",
     "start": "node .output/server/index.mjs",
     "preview": "vite preview --port=3000 --host=0.0.0.0",
     "clean": "rm -rf dist .output .vercel .nitro src/routeTree.gen.ts",

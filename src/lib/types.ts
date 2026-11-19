@@ -108,6 +108,8 @@ export interface DatabaseDiagnosticResult {
   unqualifiedTableReadError: SanitizedDbError | null;
   expectedColumns: string[];
   missingColumns: string[];
+  forceProxyColumnsCount: number;
+  forceProxyColumnsTotal: number;
   correctionSql: string | null;
 }
 

@@ -151,7 +151,12 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
   try {
     const rows = await sql`
       SELECT id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-             force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5, created_at, updated_at
+             COALESCE(force_proxy, false) AS force_proxy,
+             COALESCE(force_proxy_2, false) AS force_proxy_2,
+             COALESCE(force_proxy_3, false) AS force_proxy_3,
+             COALESCE(force_proxy_4, false) AS force_proxy_4,
+             COALESCE(force_proxy_5, false) AS force_proxy_5,
+             created_at, updated_at
       FROM public.player_episodes
       ORDER BY created_at DESC
     `;
@@ -163,21 +168,25 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
     if (err?.code === '42703' || String(err?.message).includes('column')) {
       const rows = await sql`
         SELECT id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-               created_at, updated_at
-        FROM public.player_episodes
+               created_at, updated_at,
+               to_jsonb(p) AS row_data
+        FROM public.player_episodes p
         ORDER BY created_at DESC
       `;
       if (!Array.isArray(rows)) {
         throw new Error('Formato inesperado de resposta retornado pelo driver Neon ao listar episódios.');
       }
-      return (rows as Array<Record<string, unknown>>).map((row) => ({
-        ...mapEpisodeRow(row),
-        force_proxy: null,
-        force_proxy_2: null,
-        force_proxy_3: null,
-        force_proxy_4: null,
-        force_proxy_5: null,
-      }));
+      return (rows as Array<Record<string, unknown>>).map((row) => {
+        const data = (row.row_data as Record<string, unknown>) ?? row;
+        return mapEpisodeRow({
+          ...row,
+          force_proxy: data.force_proxy === true ? true : null,
+          force_proxy_2: data.force_proxy_2 === true ? true : null,
+          force_proxy_3: data.force_proxy_3 === true ? true : null,
+          force_proxy_4: data.force_proxy_4 === true ? true : null,
+          force_proxy_5: data.force_proxy_5 === true ? true : null,
+        });
+      });
     }
     throw err;
   }
@@ -193,7 +202,12 @@ export async function getEpisodeById(id: string): Promise<PlayerEpisode | null> 
   try {
     const rows = await sql`
       SELECT id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-             force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5, created_at, updated_at
+             COALESCE(force_proxy, false) AS force_proxy,
+             COALESCE(force_proxy_2, false) AS force_proxy_2,
+             COALESCE(force_proxy_3, false) AS force_proxy_3,
+             COALESCE(force_proxy_4, false) AS force_proxy_4,
+             COALESCE(force_proxy_5, false) AS force_proxy_5,
+             created_at, updated_at
       FROM public.player_episodes
       WHERE id = ${cleanId}
       LIMIT 1
@@ -204,22 +218,23 @@ export async function getEpisodeById(id: string): Promise<PlayerEpisode | null> 
     if (err?.code === '42703' || String(err?.message).includes('column')) {
       const rows = await sql`
         SELECT id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-               created_at, updated_at
-        FROM public.player_episodes
+               created_at, updated_at,
+               to_jsonb(p) AS row_data
+        FROM public.player_episodes p
         WHERE id = ${cleanId}
         LIMIT 1
       `;
       const row = Array.isArray(rows) ? (rows as Array<Record<string, unknown>>)[0] : undefined;
-      return row
-        ? {
-            ...mapEpisodeRow(row),
-            force_proxy: null,
-            force_proxy_2: null,
-            force_proxy_3: null,
-            force_proxy_4: null,
-            force_proxy_5: null,
-          }
-        : null;
+      if (!row) return null;
+      const data = (row.row_data as Record<string, unknown>) ?? row;
+      return mapEpisodeRow({
+        ...row,
+        force_proxy: data.force_proxy === true ? true : null,
+        force_proxy_2: data.force_proxy_2 === true ? true : null,
+        force_proxy_3: data.force_proxy_3 === true ? true : null,
+        force_proxy_4: data.force_proxy_4 === true ? true : null,
+        force_proxy_5: data.force_proxy_5 === true ? true : null,
+      });
     }
     throw err;
   }
@@ -230,30 +245,57 @@ export async function createEpisode(rawInput: EpisodeWriteInput): Promise<Player
   const id = generateEpisodeId();
   const sql = getSql();
 
-  const rows = await sql`
-    INSERT INTO public.player_episodes (
-      id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-      force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5
-    ) VALUES (
-      ${id},
-      ${input.title},
-      ${input.poster_url},
-      ${input.video_url},
-      ${input.video_url_2 ?? null},
-      ${input.video_url_3 ?? null},
-      ${input.video_url_4 ?? null},
-      ${input.video_url_5 ?? null},
-      ${input.force_proxy ?? null},
-      ${input.force_proxy_2 ?? null},
-      ${input.force_proxy_3 ?? null},
-      ${input.force_proxy_4 ?? null},
-      ${input.force_proxy_5 ?? null}
-    )
-    RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-              force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5, created_at, updated_at
-  `;
-
-  return mapEpisodeRow((rows as Array<Record<string, unknown>>)[0]);
+  try {
+    const rows = await sql`
+      INSERT INTO public.player_episodes (
+        id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+        force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5
+      ) VALUES (
+        ${id},
+        ${input.title},
+        ${input.poster_url},
+        ${input.video_url},
+        ${input.video_url_2 ?? null},
+        ${input.video_url_3 ?? null},
+        ${input.video_url_4 ?? null},
+        ${input.video_url_5 ?? null},
+        ${input.force_proxy ?? null},
+        ${input.force_proxy_2 ?? null},
+        ${input.force_proxy_3 ?? null},
+        ${input.force_proxy_4 ?? null},
+        ${input.force_proxy_5 ?? null}
+      )
+      RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                COALESCE(force_proxy, false) AS force_proxy,
+                COALESCE(force_proxy_2, false) AS force_proxy_2,
+                COALESCE(force_proxy_3, false) AS force_proxy_3,
+                COALESCE(force_proxy_4, false) AS force_proxy_4,
+                COALESCE(force_proxy_5, false) AS force_proxy_5,
+                created_at, updated_at
+    `;
+    return mapEpisodeRow((rows as Array<Record<string, unknown>>)[0]);
+  } catch (err: any) {
+    if (err?.code === '42703' || String(err?.message).includes('column')) {
+      const rows = await sql`
+        INSERT INTO public.player_episodes (
+          id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5
+        ) VALUES (
+          ${id},
+          ${input.title},
+          ${input.poster_url},
+          ${input.video_url},
+          ${input.video_url_2 ?? null},
+          ${input.video_url_3 ?? null},
+          ${input.video_url_4 ?? null},
+          ${input.video_url_5 ?? null}
+        )
+        RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                  created_at, updated_at
+      `;
+      return mapEpisodeRow((rows as Array<Record<string, unknown>>)[0]);
+    }
+    throw err;
+  }
 }
 
 export async function updateEpisode(
@@ -268,29 +310,56 @@ export async function updateEpisode(
   const input = sanitizeEpisodeInput(rawInput);
   const sql = getSql();
 
-  const rows = await sql`
-    UPDATE public.player_episodes
-    SET
-      title = ${input.title},
-      poster_url = ${input.poster_url},
-      video_url = ${input.video_url},
-      video_url_2 = ${input.video_url_2 ?? null},
-      video_url_3 = ${input.video_url_3 ?? null},
-      video_url_4 = ${input.video_url_4 ?? null},
-      video_url_5 = ${input.video_url_5 ?? null},
-      force_proxy = ${input.force_proxy ?? null},
-      force_proxy_2 = ${input.force_proxy_2 ?? null},
-      force_proxy_3 = ${input.force_proxy_3 ?? null},
-      force_proxy_4 = ${input.force_proxy_4 ?? null},
-      force_proxy_5 = ${input.force_proxy_5 ?? null},
-      updated_at = NOW()
-    WHERE id = ${cleanId}
-    RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-              force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5, created_at, updated_at
-  `;
-
-  const row = (rows as Array<Record<string, unknown>>)[0];
-  return row ? mapEpisodeRow(row) : null;
+  try {
+    const rows = await sql`
+      UPDATE public.player_episodes
+      SET
+        title = ${input.title},
+        poster_url = ${input.poster_url},
+        video_url = ${input.video_url},
+        video_url_2 = ${input.video_url_2 ?? null},
+        video_url_3 = ${input.video_url_3 ?? null},
+        video_url_4 = ${input.video_url_4 ?? null},
+        video_url_5 = ${input.video_url_5 ?? null},
+        force_proxy = ${input.force_proxy ?? null},
+        force_proxy_2 = ${input.force_proxy_2 ?? null},
+        force_proxy_3 = ${input.force_proxy_3 ?? null},
+        force_proxy_4 = ${input.force_proxy_4 ?? null},
+        force_proxy_5 = ${input.force_proxy_5 ?? null},
+        updated_at = NOW()
+      WHERE id = ${cleanId}
+      RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                COALESCE(force_proxy, false) AS force_proxy,
+                COALESCE(force_proxy_2, false) AS force_proxy_2,
+                COALESCE(force_proxy_3, false) AS force_proxy_3,
+                COALESCE(force_proxy_4, false) AS force_proxy_4,
+                COALESCE(force_proxy_5, false) AS force_proxy_5,
+                created_at, updated_at
+    `;
+    const row = (rows as Array<Record<string, unknown>>)[0];
+    return row ? mapEpisodeRow(row) : null;
+  } catch (err: any) {
+    if (err?.code === '42703' || String(err?.message).includes('column')) {
+      const rows = await sql`
+        UPDATE public.player_episodes
+        SET
+          title = ${input.title},
+          poster_url = ${input.poster_url},
+          video_url = ${input.video_url},
+          video_url_2 = ${input.video_url_2 ?? null},
+          video_url_3 = ${input.video_url_3 ?? null},
+          video_url_4 = ${input.video_url_4 ?? null},
+          video_url_5 = ${input.video_url_5 ?? null},
+          updated_at = NOW()
+        WHERE id = ${cleanId}
+        RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                  created_at, updated_at
+      `;
+      const row = (rows as Array<Record<string, unknown>>)[0];
+      return row ? mapEpisodeRow(row) : null;
+    }
+    throw err;
+  }
 }
 
 export async function deleteEpisode(id: string): Promise<boolean> {
@@ -504,6 +573,8 @@ export async function runDiagnosticWithSql(
       unqualifiedTableReadError: null,
       expectedColumns: [],
       missingColumns: [],
+      forceProxyColumnsCount: 0,
+      forceProxyColumnsTotal: 5,
       correctionSql: null,
     };
   }
@@ -532,6 +603,8 @@ export async function runDiagnosticWithSql(
       unqualifiedTableReadError: null,
       expectedColumns: [],
       missingColumns: [],
+      forceProxyColumnsCount: 0,
+      forceProxyColumnsTotal: 5,
       correctionSql: null,
     };
   }
@@ -576,6 +649,8 @@ export async function runDiagnosticWithSql(
         unqualifiedTableReadError: null,
         expectedColumns: [],
         missingColumns: [],
+        forceProxyColumnsCount: 0,
+        forceProxyColumnsTotal: 5,
         correctionSql: null,
       };
     }
@@ -605,6 +680,8 @@ export async function runDiagnosticWithSql(
       unqualifiedTableReadError: null,
       expectedColumns: [],
       missingColumns: [],
+      forceProxyColumnsCount: 0,
+      forceProxyColumnsTotal: 5,
       correctionSql: null,
     };
   }
@@ -711,6 +788,16 @@ export async function runDiagnosticWithSql(
     }
   } catch {}
 
+  const expectedProxyColumns = [
+    'force_proxy',
+    'force_proxy_2',
+    'force_proxy_3',
+    'force_proxy_4',
+    'force_proxy_5',
+  ];
+  const forceProxyColumnsCount = expectedProxyColumns.filter((c) => existingColumns.includes(c)).length;
+  const forceProxyColumnsTotal = 5;
+
   const missingColumns = expectedColumns.filter((c) => !existingColumns.includes(c));
   const correctionSql = missingColumns.length > 0
     ? missingColumns.map((c) => `ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS ${c} ${c.startsWith('force_proxy') ? 'boolean DEFAULT NULL' : 'TEXT'};`).join('\n')
@@ -753,6 +840,8 @@ export async function runDiagnosticWithSql(
     unqualifiedTableReadError,
     expectedColumns,
     missingColumns,
+    forceProxyColumnsCount,
+    forceProxyColumnsTotal,
     correctionSql,
   };
 }
@@ -788,10 +877,83 @@ export async function diagnoseDatabaseConnection(): Promise<DatabaseDiagnosticRe
       unqualifiedTableReadError: null,
       expectedColumns: [],
       missingColumns: [],
+      forceProxyColumnsCount: 0,
+      forceProxyColumnsTotal: 5,
       correctionSql: null,
     };
   }
 
   return runDiagnosticWithSql(sql, env, checkedAt);
+}
+
+export const EXPECTED_PROXY_COLUMNS = [
+  'force_proxy',
+  'force_proxy_2',
+  'force_proxy_3',
+  'force_proxy_4',
+  'force_proxy_5',
+] as const;
+
+export async function verifySchemaOnBoot(): Promise<{
+  existingColumns: string[];
+  missingColumns: string[];
+  forceProxyColumnsCount: number;
+  correctionSql: string | null;
+}> {
+  if (!isDatabaseConfigured()) {
+    return {
+      existingColumns: [],
+      missingColumns: [],
+      forceProxyColumnsCount: 0,
+      correctionSql: null,
+    };
+  }
+
+  try {
+    const sql = getSql();
+    const colRows = await sql`
+      SELECT column_name
+      FROM information_schema.columns
+      WHERE table_schema = 'public' AND table_name = 'player_episodes'
+    `;
+    const existing = Array.isArray(colRows) ? colRows.map((r: any) => String(r.column_name)) : [];
+    const missing = EXPECTED_PROXY_COLUMNS.filter((c) => !existing.includes(c));
+    const forceProxyColumnsCount = EXPECTED_PROXY_COLUMNS.filter((c) => existing.includes(c)).length;
+
+    const correctionSql = missing.length > 0
+      ? missing
+          .map((c) => `ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS ${c} boolean DEFAULT NULL;`)
+          .join('\n')
+      : null;
+
+    if (missing.length > 0) {
+      console.warn(
+        `[BOOT SCHEMA WARNING] Colunas force_proxy ausentes (${forceProxyColumnsCount}/5 presentes): ${missing.join(', ')}\n` +
+        `SQL pronto para aplicar no Neon:\n${correctionSql}`
+      );
+    } else {
+      console.log(`[BOOT SCHEMA OK] 5/5 colunas force_proxy verificadas em player_episodes.`);
+    }
+
+    return {
+      existingColumns: existing,
+      missingColumns: missing,
+      forceProxyColumnsCount,
+      correctionSql,
+    };
+  } catch (err: any) {
+    console.warn('[BOOT SCHEMA ERROR] Não foi possível verificar colunas no boot:', err?.message || err);
+    return {
+      existingColumns: [],
+      missingColumns: [],
+      forceProxyColumnsCount: 0,
+      correctionSql: null,
+    };
+  }
+}
+
+// Inicia verificação no boot do servidor caso esteja em ambiente Node/Server
+if (typeof window === 'undefined' && isDatabaseConfigured()) {
+  void verifySchemaOnBoot();
 }
 
