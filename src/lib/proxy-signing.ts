@@ -68,7 +68,7 @@ function resolveAndSignUri(
   signFn: (resolvedUrl: string) => string
 ): string {
   const trimmed = rawUri.trim();
-  if (!trimmed || trimmed.startsWith('data:')) {
+  if (!trimmed || trimmed.startsWith('data:') || trimmed.startsWith('skd:')) {
     return rawUri;
   }
   const absolute = new URL(trimmed, baseUrl).toString();
@@ -91,15 +91,18 @@ export function rewriteM3u8Playlist(
     }
 
     if (trimmed.startsWith('#')) {
-      // Rewrite URI="..." inside tags such as #EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA, #EXT-X-I-FRAME-STREAM-INF
-      const rewrittenTag = line.replace(/URI="([^"]+)"/gi, (_match, uriValue: string) => {
-        try {
-          const proxied = resolveAndSignUri(uriValue, baseUrl, signFn);
-          return `URI="${proxied}"`;
-        } catch {
-          return `URI="${uriValue}"`;
+      // Rewrite URI="..." or URI='...' inside tags such as #EXT-X-KEY, #EXT-X-MAP, #EXT-X-MEDIA, #EXT-X-I-FRAME-STREAM-INF
+      const rewrittenTag = line.replace(
+        /URI=(["'])([^"']+)\1/gi,
+        (_match, quote: string, uriValue: string) => {
+          try {
+            const proxied = resolveAndSignUri(uriValue, baseUrl, signFn);
+            return `URI=${quote}${proxied}${quote}`;
+          } catch {
+            return `URI=${quote}${uriValue}${quote}`;
+          }
         }
-      });
+      );
       output.push(rewrittenTag);
       continue;
     }

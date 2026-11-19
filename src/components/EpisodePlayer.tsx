@@ -11,6 +11,12 @@ import {
   VolumeX,
 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  canUseDirectMaximaimgFallback,
+  classifyHlsError,
+  decideHlsErrorAction,
+  type PlaybackStrategy,
+} from '@/lib/hls-playback';
 import type { PlayableSource } from '@/lib/types';
 import { getNextFallbackSourceIndex } from '@/lib/video-sources';
 
@@ -48,7 +54,10 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
     slot: number;
     mode: 'video' | 'hls' | 'iframe';
     url: string;
+    strategy: PlaybackStrategy;
   } | null>(null);
+
+  const attemptedDirectSlotsRef = useRef<Set<number>>(new Set());
 
   const [isLoadingSource, setIsLoadingSource] = useState(false);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
@@ -68,6 +77,11 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
   const [hoverTime, setHoverTime] = useState<{ time: number; pct: number } | null>(null);
 
   const activeSource = sources[activeIndex] ?? null;
+  const activeSourceRef = useRef(activeSource);
+  activeSourceRef.current = activeSource;
+
+  const playbackRateRef = useRef(playbackRate);
+  playbackRateRef.current = playbackRate;
 
   const cleanupHls = useCallback(() => {
     if (hlsInstanceRef.current) {
@@ -120,6 +134,9 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
     [activeIndex, cleanupHls, sources]
   );
 
+  const triggerFailoverRef = useRef(triggerFailover);
+  triggerFailoverRef.current = triggerFailover;
+
   // Resolve source ONLY after user clicks Play
   useEffect(() => {
     if (!hasStarted || !activeSource) return;
@@ -139,6 +156,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
             slot: source.slot,
             mode: 'iframe',
             url: source.playUrl,
+            strategy: 'iframe',
           });
           setIsLoadingSource(false);
         }
@@ -162,6 +180,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
               slot: source.slot,
               mode: 'hls',
               url: payload.hlsUrl,
+              strategy: 'direct',
             });
           } else {
             setStatusNotice(
@@ -171,6 +190,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
               slot: source.slot,
               mode: 'iframe',
               url: payload.embedUrl || source.fallbackIframeUrl || source.playUrl,
+              strategy: 'iframe',
             });
             setIsLoadingSource(false);
           }
@@ -181,6 +201,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
               slot: source.slot,
               mode: 'iframe',
               url: source.fallbackIframeUrl,
+              strategy: 'iframe',
             });
             setIsLoadingSource(false);
           } else {
@@ -196,6 +217,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
             slot: source.slot,
             mode: 'hls',
             url: source.playUrl,
+            strategy: source.needsProxy ? 'proxy' : 'direct',
           });
         }
         return;
@@ -207,6 +229,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
           slot: source.slot,
           mode: 'video',
           url: source.playUrl,
+          strategy: source.needsProxy ? 'proxy' : 'direct',
         });
       }
     }
@@ -233,7 +256,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
 
     const startPlayback = async () => {
       try {
-        video.playbackRate = playbackRate;
+        video.playbackRate = playbackRateRef.current;
         await video.play();
       } catch {
         // Browser may require explicit interaction if switched asynchronously; keep controls visible
@@ -257,6 +280,13 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
       const el = videoRef.current;
       if (!el || !resolvedRuntime) return;
 
+      let networkRetriesUsed = 0;
+      let mediaRecoveriesUsed = 0;
+
+      console.info(
+        `[Hikari Player] Iniciando reprodução HLS (slot=${resolvedRuntime.slot}, estratégia=${resolvedRuntime.strategy}).`
+      );
+
       try {
         const HlsModule = await import('hls.js');
         const Hls = HlsModule.default;
@@ -273,31 +303,97 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
 
           hls.on(Hls.Events.MANIFEST_PARSED, () => {
             if (cancelled) return;
+            console.info(
+              `[Hikari Player] Manifesto HLS carregado (slot=${resolvedRuntime.slot}, estratégia=${resolvedRuntime.strategy}).`
+            );
             setIsLoadingSource(false);
+            if (resolvedRuntime.strategy === 'direct') {
+              setStatusNotice(null);
+            }
             void startPlayback();
           });
 
           hls.on(Hls.Events.ERROR, (_event, data) => {
             if (cancelled || !data.fatal) return;
-            if (data.type === Hls.ErrorTypes.MEDIA_ERROR) {
-              hls.recoverMediaError();
-              return;
-            }
-            const source = activeSource;
-            if (source?.fallbackIframeUrl && source.provider === 'mux') {
+
+            const diagnostic = classifyHlsError({
+              type: data.type,
+              details: data.details,
+              httpCode: data.response?.code,
+              url: data.url ?? data.frag?.url ?? data.context?.url ?? resolvedRuntime.url,
+            });
+
+            console.warn('[Hikari Player] Erro fatal HLS.js:', {
+              slot: resolvedRuntime.slot,
+              strategy: resolvedRuntime.strategy,
+              category: diagnostic.category,
+              type: diagnostic.type,
+              details: diagnostic.details,
+              httpCode: diagnostic.httpCode,
+              url: diagnostic.url,
+            });
+
+            const source = activeSourceRef.current;
+            if (
+              diagnostic.category !== 'decode' &&
+              source?.fallbackIframeUrl &&
+              source.provider === 'mux'
+            ) {
               setStatusNotice('Stream HLS indisponível — alternando para embed Mux.');
               setResolvedRuntime({
                 slot: source.slot,
                 mode: 'iframe',
                 url: source.fallbackIframeUrl,
+                strategy: 'iframe',
               });
               setIsLoadingSource(false);
               return;
             }
-            triggerFailover(
-              resolvedRuntime.slot,
-              'Falha ao carregar transmissão HLS.'
+
+            const alreadyAttemptedDirect = attemptedDirectSlotsRef.current.has(
+              resolvedRuntime.slot
             );
+            const decision = decideHlsErrorAction({
+              source,
+              strategy: resolvedRuntime.strategy,
+              alreadyAttemptedDirect,
+              networkRetriesUsed,
+              mediaRecoveriesUsed,
+              diagnostic,
+            });
+
+            if (decision.action === 'recover_media') {
+              mediaRecoveriesUsed += 1;
+              hls.recoverMediaError();
+              return;
+            }
+
+            if (decision.action === 'retry_load') {
+              networkRetriesUsed += 1;
+              console.info(
+                `[Hikari Player] Tentando recuperação controlada com hls.startLoad() (slot=${resolvedRuntime.slot}, estratégia=${resolvedRuntime.strategy}).`
+              );
+              hls.startLoad();
+              return;
+            }
+
+            if (decision.action === 'fallback_direct' && source) {
+              attemptedDirectSlotsRef.current.add(resolvedRuntime.slot);
+              console.warn(
+                `[Hikari Player] Proxy HLS falhou (${diagnostic.category}, HTTP ${diagnostic.httpCode ?? 'N/A'}); tentando URL original direta Maximaimg (tentativa única).`
+              );
+              cleanupHls();
+              setStatusNotice('Tentando conexão direta com o servidor de vídeo...');
+              setResolvedRuntime({
+                slot: resolvedRuntime.slot,
+                mode: 'hls',
+                url: source.resolvedUrl,
+                strategy: 'direct',
+              });
+              return;
+            }
+
+            triggerFailoverRef.current(resolvedRuntime.slot, decision.reason);
           });
 
           hls.loadSource(resolvedRuntime.url);
@@ -307,6 +403,9 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
 
         // Native HLS (iOS Safari / macOS Safari)
         if (el.canPlayType('application/vnd.apple.mpegurl')) {
+          console.info(
+            `[Hikari Player] Usando HLS nativo do navegador (slot=${resolvedRuntime.slot}, estratégia=${resolvedRuntime.strategy}).`
+          );
           el.src = resolvedRuntime.url;
           el.load();
           setIsLoadingSource(false);
@@ -314,13 +413,13 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
           return;
         }
 
-        triggerFailover(
+        triggerFailoverRef.current(
           resolvedRuntime.slot,
           'Este navegador não oferece suporte à reprodução HLS.'
         );
       } catch {
         if (!cancelled) {
-          triggerFailover(
+          triggerFailoverRef.current(
             resolvedRuntime.slot,
             'Erro ao inicializar motor de reprodução HLS.'
           );
@@ -334,14 +433,15 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
       cancelled = true;
       cleanupHls();
     };
-  }, [
-    hasStarted,
-    resolvedRuntime,
-    cleanupHls,
-    triggerFailover,
-    activeSource,
-    playbackRate,
-  ]);
+  }, [hasStarted, resolvedRuntime, cleanupHls]);
+
+  // Apply playbackRate changes without tearing down or remounting HLS.js / video
+  useEffect(() => {
+    const video = videoRef.current;
+    if (video && video.playbackRate !== playbackRate) {
+      video.playbackRate = playbackRate;
+    }
+  }, [playbackRate, resolvedRuntime]);
 
   // Sync fullscreen state
   useEffect(() => {
@@ -496,6 +596,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
   ]);
 
   const selectSourceManually = (index: number) => {
+    attemptedDirectSlotsRef.current.delete(sources[index].slot);
     setFailedSlots((prev) => {
       const next = new Set(prev);
       next.delete(sources[index].slot);
@@ -510,6 +611,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
   };
 
   const retryPlayback = () => {
+    attemptedDirectSlotsRef.current.clear();
     setFailedSlots(new Set());
     setFatalError(null);
     setStatusNotice(null);
@@ -680,6 +782,29 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
                 setIsMuted(v.muted);
               }}
               onError={() => {
+                if (
+                  activeSource &&
+                  resolvedRuntime?.mode === 'hls' &&
+                  canUseDirectMaximaimgFallback(
+                    activeSource,
+                    resolvedRuntime.strategy,
+                    attemptedDirectSlotsRef.current.has(activeSource.slot)
+                  )
+                ) {
+                  attemptedDirectSlotsRef.current.add(activeSource.slot);
+                  console.warn(
+                    `[Hikari Player] Reprodução HLS via proxy falhou no elemento de vídeo (slot=${activeSource.slot}); tentando URL original direta Maximaimg.`
+                  );
+                  cleanupHls();
+                  setStatusNotice('Tentando conexão direta com o servidor de vídeo...');
+                  setResolvedRuntime({
+                    slot: activeSource.slot,
+                    mode: 'hls',
+                    url: activeSource.resolvedUrl,
+                    strategy: 'direct',
+                  });
+                  return;
+                }
                 if (activeSource) {
                   triggerFailover(
                     activeSource.slot,
