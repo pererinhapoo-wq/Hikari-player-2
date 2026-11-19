@@ -41,8 +41,12 @@ function formatTime(seconds: number): string {
 export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const scrubberRef = useRef<HTMLDivElement>(null);
   const hlsInstanceRef = useRef<{ destroy: () => void } | null>(null);
   const hideControlsTimerRef = useRef<number | null>(null);
+  const singleTapTimerRef = useRef<number | null>(null);
+  const seekFeedbackTimerRef = useRef<number | null>(null);
+  const isMountedRef = useRef(true);
 
   const [hasStarted, setHasStarted] = useState(false);
   const [activeIndex, setActiveIndex] = useState(0);
@@ -75,6 +79,15 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
   const [hoverTime, setHoverTime] = useState<{ time: number; pct: number } | null>(null);
+  const [isSeeking, setIsSeeking] = useState(false);
+  const [scrubTime, setScrubTime] = useState<number | null>(null);
+  const [isAdjustingVolume, setIsAdjustingVolume] = useState(false);
+  const [isHoveringControls, setIsHoveringControls] = useState(false);
+  const [seekFeedback, setSeekFeedback] = useState<{
+    side: 'left' | 'right';
+    seconds: number;
+    key: number;
+  } | null>(null);
 
   const activeSource = sources[activeIndex] ?? null;
   const activeSourceRef = useRef(activeSource);
@@ -82,6 +95,33 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
 
   const playbackRateRef = useRef(playbackRate);
   playbackRateRef.current = playbackRate;
+
+  const speedMenuOpenRef = useRef(speedMenuOpen);
+  speedMenuOpenRef.current = speedMenuOpen;
+
+  const isSeekingRef = useRef(isSeeking);
+  isSeekingRef.current = isSeeking;
+
+  const isAdjustingVolumeRef = useRef(isAdjustingVolume);
+  isAdjustingVolumeRef.current = isAdjustingVolume;
+
+  const isHoveringControlsRef = useRef(isHoveringControls);
+  isHoveringControlsRef.current = isHoveringControls;
+
+  const controlsVisibleRef = useRef(controlsVisible);
+  controlsVisibleRef.current = controlsVisible;
+
+  const pointerDownInfoRef = useRef<{
+    pointerId: number;
+    pointerType: string;
+    x: number;
+    y: number;
+  } | null>(null);
+  const lastTouchTapRef = useRef<{
+    time: number;
+    region: 'left' | 'center' | 'right';
+  } | null>(null);
+  const activeScrubPointerIdRef = useRef<number | null>(null);
 
   const cleanupHls = useCallback(() => {
     if (hlsInstanceRef.current) {
@@ -94,18 +134,104 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
     }
   }, []);
 
-  const scheduleHideControls = useCallback(() => {
-    if (hideControlsTimerRef.current) {
+  const clearHideControlsTimer = useCallback(() => {
+    if (hideControlsTimerRef.current !== null) {
       window.clearTimeout(hideControlsTimerRef.current);
+      hideControlsTimerRef.current = null;
     }
-    setControlsVisible(true);
-    hideControlsTimerRef.current = window.setTimeout(() => {
-      if (videoRef.current && !videoRef.current.paused) {
-        setControlsVisible(false);
-        setSpeedMenuOpen(false);
-      }
-    }, 2800);
   }, []);
+
+  const hasAutoHideBlocker = useCallback(() => {
+    return (
+      speedMenuOpenRef.current ||
+      isSeekingRef.current ||
+      isAdjustingVolumeRef.current ||
+      isHoveringControlsRef.current
+    );
+  }, []);
+
+  const scheduleHideControls = useCallback(() => {
+    clearHideControlsTimer();
+    setControlsVisible(true);
+    if (hasAutoHideBlocker()) {
+      return;
+    }
+    hideControlsTimerRef.current = window.setTimeout(() => {
+      hideControlsTimerRef.current = null;
+      if (!isMountedRef.current) return;
+      if (
+        videoRef.current &&
+        !videoRef.current.paused &&
+        !speedMenuOpenRef.current &&
+        !isSeekingRef.current &&
+        !isAdjustingVolumeRef.current &&
+        !isHoveringControlsRef.current
+      ) {
+        setControlsVisible(false);
+      }
+    }, 3000);
+  }, [clearHideControlsTimer, hasAutoHideBlocker]);
+
+  useEffect(() => {
+    isMountedRef.current = true;
+    return () => {
+      isMountedRef.current = false;
+      clearHideControlsTimer();
+      if (singleTapTimerRef.current !== null) {
+        window.clearTimeout(singleTapTimerRef.current);
+        singleTapTimerRef.current = null;
+      }
+      if (seekFeedbackTimerRef.current !== null) {
+        window.clearTimeout(seekFeedbackTimerRef.current);
+        seekFeedbackTimerRef.current = null;
+      }
+    };
+  }, [clearHideControlsTimer]);
+
+  // Keep controls visible during active interactions and restart 3s timer when finished
+  useEffect(() => {
+    if (!hasStarted || resolvedRuntime?.mode === 'iframe') return;
+
+    if (
+      !isPlaying ||
+      speedMenuOpen ||
+      isSeeking ||
+      isAdjustingVolume ||
+      isHoveringControls
+    ) {
+      clearHideControlsTimer();
+      setControlsVisible(true);
+      return;
+    }
+
+    if (controlsVisibleRef.current) {
+      scheduleHideControls();
+    }
+  }, [
+    hasStarted,
+    resolvedRuntime?.mode,
+    isPlaying,
+    speedMenuOpen,
+    isSeeking,
+    isAdjustingVolume,
+    isHoveringControls,
+    clearHideControlsTimer,
+    scheduleHideControls,
+  ]);
+
+  // Ensure volume-slider interaction lock never sticks if pointer is released outside slider
+  useEffect(() => {
+    if (!isAdjustingVolume) return;
+    const stopAdjusting = () => {
+      setIsAdjustingVolume(false);
+    };
+    window.addEventListener('pointerup', stopAdjusting);
+    window.addEventListener('pointercancel', stopAdjusting);
+    return () => {
+      window.removeEventListener('pointerup', stopAdjusting);
+      window.removeEventListener('pointercancel', stopAdjusting);
+    };
+  }, [isAdjustingVolume]);
 
   const triggerFailover = useCallback(
     (failedSlot: number, reason: string) => {
@@ -443,14 +569,28 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
     }
   }, [playbackRate, resolvedRuntime]);
 
-  // Sync fullscreen state
+  // Sync fullscreen state (standard + iOS Safari webkitbeginfullscreen/webkitendfullscreen)
   useEffect(() => {
     const onFsChange = () => {
       setIsFullscreen(Boolean(document.fullscreenElement));
     };
+    const onWebkitBegin = () => setIsFullscreen(true);
+    const onWebkitEnd = () => setIsFullscreen(false);
+
     document.addEventListener('fullscreenchange', onFsChange);
-    return () => document.removeEventListener('fullscreenchange', onFsChange);
-  }, []);
+    const video = videoRef.current;
+    if (video) {
+      video.addEventListener('webkitbeginfullscreen', onWebkitBegin);
+      video.addEventListener('webkitendfullscreen', onWebkitEnd);
+    }
+    return () => {
+      document.removeEventListener('fullscreenchange', onFsChange);
+      if (video) {
+        video.removeEventListener('webkitbeginfullscreen', onWebkitBegin);
+        video.removeEventListener('webkitendfullscreen', onWebkitEnd);
+      }
+    };
+  }, [hasStarted, resolvedRuntime?.mode]);
 
   const togglePlayPause = useCallback(() => {
     const video = videoRef.current;
@@ -532,6 +672,197 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
     scheduleHideControls();
   }, [scheduleHideControls]);
 
+  const showSeekFeedback = useCallback((side: 'left' | 'right', seconds: number) => {
+    if (seekFeedbackTimerRef.current !== null) {
+      window.clearTimeout(seekFeedbackTimerRef.current);
+    }
+    setSeekFeedback({ side, seconds, key: Date.now() });
+    seekFeedbackTimerRef.current = window.setTimeout(() => {
+      seekFeedbackTimerRef.current = null;
+      if (isMountedRef.current) {
+        setSeekFeedback(null);
+      }
+    }, 650);
+  }, []);
+
+  const getScrubTimeFromClientX = useCallback(
+    (clientX: number): { time: number; pct: number } | null => {
+      const bar = scrubberRef.current;
+      if (!bar || !Number.isFinite(duration) || duration <= 0) return null;
+      const rect = bar.getBoundingClientRect();
+      if (rect.width <= 0) return null;
+      const pct = Math.max(0, Math.min(1, (clientX - rect.left) / rect.width));
+      return { time: pct * duration, pct: pct * 100 };
+    },
+    [duration]
+  );
+
+  const handleScrubberPointerDown = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      e.stopPropagation();
+      if (e.pointerType === 'mouse' && e.button !== 0) return;
+      e.preventDefault();
+      activeScrubPointerIdRef.current = e.pointerId;
+      try {
+        e.currentTarget.setPointerCapture(e.pointerId);
+      } catch {
+        // Ignore if pointer capture is unsupported
+      }
+      isSeekingRef.current = true;
+      setIsSeeking(true);
+      clearHideControlsTimer();
+      setControlsVisible(true);
+
+      const pos = getScrubTimeFromClientX(e.clientX);
+      if (pos) {
+        setScrubTime(pos.time);
+        setHoverTime(pos);
+      }
+    },
+    [clearHideControlsTimer, getScrubTimeFromClientX]
+  );
+
+  const handleScrubberPointerMove = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const pos = getScrubTimeFromClientX(e.clientX);
+      if (!pos) return;
+      if (e.pointerType !== 'touch' || isSeekingRef.current) {
+        setHoverTime(pos);
+      }
+      if (isSeekingRef.current && activeScrubPointerIdRef.current === e.pointerId) {
+        setScrubTime(pos.time);
+      }
+    },
+    [getScrubTimeFromClientX]
+  );
+
+  const finishScrub = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>, commitSeek: boolean) => {
+      if (!isSeekingRef.current || activeScrubPointerIdRef.current !== e.pointerId) {
+        return;
+      }
+      e.stopPropagation();
+      activeScrubPointerIdRef.current = null;
+      try {
+        if (e.currentTarget.hasPointerCapture(e.pointerId)) {
+          e.currentTarget.releasePointerCapture(e.pointerId);
+        }
+      } catch {
+        // Ignore release errors
+      }
+
+      const pos = getScrubTimeFromClientX(e.clientX);
+      const targetTime = pos ? pos.time : scrubTime;
+      if (commitSeek && videoRef.current && targetTime !== null && Number.isFinite(targetTime)) {
+        videoRef.current.currentTime = targetTime;
+        setCurrentTime(targetTime);
+      }
+
+      isSeekingRef.current = false;
+      setIsSeeking(false);
+      setScrubTime(null);
+      if (e.pointerType === 'touch') {
+        setHoverTime(null);
+      }
+      scheduleHideControls();
+    },
+    [getScrubTimeFromClientX, scheduleHideControls, scrubTime]
+  );
+
+  const handleStagePointerDown = useCallback((e: React.PointerEvent<HTMLDivElement>) => {
+    if (e.pointerType !== 'touch' && e.button !== 0) return;
+    pointerDownInfoRef.current = {
+      pointerId: e.pointerId,
+      pointerType: e.pointerType,
+      x: e.clientX,
+      y: e.clientY,
+    };
+  }, []);
+
+  const handleStagePointerUp = useCallback(
+    (e: React.PointerEvent<HTMLDivElement>) => {
+      const down = pointerDownInfoRef.current;
+      pointerDownInfoRef.current = null;
+      if (!down || down.pointerId !== e.pointerId) return;
+
+      const moved = Math.hypot(e.clientX - down.x, e.clientY - down.y);
+      if (moved > 12) {
+        return;
+      }
+
+      // Mouse / pen click preserves immediate Play/Pause behavior
+      if (e.pointerType !== 'touch') {
+        if (speedMenuOpenRef.current) {
+          setSpeedMenuOpen(false);
+        }
+        togglePlayPause();
+        return;
+      }
+
+      // Touch gestures: single tap toggles controls (never play/pause); double tap seeks or toggles fullscreen
+      const rect = e.currentTarget.getBoundingClientRect();
+      const ratio = rect.width > 0 ? (e.clientX - rect.left) / rect.width : 0.5;
+      const region: 'left' | 'center' | 'right' =
+        ratio < 0.35 ? 'left' : ratio > 0.65 ? 'right' : 'center';
+
+      const now = Date.now();
+      const lastTap = lastTouchTapRef.current;
+
+      if (lastTap && now - lastTap.time <= 250 && lastTap.region === region) {
+        if (singleTapTimerRef.current !== null) {
+          window.clearTimeout(singleTapTimerRef.current);
+          singleTapTimerRef.current = null;
+        }
+        lastTouchTapRef.current = null;
+
+        if (region === 'left') {
+          seekBy(-10);
+          showSeekFeedback('left', 10);
+        } else if (region === 'right') {
+          seekBy(10);
+          showSeekFeedback('right', 10);
+        } else {
+          void toggleFullscreen();
+        }
+        return;
+      }
+
+      lastTouchTapRef.current = { time: now, region };
+      if (singleTapTimerRef.current !== null) {
+        window.clearTimeout(singleTapTimerRef.current);
+      }
+
+      singleTapTimerRef.current = window.setTimeout(() => {
+        singleTapTimerRef.current = null;
+        lastTouchTapRef.current = null;
+        if (!isMountedRef.current) return;
+
+        if (speedMenuOpenRef.current) {
+          setSpeedMenuOpen(false);
+          scheduleHideControls();
+          return;
+        }
+
+        if (videoRef.current && videoRef.current.paused) {
+          setControlsVisible(true);
+          return;
+        }
+
+        if (controlsVisibleRef.current) {
+          clearHideControlsTimer();
+          setControlsVisible(false);
+        } else {
+          scheduleHideControls();
+        }
+      }, 250);
+    },
+    [clearHideControlsTimer, scheduleHideControls, seekBy, showSeekFeedback, toggleFullscreen, togglePlayPause]
+  );
+
+  const handleStagePointerCancel = useCallback(() => {
+    pointerDownInfoRef.current = null;
+  }, []);
+
   // Keyboard shortcuts while player is active in video/hls mode
   useEffect(() => {
     if (!hasStarted || resolvedRuntime?.mode === 'iframe') return;
@@ -544,6 +875,13 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
           target.tagName === 'TEXTAREA' ||
           target.isContentEditable)
       ) {
+        return;
+      }
+
+      if (e.key === 'Escape' && speedMenuOpenRef.current) {
+        e.preventDefault();
+        setSpeedMenuOpen(false);
+        scheduleHideControls();
         return;
       }
 
@@ -593,6 +931,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
     volume,
     toggleMute,
     toggleFullscreen,
+    scheduleHideControls,
   ]);
 
   const selectSourceManually = (index: number) => {
@@ -620,10 +959,12 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
     setHasStarted(true);
   };
 
+  const displayedTime = scrubTime ?? currentTime;
+
   const progressPct = useMemo(() => {
     if (!duration || duration <= 0) return 0;
-    return Math.min(100, Math.max(0, (currentTime / duration) * 100));
-  }, [currentTime, duration]);
+    return Math.min(100, Math.max(0, (displayedTime / duration) * 100));
+  }, [displayedTime, duration]);
 
   const bufferedPct = useMemo(() => {
     if (!duration || duration <= 0) return 0;
@@ -687,8 +1028,15 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
       {/* Cinema stage */}
       <div
         ref={containerRef}
-        onMouseMove={hasStarted ? scheduleHideControls : undefined}
-        onTouchStart={hasStarted ? scheduleHideControls : undefined}
+        onPointerMove={
+          hasStarted && resolvedRuntime?.mode !== 'iframe'
+            ? (e) => {
+                if (e.pointerType !== 'touch') {
+                  scheduleHideControls();
+                }
+              }
+            : undefined
+        }
         className="relative w-full aspect-video bg-black border border-white/10 rounded-xl overflow-hidden select-none group"
       >
         {/* INITIAL GATE: Static cover + Play button (no video/iframe/hls mounted before click) */}
@@ -718,7 +1066,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
                   scheduleHideControls();
                 }}
                 aria-label={`Reproduzir ${title}`}
-                className="w-20 h-20 rounded-full bg-rose-600 hover:bg-rose-500 active:scale-95 text-white flex items-center justify-center shadow-xl transition-transform duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-rose-500/50 cursor-pointer"
+                className="w-20 h-20 rounded-full bg-[#a855f7] hover:bg-[#9333ea] active:scale-95 text-white flex items-center justify-center shadow-[0_0_30px_rgba(168,85,247,0.45)] transition-transform duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#a855f7]/50 cursor-pointer"
               >
                 <Play className="w-8 h-8 fill-current ml-1" />
               </button>
@@ -750,7 +1098,6 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
               poster={posterError ? undefined : posterUrl}
               playsInline
               preload="metadata"
-              onClick={togglePlayPause}
               onLoadStart={() => setIsLoadingSource(true)}
               onCanPlay={() => setIsLoadingSource(false)}
               onPlay={() => {
@@ -812,120 +1159,164 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
                   );
                 }
               }}
-              className="w-full h-full object-contain bg-black cursor-pointer"
+              className="w-full h-full object-contain bg-black"
             />
 
-            {/* Loading spinner overlay */}
-            {isLoadingSource && (
-              <div className="pointer-events-none absolute inset-0 flex items-center justify-center bg-black/40">
-                <div className="w-10 h-10 rounded-full border-2 border-white/25 border-t-rose-500 animate-spin" />
+            {/* Interactive gesture layer (mouse click = Play/Pause; touch single-tap = controls; double-tap = seek/fullscreen) */}
+            <div
+              onPointerDown={handleStagePointerDown}
+              onPointerUp={handleStagePointerUp}
+              onPointerCancel={handleStagePointerCancel}
+              className="absolute inset-0 z-10 cursor-pointer"
+            />
+
+            {/* Double-tap seek feedback indicator */}
+            {seekFeedback && (
+              <div
+                key={seekFeedback.key}
+                className={`pointer-events-none absolute top-1/2 -translate-y-1/2 z-20 flex flex-col items-center gap-1 px-4 py-3 rounded-2xl bg-black/70 backdrop-blur-md border border-white/15 text-white shadow-xl ${
+                  seekFeedback.side === 'left' ? 'left-6 sm:left-12' : 'right-6 sm:right-12'
+                }`}
+              >
+                {seekFeedback.side === 'left' ? (
+                  <RotateCcw className="w-5 h-5 text-[#a855f7]" />
+                ) : (
+                  <RotateCw className="w-5 h-5 text-[#a855f7]" />
+                )}
+                <span className="text-xs font-mono font-semibold tabular-nums">
+                  {seekFeedback.side === 'left' ? `-${seekFeedback.seconds}s` : `+${seekFeedback.seconds}s`}
+                </span>
               </div>
             )}
 
-            {/* Center Play/Pause indicator when paused */}
+            {/* Loading spinner overlay */}
+            {isLoadingSource && (
+              <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-black/30">
+                <div className="w-10 h-10 rounded-full border-2 border-white/25 border-t-[#a855f7] animate-spin" />
+              </div>
+            )}
+
+            {/* Center Play button when paused */}
             {!isPlaying && !isLoadingSource && (
               <button
                 type="button"
-                onClick={togglePlayPause}
+                onPointerDown={(e) => e.stopPropagation()}
+                onPointerUp={(e) => e.stopPropagation()}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  togglePlayPause();
+                }}
                 aria-label="Continuar reprodução"
-                className="absolute inset-0 m-auto w-16 h-16 rounded-full bg-black/65 hover:bg-rose-600 text-white flex items-center justify-center border border-white/15 transition-colors cursor-pointer"
+                className="absolute inset-0 m-auto z-20 w-16 h-16 rounded-full bg-black/65 hover:bg-[#a855f7] text-white flex items-center justify-center border border-white/20 backdrop-blur-md shadow-[0_8px_28px_rgba(0,0,0,0.5)] transition-all duration-150 hover:scale-105 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer"
               >
                 <Play className="w-7 h-7 fill-current ml-0.5" />
               </button>
             )}
 
-            {/* Custom Controls Bar */}
+            {/* Floating translucent bottom controls bar */}
             <div
-              className={`absolute inset-x-0 bottom-0 bg-gradient-to-t from-black/95 via-black/70 to-transparent pt-10 pb-3 px-3 sm:px-4 transition-opacity duration-200 ${
-                controlsVisible || !isPlaying ? 'opacity-100' : 'opacity-0 pointer-events-none'
+              onPointerEnter={(e) => {
+                if (e.pointerType !== 'touch') {
+                  setIsHoveringControls(true);
+                }
+              }}
+              onPointerLeave={(e) => {
+                if (e.pointerType !== 'touch') {
+                  setIsHoveringControls(false);
+                }
+              }}
+              onPointerDown={(e) => e.stopPropagation()}
+              onPointerUp={(e) => e.stopPropagation()}
+              onClick={(e) => e.stopPropagation()}
+              className={`absolute inset-x-2.5 bottom-2.5 sm:inset-x-4 sm:bottom-4 z-20 rounded-2xl bg-black/70 backdrop-blur-md border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.55)] px-2.5 sm:px-4 pt-2 pb-2 transition-all duration-200 ${
+                controlsVisible || !isPlaying || speedMenuOpen || isSeeking || isAdjustingVolume
+                  ? 'opacity-100 translate-y-0'
+                  : 'opacity-0 translate-y-2 pointer-events-none'
               }`}
             >
-              {/* Scrubber */}
+              {/* Scrubber with continuous pointer/mouse/touch drag & position knob */}
               <div
-                className="relative h-5 flex items-center cursor-pointer group/bar"
-                onClick={(e) => {
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-                  if (videoRef.current && duration > 0) {
-                    const target = pct * duration;
-                    videoRef.current.currentTime = target;
-                    setCurrentTime(target);
+                ref={scrubberRef}
+                role="slider"
+                aria-label="Progresso do vídeo"
+                aria-valuemin={0}
+                aria-valuemax={Math.floor(duration) || 0}
+                aria-valuenow={Math.floor(displayedTime)}
+                tabIndex={0}
+                onPointerDown={handleScrubberPointerDown}
+                onPointerMove={handleScrubberPointerMove}
+                onPointerUp={(e) => finishScrub(e, true)}
+                onPointerCancel={(e) => finishScrub(e, false)}
+                onPointerLeave={() => {
+                  if (!isSeekingRef.current) {
+                    setHoverTime(null);
                   }
                 }}
-                onMouseMove={(e) => {
-                  if (duration <= 0) return;
-                  const rect = e.currentTarget.getBoundingClientRect();
-                  const pct = Math.max(0, Math.min(1, (e.clientX - rect.left) / rect.width));
-                  setHoverTime({ time: pct * duration, pct: pct * 100 });
-                }}
-                onMouseLeave={() => setHoverTime(null)}
+                className="relative h-5 flex items-center cursor-pointer group/bar touch-none"
               >
                 {hoverTime && (
                   <div
                     style={{ left: `${hoverTime.pct}%` }}
-                    className="hidden sm:block absolute -top-7 -translate-x-1/2 px-2 py-0.5 rounded bg-black/90 border border-white/15 text-[11px] font-mono tabular-nums text-white pointer-events-none"
+                    className={`${
+                      isSeeking ? 'block' : 'hidden sm:block'
+                    } absolute -top-8 -translate-x-1/2 px-2 py-0.5 rounded-md bg-black/85 backdrop-blur-sm border border-white/15 text-[11px] font-mono tabular-nums text-white pointer-events-none shadow-lg`}
                   >
                     {formatTime(hoverTime.time)}
                   </div>
                 )}
 
-                <div className="w-full h-1.5 group-hover/bar:h-2 transition-all rounded-full bg-white/20 overflow-hidden relative">
+                <div
+                  className="w-full h-1.5 group-hover/bar:h-2 transition-all rounded-full overflow-hidden relative"
+                  style={{ backgroundColor: 'rgba(255,255,255,0.16)' }}
+                >
                   <div
-                    className="absolute inset-y-0 left-0 bg-white/30"
-                    style={{ width: `${bufferedPct}%` }}
+                    className="absolute inset-y-0 left-0 rounded-full"
+                    style={{
+                      width: `${bufferedPct}%`,
+                      backgroundColor: 'rgba(255,255,255,0.28)',
+                    }}
                   />
                   <div
-                    className="absolute inset-y-0 left-0 bg-rose-500"
-                    style={{ width: `${progressPct}%` }}
+                    className="absolute inset-y-0 left-0 rounded-full"
+                    style={{
+                      width: `${progressPct}%`,
+                      backgroundColor: '#a855f7',
+                    }}
                   />
                 </div>
+
+                {/* Position indicator knob */}
+                <div
+                  style={{ left: `${progressPct}%`, backgroundColor: '#a855f7' }}
+                  className={`pointer-events-none absolute top-1/2 -translate-x-1/2 -translate-y-1/2 w-3 h-3 rounded-full ring-2 ring-white shadow-[0_0_10px_rgba(168,85,247,0.85)] transition-transform duration-100 ${
+                    isSeeking ? 'scale-125' : 'scale-100 sm:scale-90 sm:group-hover/bar:scale-110'
+                  }`}
+                />
               </div>
 
               {/* Control buttons row */}
-              <div className="mt-1 flex items-center justify-between gap-2">
-                <div className="flex items-center gap-1 sm:gap-2">
+              <div className="mt-1 flex items-center justify-between gap-1.5 sm:gap-2">
+                <div className="flex items-center gap-1 sm:gap-2 min-w-0">
                   <button
                     type="button"
                     onClick={togglePlayPause}
                     aria-label={isPlaying ? 'Pausar' : 'Reproduzir'}
-                    className="min-w-[40px] min-h-[40px] sm:min-w-[36px] sm:min-h-[36px] flex items-center justify-center rounded-lg text-white hover:bg-white/10 transition-colors cursor-pointer"
+                    className="w-9 h-9 flex items-center justify-center rounded-xl text-white hover:bg-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer shrink-0"
                   >
                     {isPlaying ? (
-                      <Pause className="w-5 h-5 fill-current" />
+                      <Pause className="w-4 h-4 sm:w-5 sm:h-5 fill-current" />
                     ) : (
-                      <Play className="w-5 h-5 fill-current" />
+                      <Play className="w-4 h-4 sm:w-5 sm:h-5 fill-current" />
                     )}
                   </button>
 
-                  <button
-                    type="button"
-                    onClick={() => seekBy(-10)}
-                    aria-label="Retroceder 10 segundos"
-                    title="Retroceder 10s (J / Seta esquerda)"
-                    className="min-w-[40px] min-h-[40px] sm:min-w-[36px] sm:min-h-[36px] flex items-center justify-center gap-0.5 rounded-lg text-slate-200 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-                  >
-                    <RotateCcw className="w-4 h-4" />
-                    <span className="text-[11px] font-mono tabular-nums">10</span>
-                  </button>
-
-                  <button
-                    type="button"
-                    onClick={() => seekBy(10)}
-                    aria-label="Avançar 10 segundos"
-                    title="Avançar 10s (L / Seta direita)"
-                    className="min-w-[40px] min-h-[40px] sm:min-w-[36px] sm:min-h-[36px] flex items-center justify-center gap-0.5 rounded-lg text-slate-200 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
-                  >
-                    <RotateCw className="w-4 h-4" />
-                    <span className="text-[11px] font-mono tabular-nums">10</span>
-                  </button>
-
-                  {/* Volume */}
-                  <div className="flex items-center gap-1.5">
+                  {/* Mute + Volume slider (available on mobile and desktop) */}
+                  <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
                     <button
                       type="button"
                       onClick={toggleMute}
                       aria-label={isMuted ? 'Ativar som' : 'Silenciar'}
-                      className="min-w-[40px] min-h-[40px] sm:min-w-[36px] sm:min-h-[36px] flex items-center justify-center rounded-lg text-slate-200 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                      className="w-9 h-9 flex items-center justify-center rounded-xl text-slate-200 hover:text-white hover:bg-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer shrink-0"
                     >
                       {isMuted || volume === 0 ? (
                         <VolumeX className="w-4 h-4" />
@@ -940,40 +1331,52 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
                       max={1}
                       step={0.05}
                       value={isMuted ? 0 : volume}
+                      onPointerDown={() => {
+                        setIsAdjustingVolume(true);
+                        clearHideControlsTimer();
+                      }}
+                      onPointerUp={() => setIsAdjustingVolume(false)}
+                      onPointerCancel={() => setIsAdjustingVolume(false)}
+                      onBlur={() => setIsAdjustingVolume(false)}
                       onChange={(e) => changeVolume(Number(e.target.value))}
-                      className="hidden sm:block w-16 accent-rose-500 cursor-pointer"
+                      className="w-12 sm:w-20 h-1.5 accent-[#a855f7] cursor-pointer touch-none"
                     />
                   </div>
 
                   {/* Timecode */}
-                  <div className="ml-1 text-xs font-mono tabular-nums text-slate-300 whitespace-nowrap">
-                    {formatTime(currentTime)}{' '}
-                    <span className="text-slate-500">/ {formatTime(duration)}</span>
+                  <div className="ml-0.5 sm:ml-1 text-[11px] sm:text-xs font-mono tabular-nums text-slate-200 whitespace-nowrap truncate">
+                    {formatTime(displayedTime)}{' '}
+                    <span className="text-slate-400">/ {formatTime(duration)}</span>
                   </div>
                 </div>
 
                 {/* Right controls: Speed + Fullscreen */}
-                <div className="flex items-center gap-1 relative">
+                <div className="flex items-center gap-1 relative shrink-0">
                   <div className="relative">
                     <button
                       type="button"
                       onClick={() => setSpeedMenuOpen((prev) => !prev)}
                       aria-label="Velocidade de reprodução"
-                      className="px-2.5 min-h-[36px] rounded-lg text-xs font-mono tabular-nums text-slate-200 hover:text-white hover:bg-white/10 transition-colors cursor-pointer whitespace-nowrap"
+                      aria-expanded={speedMenuOpen}
+                      className={`px-2 sm:px-2.5 h-9 rounded-xl text-xs font-mono tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer whitespace-nowrap ${
+                        speedMenuOpen
+                          ? 'bg-[#a855f7]/25 text-white border border-[#a855f7]/50'
+                          : 'text-slate-200 hover:text-white hover:bg-white/10'
+                      }`}
                     >
                       {playbackRate}x
                     </button>
 
                     {speedMenuOpen && (
-                      <div className="absolute right-0 bottom-11 bg-[#11151E] border border-white/15 rounded-lg p-1 shadow-2xl min-w-[76px] z-20">
+                      <div className="absolute right-0 bottom-12 bg-[#11151E]/95 backdrop-blur-md border border-white/15 rounded-xl p-1.5 shadow-2xl min-w-[82px] z-30">
                         {SPEED_OPTIONS.map((rate) => (
                           <button
                             key={rate}
                             type="button"
                             onClick={() => changePlaybackRate(rate)}
-                            className={`w-full text-left px-2.5 py-1.5 rounded text-xs font-mono tabular-nums transition-colors cursor-pointer ${
+                            className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-mono tabular-nums transition-colors cursor-pointer ${
                               playbackRate === rate
-                                ? 'bg-rose-600 text-white'
+                                ? 'bg-[#a855f7] text-white font-semibold'
                                 : 'text-slate-300 hover:bg-white/10 hover:text-white'
                             }`}
                           >
@@ -988,7 +1391,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
                     type="button"
                     onClick={() => void toggleFullscreen()}
                     aria-label={isFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}
-                    className="min-w-[40px] min-h-[40px] sm:min-w-[36px] sm:min-h-[36px] flex items-center justify-center rounded-lg text-slate-200 hover:text-white hover:bg-white/10 transition-colors cursor-pointer"
+                    className="w-9 h-9 flex items-center justify-center rounded-xl text-slate-200 hover:text-white hover:bg-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer shrink-0"
                   >
                     {isFullscreen ? (
                       <Minimize className="w-4 h-4" />
