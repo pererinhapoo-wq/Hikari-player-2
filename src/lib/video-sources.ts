@@ -1,5 +1,7 @@
 export type SourceKind = 'mp4' | 'webm' | 'hls' | 'bunny' | 'iframe';
 
+export type ExplicitSourceKind = 'iframe' | 'hls' | 'mp4';
+
 export type SourceProvider =
   | 'direct'
   | 'hls'
@@ -28,6 +30,15 @@ export interface UrlValidationResult {
 }
 
 const MAX_URL_LENGTH = 2048;
+
+export function normalizeExplicitSourceKind(raw: unknown): ExplicitSourceKind | null {
+  if (typeof raw !== 'string') return null;
+  const normalized = raw.trim().toLowerCase();
+  if (normalized === 'iframe' || normalized === 'hls' || normalized === 'mp4') {
+    return normalized;
+  }
+  return null;
+}
 
 export function validateHttpUrl(raw: string): UrlValidationResult {
   const trimmed = raw.trim();
@@ -146,12 +157,90 @@ function detectDirectOrStreamKind(url: URL): 'mp4' | 'webm' | 'hls' | null {
 
 function isLikelyHtmlPage(url: URL): boolean {
   const path = url.pathname.toLowerCase();
-  return /\.(html?|php|asp|aspx|jsp)$/i.test(path);
+  return (
+    path.includes('playerricas.php') ||
+    /\.(html?|php|asp|aspx|jsp)$/i.test(path)
+  );
+}
+
+export function detectSourceKind(
+  rawUrl: string,
+  explicitKind?: ExplicitSourceKind | string | null
+): ExplicitSourceKind {
+  const explicit = normalizeExplicitSourceKind(explicitKind);
+  if (explicit) {
+    return explicit;
+  }
+
+  const validation = validateHttpUrl(rawUrl);
+  const candidate = validation.normalizedUrl ?? rawUrl.trim();
+  if (!candidate) {
+    return 'iframe';
+  }
+
+  if (candidate.toLowerCase().includes('playerricas.php')) {
+    return 'iframe';
+  }
+
+  try {
+    const parsed = new URL(candidate);
+    const path = parsed.pathname.toLowerCase();
+
+    if (isLikelyHtmlPage(parsed)) {
+      return 'iframe';
+    }
+    if (/\.m3u8$/i.test(path) || /\.m3u$/i.test(path)) {
+      return 'hls';
+    }
+    if (/\.(mp4|m4v|webm)$/i.test(path)) {
+      return 'mp4';
+    }
+
+    if (parseMuxPlaybackUrl(parsed) || parseBunnyEmbedUrl(parsed)) {
+      return 'hls';
+    }
+
+    const mediaKind = detectDirectOrStreamKind(parsed);
+    if (mediaKind === 'hls') return 'hls';
+    if (mediaKind === 'mp4' || mediaKind === 'webm') return 'mp4';
+  } catch {
+    const lower = candidate.toLowerCase();
+    if (lower.includes('playerricas.php') || /\.php(?:[?#]|$)/i.test(lower)) {
+      return 'iframe';
+    }
+    if (/\.m3u8(?:[?#]|$)/i.test(lower)) {
+      return 'hls';
+    }
+    if (/\.(mp4|webm)(?:[?#]|$)/i.test(lower)) {
+      return 'mp4';
+    }
+  }
+
+  return 'iframe';
+}
+
+export function buildIframeSrcWithFreshTime(
+  rawUrl: string,
+  nowSeconds = Math.floor(Date.now() / 1000)
+): string {
+  try {
+    const parsed = new URL(rawUrl);
+    if (!parsed.searchParams.has('time')) {
+      return rawUrl;
+    }
+    return rawUrl.replace(/([?&]time=)[^&#]*/i, `$1${nowSeconds}`);
+  } catch {
+    if (!/[?&]time=/i.test(rawUrl)) {
+      return rawUrl;
+    }
+    return rawUrl.replace(/([?&]time=)[^&#]*/i, `$1${nowSeconds}`);
+  }
 }
 
 export function normalizeVideoSource(
   rawUrl: string,
-  slot: 1 | 2 | 3 | 4 | 5
+  slot: 1 | 2 | 3 | 4 | 5,
+  explicitKind?: ExplicitSourceKind | string | null
 ): NormalizedVideoSource | null {
   const validation = validateHttpUrl(rawUrl);
   if (!validation.valid || !validation.normalizedUrl) {
@@ -162,6 +251,53 @@ export function normalizeVideoSource(
   const parsed = new URL(normalizedUrl);
   const host = parsed.hostname.toLowerCase();
   const label = `Player ${slot}`;
+  const forcedKind = normalizeExplicitSourceKind(explicitKind);
+
+  // 0. Override explícito ou página de player (playerricas.php / .php / .html) -> iframe direto (sem proxy)
+  if (forcedKind === 'iframe' || (!forcedKind && isLikelyHtmlPage(parsed))) {
+    return {
+      slot,
+      label,
+      rawUrl: normalizedUrl,
+      resolvedUrl: normalizedUrl,
+      fallbackIframeUrl: normalizedUrl,
+      kind: 'iframe',
+      provider: 'iframe',
+      needsProxy: false,
+      requiresServerResolve: false,
+      formatLabel: 'Iframe · Player',
+    };
+  }
+
+  if (forcedKind === 'hls') {
+    const maxima = isMaximaimgHost(host);
+    return {
+      slot,
+      label,
+      rawUrl: normalizedUrl,
+      resolvedUrl: normalizedUrl,
+      kind: 'hls',
+      provider: maxima ? 'maximaimg' : 'hls',
+      needsProxy: maxima,
+      requiresServerResolve: false,
+      formatLabel: maxima ? 'Maximaimg · HLS' : 'HLS',
+    };
+  }
+
+  if (forcedKind === 'mp4') {
+    const maxima = isMaximaimgHost(host);
+    return {
+      slot,
+      label,
+      rawUrl: normalizedUrl,
+      resolvedUrl: normalizedUrl,
+      kind: 'mp4',
+      provider: maxima ? 'maximaimg' : 'direct',
+      needsProxy: maxima,
+      requiresServerResolve: false,
+      formatLabel: maxima ? 'Maximaimg · MP4' : 'MP4',
+    };
+  }
 
   // 1. Mux (player.mux.com -> stream.mux.com/*.m3u8)
   const mux = parseMuxPlaybackUrl(parsed);
@@ -297,21 +433,30 @@ export interface EpisodeUrlsInput {
   video_url_3?: string | null;
   video_url_4?: string | null;
   video_url_5?: string | null;
+  source_kind?: ExplicitSourceKind | string | null;
+  source_kind_2?: ExplicitSourceKind | string | null;
+  source_kind_3?: ExplicitSourceKind | string | null;
+  source_kind_4?: ExplicitSourceKind | string | null;
+  source_kind_5?: ExplicitSourceKind | string | null;
 }
 
 export function collectEpisodeSources(episode: EpisodeUrlsInput): NormalizedVideoSource[] {
-  const candidates: Array<{ slot: 1 | 2 | 3 | 4 | 5; url: string | null | undefined }> = [
-    { slot: 1, url: episode.video_url },
-    { slot: 2, url: episode.video_url_2 },
-    { slot: 3, url: episode.video_url_3 },
-    { slot: 4, url: episode.video_url_4 },
-    { slot: 5, url: episode.video_url_5 },
+  const candidates: Array<{
+    slot: 1 | 2 | 3 | 4 | 5;
+    url: string | null | undefined;
+    kind: ExplicitSourceKind | string | null | undefined;
+  }> = [
+    { slot: 1, url: episode.video_url, kind: episode.source_kind },
+    { slot: 2, url: episode.video_url_2, kind: episode.source_kind_2 },
+    { slot: 3, url: episode.video_url_3, kind: episode.source_kind_3 },
+    { slot: 4, url: episode.video_url_4, kind: episode.source_kind_4 },
+    { slot: 5, url: episode.video_url_5, kind: episode.source_kind_5 },
   ];
 
   const sources: NormalizedVideoSource[] = [];
   for (const item of candidates) {
     if (!item.url || !item.url.trim()) continue;
-    const normalized = normalizeVideoSource(item.url, item.slot);
+    const normalized = normalizeVideoSource(item.url, item.slot, item.kind);
     if (normalized) {
       sources.push(normalized);
     }

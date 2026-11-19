@@ -24,7 +24,12 @@ import {
   getAdminDashboardFn,
 } from '@/lib/server-fns';
 import type { DatabaseDiagnosticResult, EpisodeDto, EpisodeFormPayload } from '@/lib/types';
-import { normalizeVideoSource, validateHttpUrl } from '@/lib/video-sources';
+import {
+  detectSourceKind,
+  type ExplicitSourceKind,
+  normalizeVideoSource,
+  validateHttpUrl,
+} from '@/lib/video-sources';
 
 export const Route = createFileRoute('/admin')({
   loader: async () => {
@@ -44,19 +49,25 @@ const EMPTY_FORM: EpisodeFormPayload = {
   video_url_3: '',
   video_url_4: '',
   video_url_5: '',
+  source_kind: '',
+  source_kind_2: '',
+  source_kind_3: '',
+  source_kind_4: '',
+  source_kind_5: '',
 };
 
 const PLAYER_SLOTS: Array<{
-  field: keyof EpisodeFormPayload;
+  field: 'video_url' | 'video_url_2' | 'video_url_3' | 'video_url_4' | 'video_url_5';
+  kindField: 'source_kind' | 'source_kind_2' | 'source_kind_3' | 'source_kind_4' | 'source_kind_5';
   slot: 1 | 2 | 3 | 4 | 5;
   label: string;
   required: boolean;
 }> = [
-  { field: 'video_url', slot: 1, label: 'Player 1', required: true },
-  { field: 'video_url_2', slot: 2, label: 'Player 2', required: false },
-  { field: 'video_url_3', slot: 3, label: 'Player 3', required: false },
-  { field: 'video_url_4', slot: 4, label: 'Player 4', required: false },
-  { field: 'video_url_5', slot: 5, label: 'Player 5', required: false },
+  { field: 'video_url', kindField: 'source_kind', slot: 1, label: 'Player 1', required: true },
+  { field: 'video_url_2', kindField: 'source_kind_2', slot: 2, label: 'Player 2', required: false },
+  { field: 'video_url_3', kindField: 'source_kind_3', slot: 3, label: 'Player 3', required: false },
+  { field: 'video_url_4', kindField: 'source_kind_4', slot: 4, label: 'Player 4', required: false },
+  { field: 'video_url_5', kindField: 'source_kind_5', slot: 5, label: 'Player 5', required: false },
 ];
 
 function formatDatePtBr(iso: string): string {
@@ -192,6 +203,11 @@ function AdminPage() {
       video_url_3: ep.video_url_3 ?? '',
       video_url_4: ep.video_url_4 ?? '',
       video_url_5: ep.video_url_5 ?? '',
+      source_kind: ep.source_kind ?? '',
+      source_kind_2: ep.source_kind_2 ?? '',
+      source_kind_3: ep.source_kind_3 ?? '',
+      source_kind_4: ep.source_kind_4 ?? '',
+      source_kind_5: ep.source_kind_5 ?? '',
     });
     setFormError(null);
     setPosterPreviewError(false);
@@ -508,21 +524,25 @@ function AdminPage() {
                 </div>
 
                 <div className="pt-2 border-t border-white/10 space-y-3.5">
-                  <div className="flex items-center justify-between">
+                  <div className="flex flex-col gap-0.5">
                     <span className="text-xs font-medium text-slate-200">
                       Fontes de vídeo (até 5 URLs)
                     </span>
-                    <span className="text-[11px] text-slate-500">
-                      MP4 · WebM · HLS · Mux · Bunny · Maximaimg · Embed
+                    <span className="text-[11px] text-slate-400">
+                      Aceita URL direta de mídia (.m3u8, .mp4, .webm) ou página de player do provedor (playerricas.php, .php, embed). Se kind ficar vazio, a detecção é automática.
                     </span>
                   </div>
 
-                  {PLAYER_SLOTS.map(({ field, slot, label, required }) => {
+                  {PLAYER_SLOTS.map(({ field, kindField, slot, label, required }) => {
                     const value = (form[field] ?? '') as string;
+                    const selectedKind = (form[kindField] ?? '') as ExplicitSourceKind | '';
                     const trimmed = value.trim();
                     const check = trimmed ? validateHttpUrl(trimmed) : null;
                     const normalized = trimmed
-                      ? normalizeVideoSource(trimmed, slot)
+                      ? normalizeVideoSource(trimmed, slot, selectedKind || null)
+                      : null;
+                    const detectedKind = trimmed
+                      ? detectSourceKind(trimmed, selectedKind || null)
                       : null;
 
                     return (
@@ -534,31 +554,57 @@ function AdminPage() {
                           >
                             {label} {required ? '' : '(opcional)'}
                           </label>
-                          {normalized ? (
-                            <span className="text-[11px] font-mono text-slate-400">
-                              {normalized.formatLabel}
-                            </span>
-                          ) : check && !check.valid ? (
-                            <span className="text-[11px] text-rose-400">
-                              URL inválida
-                            </span>
-                          ) : null}
+                          <div className="flex items-center gap-2">
+                            {detectedKind ? (
+                              <span className="text-[11px] font-mono text-emerald-300">
+                                kind: {detectedKind}
+                              </span>
+                            ) : null}
+                            {normalized ? (
+                              <span className="text-[11px] font-mono text-slate-400">
+                                {normalized.formatLabel}
+                              </span>
+                            ) : check && !check.valid ? (
+                              <span className="text-[11px] text-rose-400">
+                                URL inválida
+                              </span>
+                            ) : null}
+                          </div>
                         </div>
-                        <input
-                          id={`ep-${field}`}
-                          type="url"
-                          required={required}
-                          value={value}
-                          onChange={(e) =>
-                            setForm({ ...form, [field]: e.target.value })
-                          }
-                          placeholder={
-                            slot === 1
-                              ? 'https://...'
-                              : `URL alternativa (${label})`
-                          }
-                          className="w-full h-10 px-3 rounded-lg bg-[#090B10] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
-                        />
+                        <div className="flex items-center gap-2">
+                          <input
+                            id={`ep-${field}`}
+                            type="url"
+                            required={required}
+                            value={value}
+                            onChange={(e) =>
+                              setForm({ ...form, [field]: e.target.value })
+                            }
+                            placeholder={
+                              slot === 1
+                                ? 'https://.../playerricas.php?... ou https://.../index.m3u8'
+                                : `URL alternativa (${label}: página .php, .m3u8 ou .mp4)`
+                            }
+                            className="flex-1 min-w-0 h-10 px-3 rounded-lg bg-[#090B10] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
+                          />
+                          <select
+                            id={`ep-${kindField}`}
+                            aria-label={`Kind de ${label}`}
+                            value={selectedKind}
+                            onChange={(e) =>
+                              setForm({
+                                ...form,
+                                [kindField]: e.target.value as ExplicitSourceKind | '',
+                              })
+                            }
+                            className="h-10 px-2.5 rounded-lg bg-[#090B10] border border-white/15 text-xs font-mono text-slate-200 focus:outline-none focus:border-rose-500 shrink-0"
+                          >
+                            <option value="">auto</option>
+                            <option value="iframe">iframe</option>
+                            <option value="hls">hls</option>
+                            <option value="mp4">mp4</option>
+                          </select>
+                        </div>
                       </div>
                     );
                   })}

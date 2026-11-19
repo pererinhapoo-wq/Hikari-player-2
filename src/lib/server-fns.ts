@@ -114,7 +114,10 @@ export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
     const normalizedSources = collectEpisodeSources(episode);
     const sources: PlayableSource[] = normalizedSources.map((src) => ({
       ...src,
-      playUrl: src.needsProxy ? resolveProxyPlayUrl(src.resolvedUrl) : src.resolvedUrl,
+      playUrl:
+        src.kind !== 'iframe' && src.needsProxy
+          ? resolveProxyPlayUrl(src.resolvedUrl)
+          : src.resolvedUrl,
     }));
 
     return {

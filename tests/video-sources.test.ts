@@ -1,7 +1,9 @@
 import { describe, expect, it } from 'vitest';
 import { extractBunnyHlsFromHtml } from '@/lib/bunny';
 import {
+  buildIframeSrcWithFreshTime,
   collectEpisodeSources,
+  detectSourceKind,
   getNextFallbackSourceIndex,
   normalizeVideoSource,
   validateHttpUrl,
@@ -131,5 +133,49 @@ describe('collectEpisodeSources e seleção/fallback de fontes', () => {
     failed.add(5);
     const exhausted = getNextFallbackSourceIndex(sources, 3, failed);
     expect(exhausted).toBeNull();
+  });
+
+  it('detecta kind automático (playerricas.php/.php -> iframe, .m3u8 -> hls, .mp4/.webm -> mp4) e respeita override explícito', () => {
+    const playerricas =
+      'https://www.anitube22.vip/playerricas.php?name=apphd/583375.mp4&img=https://www.hinatasoul.com/media/videos/tmb/583375/default.jpg&pais=pais=BR&time=1700000000&url=https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/ziphonec/583375.mp4';
+    const phpHls =
+      'https://api.anivideo.net/videohls.php?d=https://cdn-sv01.maximaimg.online/stream/b/bakemonogatari/01.mp4/index.m3u8';
+
+    expect(detectSourceKind(playerricas)).toBe('iframe');
+    expect(detectSourceKind(phpHls)).toBe('iframe');
+    expect(detectSourceKind('https://cdn-sv01.maximaimg.online/ep1/index.m3u8')).toBe('hls');
+    expect(detectSourceKind('https://cdn.example.com/ep1.mp4')).toBe('mp4');
+    expect(detectSourceKind('https://cdn.example.com/ep1.webm')).toBe('mp4');
+
+    // Override explícito
+    expect(detectSourceKind('https://cdn.example.com/custom-player', 'iframe')).toBe('iframe');
+    expect(detectSourceKind('https://cdn.example.com/stream', 'hls')).toBe('hls');
+    expect(detectSourceKind('https://cdn.example.com/stream', 'mp4')).toBe('mp4');
+
+    // normalizeVideoSource para playerricas.php / .php garante kind='iframe' e needsProxy=false
+    const norm1 = normalizeVideoSource(playerricas, 1);
+    expect(norm1?.kind).toBe('iframe');
+    expect(norm1?.needsProxy).toBe(false);
+    expect(norm1?.resolvedUrl).toBe(playerricas);
+
+    const norm2 = normalizeVideoSource(phpHls, 2);
+    expect(norm2?.kind).toBe('iframe');
+    expect(norm2?.needsProxy).toBe(false);
+  });
+
+  it('substitui apenas o parâmetro time em URLs de iframe na montagem e preserva URLs sem time', () => {
+    const withTime =
+      'https://www.anitube22.vip/playerricas.php?name=apphd/583375.mp4&img=https://www.hinatasoul.com/media/videos/tmb/583375/default.jpg&pais=pais=BR&time=1700000000&url=https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/ziphonec/583375.mp4';
+    const updated1 = buildIframeSrcWithFreshTime(withTime, 1795120001);
+    const updated2 = buildIframeSrcWithFreshTime(withTime, 1795120015);
+
+    expect(updated1).toContain('time=1795120001');
+    expect(updated2).toContain('time=1795120015');
+    expect(updated1).not.toBe(updated2);
+    expect(updated1).toContain('pais=pais=BR');
+    expect(updated1).toContain('url=https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/ziphonec/583375.mp4');
+
+    const withoutTime = 'https://embeds.example.com/e/12345?runtime=900';
+    expect(buildIframeSrcWithFreshTime(withoutTime, 1795120001)).toBe(withoutTime);
   });
 });

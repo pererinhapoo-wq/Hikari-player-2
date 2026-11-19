@@ -1,4 +1,4 @@
-import type { NormalizedVideoSource } from '@/lib/video-sources';
+import type { ExplicitSourceKind, NormalizedVideoSource } from '@/lib/video-sources';
 
 export interface PlayableSource extends NormalizedVideoSource {
   playUrl: string;
@@ -13,6 +13,11 @@ export interface EpisodeDto {
   video_url_3: string | null;
   video_url_4: string | null;
   video_url_5: string | null;
+  source_kind: ExplicitSourceKind | null;
+  source_kind_2: ExplicitSourceKind | null;
+  source_kind_3: ExplicitSourceKind | null;
+  source_kind_4: ExplicitSourceKind | null;
+  source_kind_5: ExplicitSourceKind | null;
   public_url: string;
   created_at: string;
   updated_at: string;
@@ -26,6 +31,11 @@ export interface EpisodeFormPayload {
   video_url_3?: string | null;
   video_url_4?: string | null;
   video_url_5?: string | null;
+  source_kind?: ExplicitSourceKind | '' | null;
+  source_kind_2?: ExplicitSourceKind | '' | null;
+  source_kind_3?: ExplicitSourceKind | '' | null;
+  source_kind_4?: ExplicitSourceKind | '' | null;
+  source_kind_5?: ExplicitSourceKind | '' | null;
 }
 
 export type PublicEpisodeResult =

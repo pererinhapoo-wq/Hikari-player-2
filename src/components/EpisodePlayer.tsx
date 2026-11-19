@@ -18,7 +18,10 @@ import {
   type PlaybackStrategy,
 } from '@/lib/hls-playback';
 import type { PlayableSource } from '@/lib/types';
-import { getNextFallbackSourceIndex } from '@/lib/video-sources';
+import {
+  buildIframeSrcWithFreshTime,
+  getNextFallbackSourceIndex,
+} from '@/lib/video-sources';
 
 interface EpisodePlayerProps {
   title: string;
@@ -62,10 +65,14 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
   } | null>(null);
 
   const attemptedDirectSlotsRef = useRef<Set<number>>(new Set());
+  const iframeLoadTimerRef = useRef<number | null>(null);
 
+  const [iframeReloadKey, setIframeReloadKey] = useState(0);
+  const [iframeLoaded, setIframeLoaded] = useState(false);
   const [isLoadingSource, setIsLoadingSource] = useState(false);
   const [statusNotice, setStatusNotice] = useState<string | null>(null);
   const [fatalError, setFatalError] = useState<string | null>(null);
+  const [fatalErrorKind, setFatalErrorKind] = useState<'iframe' | 'media' | null>(null);
 
   // Video element state
   const [isPlaying, setIsPlaying] = useState(false);
@@ -172,11 +179,19 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
     }, 3000);
   }, [clearHideControlsTimer, hasAutoHideBlocker]);
 
+  const clearIframeLoadTimer = useCallback(() => {
+    if (iframeLoadTimerRef.current !== null) {
+      window.clearTimeout(iframeLoadTimerRef.current);
+      iframeLoadTimerRef.current = null;
+    }
+  }, []);
+
   useEffect(() => {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
       clearHideControlsTimer();
+      clearIframeLoadTimer();
       if (singleTapTimerRef.current !== null) {
         window.clearTimeout(singleTapTimerRef.current);
         singleTapTimerRef.current = null;
@@ -186,7 +201,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
         seekFeedbackTimerRef.current = null;
       }
     };
-  }, [clearHideControlsTimer]);
+  }, [clearHideControlsTimer, clearIframeLoadTimer]);
 
   // Keep controls visible during active interactions and restart 3s timer when finished
   useEffect(() => {
@@ -234,7 +249,8 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
   }, [isAdjustingVolume]);
 
   const triggerFailover = useCallback(
-    (failedSlot: number, reason: string) => {
+    (failedSlot: number, reason: string, errorKind: 'iframe' | 'media' = 'media') => {
+      clearIframeLoadTimer();
       cleanupHls();
       setFailedSlots((prev) => {
         const next = new Set(prev);
@@ -242,22 +258,30 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
         const fallbackIdx = getNextFallbackSourceIndex(sources, activeIndex, next);
         if (fallbackIdx !== null) {
           const nextSource = sources[fallbackIdx];
+          const failureLabel =
+            errorKind === 'iframe'
+              ? 'player do provedor não carregou'
+              : 'fonte indisponível';
           setStatusNotice(
-            `${sources[activeIndex]?.label ?? 'Fonte atual'} indisponível — alternando para ${nextSource.label}...`
+            `${sources[activeIndex]?.label ?? 'Fonte atual'} (${failureLabel}) — alternando para ${nextSource.label}...`
           );
           setActiveIndex(fallbackIdx);
           setFatalError(null);
+          setFatalErrorKind(null);
         } else {
           setStatusNotice(null);
+          setFatalErrorKind(errorKind);
           setFatalError(
             reason ||
-              'Não foi possível reproduzir nenhuma das fontes configuradas para este episódio.'
+              (errorKind === 'iframe'
+                ? 'Player do provedor não carregou.'
+                : 'Fonte indisponível.')
           );
         }
         return next;
       });
     },
-    [activeIndex, cleanupHls, sources]
+    [activeIndex, cleanupHls, clearIframeLoadTimer, sources]
   );
 
   const triggerFailoverRef = useRef(triggerFailover);
@@ -269,6 +293,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
 
     let cancelled = false;
     setFatalError(null);
+    setFatalErrorKind(null);
     setIsLoadingSource(true);
     setCurrentTime(0);
     setDuration(0);
@@ -277,14 +302,17 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
 
     async function prepareActiveSource(source: PlayableSource) {
       if (source.kind === 'iframe') {
+        clearIframeLoadTimer();
         if (!cancelled) {
+          const freshUrl = buildIframeSrcWithFreshTime(source.playUrl);
+          setIframeLoaded(false);
           setResolvedRuntime({
             slot: source.slot,
             mode: 'iframe',
-            url: source.playUrl,
+            url: freshUrl,
             strategy: 'iframe',
           });
-          setIsLoadingSource(false);
+          setIsLoadingSource(true);
         }
         return;
       }
@@ -365,7 +393,31 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
     return () => {
       cancelled = true;
     };
-  }, [hasStarted, activeSource, triggerFailover]);
+  }, [hasStarted, activeSource, iframeReloadKey, clearIframeLoadTimer, triggerFailover]);
+
+  // Timeout de 12s para detectar falha de carregamento do iframe do provedor
+  useEffect(() => {
+    clearIframeLoadTimer();
+    if (!hasStarted || resolvedRuntime?.mode !== 'iframe' || fatalError || iframeLoaded) {
+      return;
+    }
+
+    const targetSlot = resolvedRuntime.slot;
+    iframeLoadTimerRef.current = window.setTimeout(() => {
+      iframeLoadTimerRef.current = null;
+      if (!isMountedRef.current) return;
+      setIsLoadingSource(false);
+      triggerFailoverRef.current(
+        targetSlot,
+        'Player do provedor não carregou.',
+        'iframe'
+      );
+    }, 12000);
+
+    return () => {
+      clearIframeLoadTimer();
+    };
+  }, [hasStarted, resolvedRuntime, iframeLoaded, fatalError, clearIframeLoadTimer]);
 
   // Mount video/hls.js playback ONLY after user interaction & source resolution
   useEffect(() => {
@@ -935,6 +987,7 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
   ]);
 
   const selectSourceManually = (index: number) => {
+    clearIframeLoadTimer();
     attemptedDirectSlotsRef.current.delete(sources[index].slot);
     setFailedSlots((prev) => {
       const next = new Set(prev);
@@ -943,17 +996,42 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
     });
     setStatusNotice(null);
     setFatalError(null);
+    setFatalErrorKind(null);
+    setIframeLoaded(false);
+    setIframeReloadKey((prev) => prev + 1);
     setActiveIndex(index);
     if (!hasStarted) {
       setHasStarted(true);
     }
   };
 
+  const reloadIframeSource = () => {
+    clearIframeLoadTimer();
+    const targetSlot = activeSource?.slot ?? resolvedRuntime?.slot;
+    if (targetSlot !== undefined) {
+      setFailedSlots((prev) => {
+        const next = new Set(prev);
+        next.delete(targetSlot);
+        return next;
+      });
+    }
+    setFatalError(null);
+    setFatalErrorKind(null);
+    setStatusNotice(null);
+    setIframeLoaded(false);
+    setIframeReloadKey((prev) => prev + 1);
+    setHasStarted(true);
+  };
+
   const retryPlayback = () => {
+    clearIframeLoadTimer();
     attemptedDirectSlotsRef.current.clear();
     setFailedSlots(new Set());
     setFatalError(null);
+    setFatalErrorKind(null);
     setStatusNotice(null);
+    setIframeLoaded(false);
+    setIframeReloadKey((prev) => prev + 1);
     setActiveIndex(0);
     setResolvedRuntime(null);
     setHasStarted(true);
@@ -985,43 +1063,59 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
 
   return (
     <div className="w-full space-y-3">
-      {/* Segmented source selector when multiple sources exist */}
-      {sources.length > 1 && (
+      {/* Segmented source selector when multiple sources exist (or iframe reload control) */}
+      {(sources.length > 1 || (hasStarted && activeSource?.kind === 'iframe')) && (
         <div className="flex flex-wrap items-center justify-between gap-3">
-          <div
-            role="tablist"
-            aria-label="Fontes de vídeo disponíveis"
-            className="inline-flex flex-wrap items-center gap-1 p-1 bg-[#11151E] border border-white/10 rounded-lg"
-          >
-            {sources.map((src, idx) => {
-              const isActive = idx === activeIndex;
-              const isFailed = failedSlots.has(src.slot);
-              return (
-                <button
-                  key={src.slot}
-                  type="button"
-                  role="tab"
-                  aria-selected={isActive}
-                  onClick={() => selectSourceManually(idx)}
-                  className={`px-3 py-1.5 min-h-[36px] text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 ${
-                    isActive
-                      ? 'bg-rose-600 text-white'
-                      : isFailed
-                        ? 'text-slate-500 hover:text-slate-300 line-through'
-                        : 'text-slate-300 hover:text-white hover:bg-white/5'
-                  }`}
-                >
-                  {src.label}
-                </button>
-              );
-            })}
-          </div>
-
-          {activeSource && (
-            <span className="text-xs text-slate-400 font-mono tabular-nums">
-              {activeSource.formatLabel}
-            </span>
+          {sources.length > 1 ? (
+            <div
+              role="tablist"
+              aria-label="Fontes de vídeo disponíveis"
+              className="inline-flex flex-wrap items-center gap-1 p-1 bg-[#11151E] border border-white/10 rounded-lg"
+            >
+              {sources.map((src, idx) => {
+                const isActive = idx === activeIndex;
+                const isFailed = failedSlots.has(src.slot);
+                return (
+                  <button
+                    key={src.slot}
+                    type="button"
+                    role="tab"
+                    aria-selected={isActive}
+                    onClick={() => selectSourceManually(idx)}
+                    className={`px-3 py-1.5 min-h-[36px] text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 ${
+                      isActive
+                        ? 'bg-rose-600 text-white'
+                        : isFailed
+                          ? 'text-slate-500 hover:text-slate-300 line-through'
+                          : 'text-slate-300 hover:text-white hover:bg-white/5'
+                    }`}
+                  >
+                    {src.label}
+                  </button>
+                );
+              })}
+            </div>
+          ) : (
+            <div />
           )}
+
+          <div className="flex items-center gap-3">
+            {hasStarted && activeSource?.kind === 'iframe' && (
+              <button
+                type="button"
+                onClick={reloadIframeSource}
+                className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-white/10 bg-[#11151E] hover:bg-white/5 text-xs font-medium text-slate-200 transition-colors cursor-pointer whitespace-nowrap"
+              >
+                <RotateCw className="w-3.5 h-3.5" />
+                Recarregar fonte
+              </button>
+            )}
+            {activeSource && (
+              <span className="text-xs text-slate-400 font-mono tabular-nums">
+                {activeSource.formatLabel}
+              </span>
+            )}
+          </div>
         </div>
       )}
 
@@ -1079,15 +1173,36 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
 
         {/* ACTIVE PLAYBACK: Iframe mode */}
         {hasStarted && resolvedRuntime?.mode === 'iframe' && !fatalError && (
-          <iframe
-            key={`${resolvedRuntime.slot}-${resolvedRuntime.url}`}
-            src={resolvedRuntime.url}
-            title={title}
-            className="w-full h-full border-0 bg-black"
-            allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-            allowFullScreen
-            referrerPolicy="no-referrer-when-downgrade"
-          />
+          <>
+            <iframe
+              key={`${resolvedRuntime.slot}-${iframeReloadKey}-${resolvedRuntime.url}`}
+              src={resolvedRuntime.url}
+              title={title}
+              onLoad={() => {
+                clearIframeLoadTimer();
+                setIframeLoaded(true);
+                setIsLoadingSource(false);
+              }}
+              onError={() => {
+                clearIframeLoadTimer();
+                setIsLoadingSource(false);
+                triggerFailoverRef.current(
+                  resolvedRuntime.slot,
+                  'Player do provedor não carregou.',
+                  'iframe'
+                );
+              }}
+              className="w-full h-full border-0 bg-black"
+              allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
+              allowFullScreen
+              referrerPolicy="no-referrer-when-downgrade"
+            />
+            {!iframeLoaded && isLoadingSource && (
+              <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-black/35">
+                <div className="w-10 h-10 rounded-full border-2 border-white/25 border-t-[#a855f7] animate-spin" />
+              </div>
+            )}
+          </>
         )}
 
         {/* ACTIVE PLAYBACK: HTML5 Video / HLS mode */}
@@ -1407,19 +1522,21 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
 
         {/* FATAL ERROR OVERLAY */}
         {fatalError && (
-          <div className="absolute inset-0 bg-[#0B0E14]/95 flex flex-col items-center justify-center p-6 text-center">
+          <div className="absolute inset-0 z-30 bg-[#0B0E14]/95 flex flex-col items-center justify-center p-6 text-center">
             <AlertCircle className="w-10 h-10 text-rose-400 mb-3" />
             <h3 className="text-base font-semibold text-white">
-              Falha na reprodução do vídeo
+              {fatalErrorKind === 'iframe'
+                ? 'Player do provedor não carregou'
+                : 'Fonte indisponível'}
             </h3>
             <p className="mt-1.5 text-sm text-slate-400 max-w-md">{fatalError}</p>
             <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
               <button
                 type="button"
-                onClick={retryPlayback}
+                onClick={fatalErrorKind === 'iframe' ? reloadIframeSource : retryPlayback}
                 className="px-4 py-2 text-sm font-medium rounded-lg bg-rose-600 hover:bg-rose-500 text-white transition-colors cursor-pointer"
               >
-                Tentar novamente
+                {fatalErrorKind === 'iframe' ? 'Recarregar fonte' : 'Tentar novamente'}
               </button>
             </div>
           </div>
