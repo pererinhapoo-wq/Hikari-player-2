@@ -1,0 +1,318 @@
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { createProxySignature, verifyProxySignature } from '@/lib/proxy-signing';
+import { resolveProxyPlayUrl } from '@/lib/server-fns';
+import {
+  type CfRequestInit,
+  createWorkerProxySignature,
+  getStableSegmentExpiry,
+  handleWorkerProxyRequest,
+  resolveUpstreamReferer,
+  verifyWorkerProxySignature,
+  type WorkerEnv,
+  type WorkerExecutionContext,
+} from '../worker/src/index';
+
+const TEST_SECRET = '0123456789abcdef0123456789abcdef';
+
+function createMemoryEdgeCache(): Cache {
+  const store = new Map<string, Response>();
+  return {
+    async match(request: RequestInfo | URL) {
+      const key = typeof request === 'string' ? request : request instanceof URL ? request.toString() : request.url;
+      const found = store.get(key);
+      return found ? found.clone() : undefined;
+    },
+    async put(request: RequestInfo | URL, response: Response) {
+      const key = typeof request === 'string' ? request : request instanceof URL ? request.toString() : request.url;
+      store.set(key, response.clone());
+    },
+    async delete(request: RequestInfo | URL) {
+      const key = typeof request === 'string' ? request : request instanceof URL ? request.toString() : request.url;
+      return store.delete(key);
+    },
+    async add() {},
+    async addAll() {},
+    async keys() {
+      return [];
+    },
+    async matchAll() {
+      return [];
+    },
+  } as Cache;
+}
+
+describe('WORKER_BASE e rollback em server-fns.ts', () => {
+  beforeEach(() => {
+    process.env.PLAYER_SESSION_SECRET = TEST_SECRET;
+  });
+
+  it('mantém /api/proxy/stream na Vercel quando WORKER_BASE está ausente ou vazia', () => {
+    const target = 'https://cdn-sv01.maximaimg.online/stream/b/bakemonogatari/01.mp4/index.m3u8';
+    expect(resolveProxyPlayUrl(target, undefined)).toMatch(/^\/api\/proxy\/stream\?url=/);
+    expect(resolveProxyPlayUrl(target, '')).toMatch(/^\/api\/proxy\/stream\?url=/);
+    expect(resolveProxyPlayUrl(target, '   ')).toMatch(/^\/api\/proxy\/stream\?url=/);
+  });
+
+  it('aponta playUrl para o Worker quando WORKER_BASE está definida e normaliza barras/sufixo', () => {
+    const target = 'https://cdn-sv01.maximaimg.online/stream/b/bakemonogatari/01.mp4/index.m3u8';
+    const url1 = resolveProxyPlayUrl(target, 'https://hikari-media-proxy.example.workers.dev');
+    const url2 = resolveProxyPlayUrl(target, 'https://hikari-media-proxy.example.workers.dev/');
+    const url3 = resolveProxyPlayUrl(
+      target,
+      'https://hikari-media-proxy.example.workers.dev/api/proxy/stream'
+    );
+
+    expect(url1).toMatch(/^https:\/\/hikari-media-proxy\.example\.workers\.dev\/api\/proxy\/stream\?url=/);
+    expect(url2).toBe(url1);
+    expect(url3).toBe(url1);
+  });
+
+  it('faz fallback automático para /api/proxy/stream se WORKER_BASE for inválida', () => {
+    const target = 'https://cdn-sv01.maximaimg.online/stream/b/bakemonogatari/01.mp4/index.m3u8';
+    expect(resolveProxyPlayUrl(target, 'not-a-valid-url')).toMatch(/^\/api\/proxy\/stream\?url=/);
+  });
+});
+
+describe('Cloudflare Worker Edge Proxy', () => {
+  const env: WorkerEnv = {
+    PLAYER_SESSION_SECRET: TEST_SECRET,
+    PLAYER_MAXIMAIMG_REFERER: 'https://api.anivideo.net/',
+  };
+
+  beforeEach(() => {
+    process.env.PLAYER_SESSION_SECRET = TEST_SECRET;
+  });
+
+  it('mantém interoperabilidade total de HMAC entre Vercel (Node crypto) e Worker (Web Crypto)', async () => {
+    const target = 'https://cdn-sv01.maximaimg.online/stream/b/bakemonogatari/01.mp4/index.m3u8';
+    const exp = 2_000_000_000;
+
+    const nodeSig = createProxySignature(target, exp);
+    const workerSig = await createWorkerProxySignature(target, exp, TEST_SECRET);
+
+    expect(workerSig).toBe(nodeSig);
+    expect(await verifyWorkerProxySignature(target, String(exp), nodeSig, TEST_SECRET, 1_900_000_000)).toBe(true);
+    expect(verifyProxySignature(target, String(exp), workerSig)).toBe(true);
+  });
+
+  it('remove header Origin, envia Referer do provedor + UA Chrome, usa cf.cacheEverything e reescreve M3U8 com assinatura estável', async () => {
+    const manifestUrl = 'https://cdn-sv01.maximaimg.online/stream/b/bakemonogatari/01.mp4/index.m3u8';
+    const exp = 2_000_000_000;
+    const sig = createProxySignature(manifestUrl, exp);
+    const requestUrl = `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(manifestUrl)}&exp=${exp}&sig=${sig}`;
+
+    let capturedInit: CfRequestInit | undefined;
+    const fakePlaylist = [
+      '#EXTM3U',
+      '#EXT-X-TARGETDURATION:10',
+      '#EXTINF:10.0,',
+      'seg-001.ts',
+      '#EXTINF:10.0,',
+      'seg-002.ts',
+      '#EXT-X-ENDLIST',
+    ].join('\n');
+
+    const fetcher = vi.fn(async (_input: string, init?: CfRequestInit) => {
+      capturedInit = init;
+      return new Response(fakePlaylist, {
+        status: 200,
+        headers: {
+          'content-type': 'application/vnd.apple.mpegurl',
+        },
+      });
+    });
+
+    const req1 = new Request(requestUrl, {
+      headers: {
+        Origin: 'https://hikari-player-2.vercel.app',
+        Referer: 'https://hikari-player-2.vercel.app/',
+      },
+    });
+    const res1 = await handleWorkerProxyRequest(req1, env, undefined, {
+      fetcher,
+      edgeCache: null,
+      nowSeconds: () => 1_795_000_100,
+    });
+
+    expect(res1.status).toBe(200);
+    expect(res1.headers.get('access-control-allow-origin')).toBe('*');
+    expect(res1.headers.get('cache-control')).toBe('public, max-age=5');
+
+    const sentHeaders = new Headers(capturedInit?.headers);
+    expect(sentHeaders.has('origin')).toBe(false);
+    expect(sentHeaders.get('referer')).toBe('https://api.anivideo.net/');
+    expect(sentHeaders.get('user-agent')).toContain('Chrome/');
+    expect(capturedInit?.cf).toEqual({ cacheEverything: true, cacheTtl: 5 });
+
+    const body1 = await res1.text();
+
+    // Segunda requisição 30 segundos depois com outra assinatura de entrada: segmentos mantêm assinatura idêntica
+    const exp2 = exp + 30;
+    const sig2 = createProxySignature(manifestUrl, exp2);
+    const req2 = new Request(
+      `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(manifestUrl)}&exp=${exp2}&sig=${sig2}`
+    );
+    const res2 = await handleWorkerProxyRequest(req2, env, undefined, {
+      fetcher,
+      edgeCache: null,
+      nowSeconds: () => 1_795_000_130,
+    });
+    const body2 = await res2.text();
+
+    expect(body2).toBe(body1);
+    const stableExp = getStableSegmentExpiry(1_795_000_100);
+    expect(body1).toContain(`exp=${stableExp}`);
+    expect(body1).not.toContain(`exp=${exp}`);
+  });
+
+  it('serve segmentos com Cache-Control imutável, cf.cacheTtl=31536000, ACAO * e HIT na segunda requisição', async () => {
+    const segUrl = 'https://cdn-sv01.maximaimg.online/stream/b/bakemonogatari/01.mp4/seg-001.ts';
+    const exp = 2_000_000_000;
+    const sig = await createWorkerProxySignature(segUrl, exp, TEST_SECRET);
+    const workerUrl = `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(segUrl)}&exp=${exp}&sig=${sig}`;
+
+    const rawBytes = new Uint8Array([0x47, 0x40, 0x00, 0xff, 0xfe, 0x80, 0x11, 0x22]);
+    let capturedCf: CfRequestInit['cf'];
+    const fetcher = vi.fn(async (_input: string, init?: CfRequestInit) => {
+      capturedCf = init?.cf;
+      return new Response(rawBytes, {
+        status: 200,
+        headers: {
+          'content-type': 'video/mp2t',
+          'content-length': String(rawBytes.byteLength),
+          'cf-cache-status': 'MISS',
+        },
+      });
+    });
+
+    const edgeCache = createMemoryEdgeCache();
+    const pending: Promise<unknown>[] = [];
+    const ctx: WorkerExecutionContext = {
+      waitUntil(p) {
+        pending.push(p);
+      },
+    };
+
+    // 1ª requisição -> MISS (vai à origem com cf.cacheEverything=true e cacheTtl=31536000)
+    const res1 = await handleWorkerProxyRequest(
+      new Request(workerUrl, { headers: { Origin: 'https://hikari-player-2.vercel.app' } }),
+      env,
+      ctx,
+      { fetcher, edgeCache, nowSeconds: () => 1_795_000_000 }
+    );
+    await Promise.all(pending);
+
+    expect(res1.status).toBe(200);
+    expect(res1.headers.get('access-control-allow-origin')).toBe('*');
+    expect(res1.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+    expect(res1.headers.get('cf-cache-status')).toBe('MISS');
+    expect(capturedCf).toEqual({ cacheEverything: true, cacheTtl: 31536000 });
+    expect(Array.from(new Uint8Array(await res1.arrayBuffer()))).toEqual(Array.from(rawBytes));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+
+    // 2ª requisição -> HIT na borda sem chamar a origem
+    const res2 = await handleWorkerProxyRequest(
+      new Request(workerUrl, { headers: { Origin: 'https://hikari-player-2.vercel.app' } }),
+      env,
+      ctx,
+      { fetcher, edgeCache, nowSeconds: () => 1_795_000_005 }
+    );
+    expect(res2.status).toBe(200);
+    expect(res2.headers.get('access-control-allow-origin')).toBe('*');
+    expect(res2.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+    expect(res2.headers.get('cf-cache-status')).toBe('HIT');
+    expect(Array.from(new Uint8Array(await res2.arrayBuffer()))).toEqual(Array.from(rawBytes));
+    expect(fetcher).toHaveBeenCalledTimes(1);
+  });
+
+  it('repassa Range, responde 206 Partial Content com Content-Range e bloqueia SSRF/assinatura inválida', async () => {
+    const mp4Url = 'https://cdn-sv01.maximaimg.online/files/ep01.mp4';
+    const exp = 2_000_000_000;
+    const sig = await createWorkerProxySignature(mp4Url, exp, TEST_SECRET);
+    const workerUrl = `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(mp4Url)}&exp=${exp}&sig=${sig}`;
+
+    const chunk = new Uint8Array([0x00, 0x00, 0x00, 0x18]);
+    let capturedRange: string | null = null;
+
+    const fetcher = vi.fn(async (_input: string, init?: CfRequestInit) => {
+      capturedRange = new Headers(init?.headers).get('range');
+      return new Response(chunk, {
+        status: 206,
+        headers: {
+          'content-type': 'video/mp4',
+          'content-length': '4',
+          'content-range': 'bytes 0-3/1024',
+          'accept-ranges': 'bytes',
+        },
+      });
+    });
+
+    const res = await handleWorkerProxyRequest(
+      new Request(workerUrl, { headers: { Range: 'bytes=0-3' } }),
+      env,
+      undefined,
+      { fetcher, edgeCache: createMemoryEdgeCache(), nowSeconds: () => 1_795_000_000 }
+    );
+
+    expect(capturedRange).toBe('bytes=0-3');
+    expect(res.status).toBe(206);
+    expect(res.headers.get('content-range')).toBe('bytes 0-3/1024');
+    expect(res.headers.get('accept-ranges')).toBe('bytes');
+    expect(res.headers.get('access-control-allow-origin')).toBe('*');
+
+    // Assinatura adulterada -> 403
+    const badRes = await handleWorkerProxyRequest(
+      new Request(`${workerUrl.replace(sig, 'assinatura_invalida')}`),
+      env
+    );
+    expect(badRes.status).toBe(403);
+
+    // SSRF -> 502
+    const internalUrl = 'http://127.0.0.1:8080/internal.ts';
+    const internalSig = await createWorkerProxySignature(internalUrl, exp, TEST_SECRET);
+    const ssrfRes = await handleWorkerProxyRequest(
+      new Request(
+        `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(internalUrl)}&exp=${exp}&sig=${internalSig}`
+      ),
+      env,
+      undefined,
+      { nowSeconds: () => 1_795_000_000 }
+    );
+    expect(ssrfRes.status).toBe(502);
+  });
+
+  it('resolve Referer por mapa em vars (PLAYER_REFERER_MAP) com preferência para host mais específico e fallback', () => {
+    const mappedEnv: WorkerEnv = {
+      PLAYER_SESSION_SECRET: TEST_SECRET,
+      PLAYER_MAXIMAIMG_REFERER: 'https://api.anivideo.net/',
+      PLAYER_REFERER_MAP: JSON.stringify({
+        'maximaimg.online': 'https://api.anivideo.net/',
+        'cdn-sv02.maximaimg.online': 'https://player.provedor2.net/',
+        'cdn.outroprovedor.com': 'https://site.outroprovedor.com/',
+      }),
+    };
+
+    expect(
+      resolveUpstreamReferer(new URL('https://cdn-sv01.maximaimg.online/ep1/index.m3u8'), mappedEnv)
+    ).toBe('https://api.anivideo.net/');
+    expect(
+      resolveUpstreamReferer(new URL('https://cdn-sv02.maximaimg.online/ep1/index.m3u8'), mappedEnv)
+    ).toBe('https://player.provedor2.net/');
+    expect(
+      resolveUpstreamReferer(new URL('https://cdn.outroprovedor.com/video.ts'), mappedEnv)
+    ).toBe('https://site.outroprovedor.com/');
+
+    // Fallback quando PLAYER_REFERER_MAP ausente ou inválido
+    const fallbackEnv: WorkerEnv = {
+      PLAYER_SESSION_SECRET: TEST_SECRET,
+      PLAYER_MAXIMAIMG_REFERER: 'https://api.anivideo.net/',
+      PLAYER_REFERER_MAP: '{json-invalido',
+    };
+    expect(
+      resolveUpstreamReferer(new URL('https://cdn-sv01.maximaimg.online/ep1/index.m3u8'), fallbackEnv)
+    ).toBe('https://api.anivideo.net/');
+    expect(
+      resolveUpstreamReferer(new URL('https://cdn.generico.com/video.mp4'), fallbackEnv)
+    ).toBe('https://cdn.generico.com/');
+  });
+});

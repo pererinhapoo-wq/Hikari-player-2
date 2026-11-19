@@ -30,7 +30,7 @@ import {
   sanitizeDiagnosticError,
   updateEpisode,
 } from '@/lib/db';
-import { buildSignedProxyPath } from '@/lib/proxy-signing';
+import { buildSignedProxyPath, createProxySignature } from '@/lib/proxy-signing';
 import type {
   AdminDashboardState,
   DatabaseDiagnosticResult,
@@ -40,6 +40,39 @@ import type {
   PublicEpisodeResult,
 } from '@/lib/types';
 import { collectEpisodeSources } from '@/lib/video-sources';
+
+const WORKER_EXP_BUCKET_SECONDS = 60 * 60 * 6; // Janela de 6h para chave de cache estável no Worker
+
+export function resolveProxyPlayUrl(
+  targetUrl: string,
+  workerBaseEnv = process.env.WORKER_BASE
+): string {
+  const rawBase = workerBaseEnv?.trim();
+  if (rawBase) {
+    try {
+      const parsed = new URL(rawBase);
+      if (parsed.protocol === 'http:' || parsed.protocol === 'https:') {
+        const normalizedBase = parsed
+          .toString()
+          .replace(/\/+$/, '')
+          .replace(/\/api\/proxy\/stream$/, '');
+        const nowSeconds = Math.floor(Date.now() / 1000);
+        const stableExp =
+          (Math.floor(nowSeconds / WORKER_EXP_BUCKET_SECONDS) + 2) * WORKER_EXP_BUCKET_SECONDS;
+        const sig = createProxySignature(targetUrl, stableExp);
+        const params = new URLSearchParams({
+          url: targetUrl,
+          exp: String(stableExp),
+          sig,
+        });
+        return `${normalizedBase}/api/proxy/stream?${params.toString()}`;
+      }
+    } catch {
+      // WORKER_BASE inválida: mantém fallback para /api/proxy/stream na Vercel
+    }
+  }
+  return buildSignedProxyPath(targetUrl);
+}
 
 function toEpisodeDto(ep: PlayerEpisode): EpisodeDto {
   return {
@@ -81,7 +114,7 @@ export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
     const normalizedSources = collectEpisodeSources(episode);
     const sources: PlayableSource[] = normalizedSources.map((src) => ({
       ...src,
-      playUrl: src.needsProxy ? buildSignedProxyPath(src.resolvedUrl) : src.resolvedUrl,
+      playUrl: src.needsProxy ? resolveProxyPlayUrl(src.resolvedUrl) : src.resolvedUrl,
     }));
 
     return {
