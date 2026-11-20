@@ -6,6 +6,7 @@ import {
   getRequestIP,
   setCookie,
 } from '@tanstack/react-start/server';
+import { formatEpisodeDisplayTitle } from '@/lib/anime-library';
 import {
   ADMIN_SESSION_COOKIE_NAME,
   buildPublicEpisodeUrl,
@@ -145,7 +146,7 @@ export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
       status: 'ok',
       episode: {
         id: episode.id,
-        title: episode.title,
+        title: formatEpisodeDisplayTitle(episode),
         poster_url: episode.poster_url,
         sources,
       },

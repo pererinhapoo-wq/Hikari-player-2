@@ -1,5 +1,6 @@
 import crypto from 'node:crypto';
 import { neon } from '@neondatabase/serverless';
+import { sanitizeAnimeName, sanitizeEpisodeNumber } from '@/lib/anime-library';
 import type {
   DatabaseDiagnosisCode,
   DatabaseDiagnosticResult,
@@ -11,6 +12,8 @@ import { type ExplicitSourceKind, normalizeExplicitSourceKind, validateHttpUrl }
 
 export interface PlayerEpisode {
   id: string;
+  anime_name: string | null;
+  episode_number: string | null;
   title: string;
   poster_url: string;
   video_url: string;
@@ -33,6 +36,8 @@ export interface PlayerEpisode {
 }
 
 export interface EpisodeWriteInput {
+  anime_name?: string | null;
+  episode_number?: string | null;
   title: string;
   poster_url: string;
   video_url: string;
@@ -84,9 +89,22 @@ export function generateEpisodeId(length = 21): string {
 }
 
 export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInput {
-  const title = input.title?.trim() ?? '';
-  if (!title || title.length > 200) {
-    throw new Error('O título do episódio é obrigatório (máximo 200 caracteres).');
+  const animeName = sanitizeAnimeName(input.anime_name);
+  if (animeName && animeName.length > 160) {
+    throw new Error('O nome do anime deve ter no máximo 160 caracteres.');
+  }
+
+  const episodeNumber = sanitizeEpisodeNumber(input.episode_number);
+  if (episodeNumber && episodeNumber.length > 32) {
+    throw new Error('O número do episódio deve ter no máximo 32 caracteres.');
+  }
+
+  const title = typeof input.title === 'string' ? input.title.trim() : '';
+  if (title.length > 200) {
+    throw new Error('O título do episódio deve ter no máximo 200 caracteres.');
+  }
+  if (!title && !animeName) {
+    throw new Error('Informe o nome do anime ou o título do episódio.');
   }
 
   const posterCheck = validateHttpUrl(input.poster_url ?? '');
@@ -106,9 +124,13 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
     ['video_url_5', 'Player 5'],
   ];
 
-  const sanitizedOptional: Record<string, string | null> = {};
+  const sanitizedOptional: Record<string, string | null | undefined> = {};
   for (const [key, label] of optionalSlots) {
     const raw = input[key];
+    if (raw === undefined) {
+      sanitizedOptional[key] = undefined;
+      continue;
+    }
     if (!raw || typeof raw !== 'string' || !raw.trim()) {
       sanitizedOptional[key] = null;
       continue;
@@ -121,6 +143,8 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
   }
 
   return {
+    anime_name: animeName,
+    episode_number: episodeNumber,
     title,
     poster_url: posterCheck.normalizedUrl,
     video_url: primaryCheck.normalizedUrl,
@@ -129,22 +153,56 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
     video_url_4: sanitizedOptional.video_url_4,
     video_url_5: sanitizedOptional.video_url_5,
     source_kind: normalizeExplicitSourceKind(input.source_kind),
-    source_kind_2: normalizeExplicitSourceKind(input.source_kind_2),
-    source_kind_3: normalizeExplicitSourceKind(input.source_kind_3),
-    source_kind_4: normalizeExplicitSourceKind(input.source_kind_4),
-    source_kind_5: normalizeExplicitSourceKind(input.source_kind_5),
+    source_kind_2:
+      input.source_kind_2 === undefined
+        ? undefined
+        : normalizeExplicitSourceKind(input.source_kind_2),
+    source_kind_3:
+      input.source_kind_3 === undefined
+        ? undefined
+        : normalizeExplicitSourceKind(input.source_kind_3),
+    source_kind_4:
+      input.source_kind_4 === undefined
+        ? undefined
+        : normalizeExplicitSourceKind(input.source_kind_4),
+    source_kind_5:
+      input.source_kind_5 === undefined
+        ? undefined
+        : normalizeExplicitSourceKind(input.source_kind_5),
     force_proxy: typeof input.force_proxy === 'boolean' ? input.force_proxy : true,
-    force_proxy_2: typeof input.force_proxy_2 === 'boolean' ? input.force_proxy_2 : true,
-    force_proxy_3: typeof input.force_proxy_3 === 'boolean' ? input.force_proxy_3 : true,
-    force_proxy_4: typeof input.force_proxy_4 === 'boolean' ? input.force_proxy_4 : true,
-    force_proxy_5: typeof input.force_proxy_5 === 'boolean' ? input.force_proxy_5 : true,
+    force_proxy_2:
+      input.force_proxy_2 === undefined
+        ? undefined
+        : typeof input.force_proxy_2 === 'boolean'
+          ? input.force_proxy_2
+          : true,
+    force_proxy_3:
+      input.force_proxy_3 === undefined
+        ? undefined
+        : typeof input.force_proxy_3 === 'boolean'
+          ? input.force_proxy_3
+          : true,
+    force_proxy_4:
+      input.force_proxy_4 === undefined
+        ? undefined
+        : typeof input.force_proxy_4 === 'boolean'
+          ? input.force_proxy_4
+          : true,
+    force_proxy_5:
+      input.force_proxy_5 === undefined
+        ? undefined
+        : typeof input.force_proxy_5 === 'boolean'
+          ? input.force_proxy_5
+          : true,
   };
 }
 
 function mapEpisodeRow(row: Record<string, unknown>): PlayerEpisode {
   return {
     id: String(row.id),
-    title: String(row.title),
+    anime_name: sanitizeAnimeName(row.anime_name),
+    episode_number: sanitizeEpisodeNumber(row.episode_number),
+    title: typeof row.title === 'string' ? row.title : String(row.title ?? ''),
     poster_url: String(row.poster_url),
     video_url: String(row.video_url),
     video_url_2: row.video_url_2 ? String(row.video_url_2) : null,
@@ -170,7 +228,8 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
   const sql = getSql();
   try {
     const rows = await sql`
-      SELECT id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+      SELECT id, anime_name, episode_number, title, poster_url,
+             video_url, video_url_2, video_url_3, video_url_4, video_url_5,
              source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
              COALESCE(force_proxy, true) AS force_proxy,
              COALESCE(force_proxy_2, true) AS force_proxy_2,
@@ -201,6 +260,8 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
         const data = (row.row_data as Record<string, unknown>) ?? row;
         return mapEpisodeRow({
           ...row,
+          anime_name: data.anime_name ?? null,
+          episode_number: data.episode_number ?? null,
           source_kind: data.source_kind ?? null,
           source_kind_2: data.source_kind_2 ?? null,
           source_kind_3: data.source_kind_3 ?? null,
@@ -227,7 +288,8 @@ export async function getEpisodeById(id: string): Promise<PlayerEpisode | null> 
   const sql = getSql();
   try {
     const rows = await sql`
-      SELECT id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+      SELECT id, anime_name, episode_number, title, poster_url,
+             video_url, video_url_2, video_url_3, video_url_4, video_url_5,
              source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
              COALESCE(force_proxy, true) AS force_proxy,
              COALESCE(force_proxy_2, true) AS force_proxy_2,
@@ -256,6 +318,8 @@ export async function getEpisodeById(id: string): Promise<PlayerEpisode | null> 
       const data = (row.row_data as Record<string, unknown>) ?? row;
       return mapEpisodeRow({
         ...row,
+        anime_name: data.anime_name ?? null,
+        episode_number: data.episode_number ?? null,
         source_kind: data.source_kind ?? null,
         source_kind_2: data.source_kind_2 ?? null,
         source_kind_3: data.source_kind_3 ?? null,
@@ -272,19 +336,25 @@ export async function getEpisodeById(id: string): Promise<PlayerEpisode | null> 
   }
 }
 
-export async function createEpisode(rawInput: EpisodeWriteInput): Promise<PlayerEpisode> {
+export async function createEpisode(
+  rawInput: EpisodeWriteInput,
+  sqlOverride?: DiagnosticSqlTag
+): Promise<PlayerEpisode> {
   const input = sanitizeEpisodeInput(rawInput);
   const id = generateEpisodeId();
-  const sql = getSql();
+  const sql = sqlOverride ?? (getSql() as unknown as DiagnosticSqlTag);
 
   try {
     const rows = await sql`
       INSERT INTO public.player_episodes (
-        id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+        id, anime_name, episode_number, title, poster_url,
+        video_url, video_url_2, video_url_3, video_url_4, video_url_5,
         source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
         force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5
       ) VALUES (
         ${id},
+        ${input.anime_name ?? null},
+        ${input.episode_number ?? null},
         ${input.title},
         ${input.poster_url},
         ${input.video_url},
@@ -303,7 +373,8 @@ export async function createEpisode(rawInput: EpisodeWriteInput): Promise<Player
         ${input.force_proxy_4 ?? true},
         ${input.force_proxy_5 ?? true}
       )
-      RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+      RETURNING id, anime_name, episode_number, title, poster_url,
+                video_url, video_url_2, video_url_3, video_url_4, video_url_5,
                 source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
                 COALESCE(force_proxy, true) AS force_proxy,
                 COALESCE(force_proxy_2, true) AS force_proxy_2,
@@ -320,7 +391,7 @@ export async function createEpisode(rawInput: EpisodeWriteInput): Promise<Player
           id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5
         ) VALUES (
           ${id},
-          ${input.title},
+          ${input.title || input.anime_name || 'Episódio'},
           ${input.poster_url},
           ${input.video_url},
           ${input.video_url_2 ?? null},
@@ -339,7 +410,8 @@ export async function createEpisode(rawInput: EpisodeWriteInput): Promise<Player
 
 export async function updateEpisode(
   id: string,
-  rawInput: EpisodeWriteInput
+  rawInput: EpisodeWriteInput,
+  sqlOverride?: DiagnosticSqlTag
 ): Promise<PlayerEpisode | null> {
   const cleanId = id.trim();
   if (!cleanId || !/^[A-Za-z0-9_-]+$/.test(cleanId)) {
@@ -347,59 +419,110 @@ export async function updateEpisode(
   }
 
   const input = sanitizeEpisodeInput(rawInput);
-  const sql = getSql();
+  const sql = sqlOverride ?? (getSql() as unknown as DiagnosticSqlTag);
+  const preserveAdditionalSources =
+    rawInput.video_url_2 === undefined &&
+    rawInput.video_url_3 === undefined &&
+    rawInput.video_url_4 === undefined &&
+    rawInput.video_url_5 === undefined &&
+    rawInput.source_kind_2 === undefined &&
+    rawInput.source_kind_3 === undefined &&
+    rawInput.source_kind_4 === undefined &&
+    rawInput.source_kind_5 === undefined &&
+    rawInput.force_proxy_2 === undefined &&
+    rawInput.force_proxy_3 === undefined &&
+    rawInput.force_proxy_4 === undefined &&
+    rawInput.force_proxy_5 === undefined;
 
   try {
-    const rows = await sql`
-      UPDATE public.player_episodes
-      SET
-        title = ${input.title},
-        poster_url = ${input.poster_url},
-        video_url = ${input.video_url},
-        video_url_2 = ${input.video_url_2 ?? null},
-        video_url_3 = ${input.video_url_3 ?? null},
-        video_url_4 = ${input.video_url_4 ?? null},
-        video_url_5 = ${input.video_url_5 ?? null},
-        source_kind = ${input.source_kind ?? null},
-        source_kind_2 = ${input.source_kind_2 ?? null},
-        source_kind_3 = ${input.source_kind_3 ?? null},
-        source_kind_4 = ${input.source_kind_4 ?? null},
-        source_kind_5 = ${input.source_kind_5 ?? null},
-        force_proxy = ${input.force_proxy ?? true},
-        force_proxy_2 = ${input.force_proxy_2 ?? true},
-        force_proxy_3 = ${input.force_proxy_3 ?? true},
-        force_proxy_4 = ${input.force_proxy_4 ?? true},
-        force_proxy_5 = ${input.force_proxy_5 ?? true},
-        updated_at = NOW()
-      WHERE id = ${cleanId}
-      RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-                source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
-                COALESCE(force_proxy, true) AS force_proxy,
-                COALESCE(force_proxy_2, true) AS force_proxy_2,
-                COALESCE(force_proxy_3, true) AS force_proxy_3,
-                COALESCE(force_proxy_4, true) AS force_proxy_4,
-                COALESCE(force_proxy_5, true) AS force_proxy_5,
-                created_at, updated_at
-    `;
+    const rows = preserveAdditionalSources
+      ? await sql`
+          UPDATE public.player_episodes
+          SET
+            anime_name = ${input.anime_name ?? null},
+            episode_number = ${input.episode_number ?? null},
+            title = ${input.title},
+            poster_url = ${input.poster_url},
+            video_url = ${input.video_url},
+            source_kind = ${input.source_kind ?? null},
+            force_proxy = ${input.force_proxy ?? true},
+            updated_at = NOW()
+          WHERE id = ${cleanId}
+          RETURNING id, anime_name, episode_number, title, poster_url,
+                    video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                    source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
+                    COALESCE(force_proxy, true) AS force_proxy,
+                    COALESCE(force_proxy_2, true) AS force_proxy_2,
+                    COALESCE(force_proxy_3, true) AS force_proxy_3,
+                    COALESCE(force_proxy_4, true) AS force_proxy_4,
+                    COALESCE(force_proxy_5, true) AS force_proxy_5,
+                    created_at, updated_at
+        `
+      : await sql`
+          UPDATE public.player_episodes
+          SET
+            anime_name = ${input.anime_name ?? null},
+            episode_number = ${input.episode_number ?? null},
+            title = ${input.title},
+            poster_url = ${input.poster_url},
+            video_url = ${input.video_url},
+            video_url_2 = ${input.video_url_2 ?? null},
+            video_url_3 = ${input.video_url_3 ?? null},
+            video_url_4 = ${input.video_url_4 ?? null},
+            video_url_5 = ${input.video_url_5 ?? null},
+            source_kind = ${input.source_kind ?? null},
+            source_kind_2 = ${input.source_kind_2 ?? null},
+            source_kind_3 = ${input.source_kind_3 ?? null},
+            source_kind_4 = ${input.source_kind_4 ?? null},
+            source_kind_5 = ${input.source_kind_5 ?? null},
+            force_proxy = ${input.force_proxy ?? true},
+            force_proxy_2 = ${input.force_proxy_2 ?? true},
+            force_proxy_3 = ${input.force_proxy_3 ?? true},
+            force_proxy_4 = ${input.force_proxy_4 ?? true},
+            force_proxy_5 = ${input.force_proxy_5 ?? true},
+            updated_at = NOW()
+          WHERE id = ${cleanId}
+          RETURNING id, anime_name, episode_number, title, poster_url,
+                    video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                    source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
+                    COALESCE(force_proxy, true) AS force_proxy,
+                    COALESCE(force_proxy_2, true) AS force_proxy_2,
+                    COALESCE(force_proxy_3, true) AS force_proxy_3,
+                    COALESCE(force_proxy_4, true) AS force_proxy_4,
+                    COALESCE(force_proxy_5, true) AS force_proxy_5,
+                    created_at, updated_at
+        `;
     const row = (rows as Array<Record<string, unknown>>)[0];
     return row ? mapEpisodeRow(row) : null;
   } catch (err: any) {
     if (err?.code === '42703' || String(err?.message).includes('column')) {
-      const rows = await sql`
-        UPDATE public.player_episodes
-        SET
-          title = ${input.title},
-          poster_url = ${input.poster_url},
-          video_url = ${input.video_url},
-          video_url_2 = ${input.video_url_2 ?? null},
-          video_url_3 = ${input.video_url_3 ?? null},
-          video_url_4 = ${input.video_url_4 ?? null},
-          video_url_5 = ${input.video_url_5 ?? null},
-          updated_at = NOW()
-        WHERE id = ${cleanId}
-        RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-                  created_at, updated_at
-      `;
+      const rows = preserveAdditionalSources
+        ? await sql`
+            UPDATE public.player_episodes
+            SET
+              title = ${input.title || input.anime_name || 'Episódio'},
+              poster_url = ${input.poster_url},
+              video_url = ${input.video_url},
+              updated_at = NOW()
+            WHERE id = ${cleanId}
+            RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                      created_at, updated_at
+          `
+        : await sql`
+            UPDATE public.player_episodes
+            SET
+              title = ${input.title || input.anime_name || 'Episódio'},
+              poster_url = ${input.poster_url},
+              video_url = ${input.video_url},
+              video_url_2 = ${input.video_url_2 ?? null},
+              video_url_3 = ${input.video_url_3 ?? null},
+              video_url_4 = ${input.video_url_4 ?? null},
+              video_url_5 = ${input.video_url_5 ?? null},
+              updated_at = NOW()
+            WHERE id = ${cleanId}
+            RETURNING id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                      created_at, updated_at
+          `;
       const row = (rows as Array<Record<string, unknown>>)[0];
       return row ? mapEpisodeRow(row) : null;
     }

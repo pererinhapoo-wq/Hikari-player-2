@@ -6,6 +6,8 @@ export interface PlayableSource extends NormalizedVideoSource {
 
 export interface EpisodeDto {
   id: string;
+  anime_name: string | null;
+  episode_number: string | null;
   title: string;
   poster_url: string;
   video_url: string;
@@ -24,6 +26,8 @@ export interface EpisodeDto {
 }
 
 export interface EpisodeFormPayload {
+  anime_name?: string | null;
+  episode_number?: string | null;
   title: string;
   poster_url: string;
   video_url: string;
