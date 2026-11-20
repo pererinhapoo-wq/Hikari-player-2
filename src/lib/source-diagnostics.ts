@@ -1,11 +1,16 @@
+import { resolveEmbedProxy } from '@/lib/embed-proxy';
 import { safeFetchWithRedirects } from '@/lib/ssrf';
 import { BROWSER_UA, resolveUpstreamReferer } from '@/lib/stream-proxy';
 import type {
+  EmbedAuthStrategy,
+  EmbedHostDiagnostic,
+  EmbedRedirectHopDiagnostic,
   SourceAttemptDiagnostic,
   SourceTestReport,
   SourceTestVerdict,
 } from '@/lib/types';
 import {
+  classifyEmbedHost,
   detectSourceKind,
   type ExplicitSourceKind,
   validateHttpUrl,
@@ -20,6 +25,25 @@ export interface SourceTestInput {
 
 export interface SourceDiagnosticsDeps {
   fetchWithRedirects?: typeof safeFetchWithRedirects;
+  embedFetchImpl?: typeof fetch;
+  embedAssertSafeUrl?: (rawUrl: string) => Promise<URL>;
+}
+
+interface InternalAttemptResult {
+  diagnostic: SourceAttemptDiagnostic;
+  cspHeader: string | null;
+  xFrameOptions: string | null;
+}
+
+function extractFrameAncestorsDirective(cspHeader: string | null): string | null {
+  if (!cspHeader) return null;
+  for (const part of cspHeader.split(';')) {
+    const trimmed = part.trim();
+    if (/^frame-ancestors\b/i.test(trimmed)) {
+      return trimmed;
+    }
+  }
+  return null;
 }
 
 async function readFirstLineSafely(response: Response, contentType: string | null): Promise<string | null> {
@@ -96,7 +120,7 @@ async function runSingleAttempt(
   headers: Record<string, string>,
   sentReferer: string | null,
   fetchWithRedirects: typeof safeFetchWithRedirects
-): Promise<SourceAttemptDiagnostic> {
+): Promise<InternalAttemptResult> {
   try {
     const { response } = await fetchWithRedirects(url, {
       headers,
@@ -104,6 +128,8 @@ async function runSingleAttempt(
     });
     const acao = response.headers.get('access-control-allow-origin');
     const contentType = response.headers.get('content-type');
+    const cspHeader = response.headers.get('content-security-policy');
+    const xFrameOptions = response.headers.get('x-frame-options');
     const firstLine = await readFirstLineSafely(response, contentType);
     if (response.status !== 200 && response.body) {
       try {
@@ -113,25 +139,33 @@ async function runSingleAttempt(
       }
     }
     return {
-      status: response.status,
-      ok: response.status >= 200 && response.status < 300,
-      accessControlAllowOrigin: acao,
-      hasAcao: Boolean(acao && acao.trim().length > 0),
-      firstLine,
-      contentType,
-      sentReferer,
-      error: null,
+      diagnostic: {
+        status: response.status,
+        ok: response.status >= 200 && response.status < 300,
+        accessControlAllowOrigin: acao,
+        hasAcao: Boolean(acao && acao.trim().length > 0),
+        firstLine,
+        contentType,
+        sentReferer,
+        error: null,
+      },
+      cspHeader,
+      xFrameOptions,
     };
   } catch (err) {
     return {
-      status: null,
-      ok: false,
-      accessControlAllowOrigin: null,
-      hasAcao: false,
-      firstLine: null,
-      contentType: null,
-      sentReferer,
-      error: err instanceof Error ? err.message : 'Falha de rede ao consultar origem.',
+      diagnostic: {
+        status: null,
+        ok: false,
+        accessControlAllowOrigin: null,
+        hasAcao: false,
+        firstLine: null,
+        contentType: null,
+        sentReferer,
+        error: err instanceof Error ? err.message : 'Falha de rede ao consultar origem.',
+      },
+      cspHeader: null,
+      xFrameOptions: null,
     };
   }
 }
@@ -140,18 +174,52 @@ export function classifySourceDiagnostic(
   detectedKind: ExplicitSourceKind,
   noHeaders: SourceAttemptDiagnostic,
   withHeaders: SourceAttemptDiagnostic,
-  targetOrigin: string
+  targetOrigin: string,
+  embedDiagnostic?: EmbedHostDiagnostic
 ): {
   verdict: SourceTestVerdict;
   verdictLabel: 'direto ok' | 'proxy necessário' | 'bloqueado';
   verdictReason: string;
 } {
   if (detectedKind === 'iframe') {
+    if (embedDiagnostic?.hostCategory === 'proxied') {
+      const directStatusText =
+        embedDiagnostic.directStatus !== null ? `HTTP ${embedDiagnostic.directStatus}` : 'erro';
+      const faText = embedDiagnostic.hasFrameAncestors
+        ? `frame-ancestors presente (${embedDiagnostic.frameAncestorsValue})`
+        : 'frame-ancestors ausente';
+      if (embedDiagnostic.embedProxyOk) {
+        const strategyText =
+          embedDiagnostic.successfulStrategy === 'chrome_ua_no_referer'
+            ? 'UA Chrome sem Referer (fallback após 403)'
+            : 'UA Chrome + Referer';
+        const chainSummary =
+          embedDiagnostic.redirectChain.length > 0
+            ? embedDiagnostic.redirectChain
+                .map((h) => `${h.host}:${h.status ?? 'erro'}`)
+                .join(' -> ')
+            : 'sem saltos';
+        return {
+          verdict: 'proxy_necessario',
+          verdictLabel: 'proxy necessário',
+          verdictReason: `Host exige /api/embed (fetch direto: ${directStatusText}; ${faText}; /api/embed: HTTP ${embedDiagnostic.embedProxyStatus} via ${strategyText}; saltos: ${chainSummary}).`,
+        };
+      }
+      return {
+        verdict: 'bloqueado',
+        verdictLabel: 'bloqueado',
+        verdictReason: `Host exige /api/embed, mas /api/embed falhou (${embedDiagnostic.embedProxyError ?? `HTTP ${embedDiagnostic.embedProxyStatus ?? 'erro'}`}). Fetch direto: ${directStatusText}; ${faText}.`,
+      };
+    }
+
     if (withHeaders.ok || noHeaders.ok) {
       return {
         verdict: 'direto_ok',
         verdictLabel: 'direto ok',
-        verdictReason: 'Fonte iframe não depende de CORS/proxy e respondeu 2xx.',
+        verdictReason:
+          embedDiagnostic?.hostCategory === 'direct'
+            ? 'Host em EMBED_DIRECT_HOSTS reproduz em iframe direto (sem /api/embed) e respondeu 2xx.'
+            : 'Fonte iframe não depende de CORS/proxy e respondeu 2xx.',
       };
     }
     return {
@@ -250,7 +318,7 @@ export async function diagnoseVideoSource(
   const targetUrl = new URL(urlCheck.normalizedUrl);
   const mappedReferer = resolveUpstreamReferer(targetUrl);
 
-  const noHeadersAttempt = await runSingleAttempt(
+  const noHeadersRes = await runSingleAttempt(
     targetUrl.toString(),
     {},
     null,
@@ -265,18 +333,103 @@ export async function diagnoseVideoSource(
     proxyHeaders['Referer'] = mappedReferer;
   }
 
-  const withHeadersAttempt = await runSingleAttempt(
+  const withHeadersRes = await runSingleAttempt(
     targetUrl.toString(),
     proxyHeaders,
     mappedReferer || null,
     fetchWithRedirects
   );
 
+  const hostCategory = classifyEmbedHost(targetUrl.toString());
+  const frameAncestorsValue =
+    extractFrameAncestorsDirective(noHeadersRes.cspHeader) ??
+    extractFrameAncestorsDirective(withHeadersRes.cspHeader);
+  const directStatus =
+    noHeadersRes.diagnostic.status ?? withHeadersRes.diagnostic.status;
+
+  let embedDiagnostic: EmbedHostDiagnostic | undefined;
+  if (hostCategory === 'proxied') {
+    let embedProxyStatus: number | null = null;
+    let embedProxyOk = false;
+    let embedProxyError: string | null = null;
+    let redirectChain: EmbedRedirectHopDiagnostic[] = [];
+    let successfulStrategy: EmbedAuthStrategy | null = null;
+    let finalUrl: string | null = null;
+
+    try {
+      const embedReq = new Request(
+        `https://local.test/api/embed?u=${encodeURIComponent(targetUrl.toString())}`,
+        { method: 'GET' }
+      );
+      const embedResult = await resolveEmbedProxy(embedReq, {
+        fetchImpl: deps.embedFetchImpl,
+        assertSafeUrl: deps.embedAssertSafeUrl,
+      });
+      const embedRes = embedResult.response;
+      redirectChain = embedResult.redirectChain;
+      successfulStrategy = embedResult.successfulStrategy;
+      finalUrl = embedResult.finalUrl;
+      embedProxyStatus = embedRes.status;
+      embedProxyOk = embedRes.ok;
+      if (!embedRes.ok) {
+        const bodyText = await embedRes.text();
+        const reasonMatch = /<p>([^<]+)<\/p>/i.exec(bodyText);
+        const rawReason = reasonMatch?.[1];
+        embedProxyError = rawReason
+          ? rawReason
+              .replace(/&quot;/g, '"')
+              .replace(/&#39;/g, "'")
+              .replace(/&lt;/g, '<')
+              .replace(/&gt;/g, '>')
+              .replace(/&amp;/g, '&')
+          : `HTTP ${embedRes.status}`;
+      } else if (embedRes.body) {
+        try {
+          await embedRes.body.cancel();
+        } catch {
+          // ignore
+        }
+      }
+    } catch (err) {
+      embedProxyError =
+        err instanceof Error ? err.message : 'Falha ao testar rota /api/embed.';
+    }
+
+    embedDiagnostic = {
+      hostCategory: 'proxied',
+      hostLabel: 'Exige /api/embed',
+      directStatus,
+      hasFrameAncestors: Boolean(frameAncestorsValue),
+      frameAncestorsValue,
+      embedProxyStatus,
+      embedProxyOk,
+      embedProxyError,
+      redirectChain,
+      successfulStrategy,
+      finalUrl,
+    };
+  } else if (hostCategory === 'direct') {
+    embedDiagnostic = {
+      hostCategory: 'direct',
+      hostLabel: 'Iframe direto (sem /api/embed)',
+      directStatus,
+      hasFrameAncestors: Boolean(frameAncestorsValue),
+      frameAncestorsValue,
+      embedProxyStatus: null,
+      embedProxyOk: false,
+      embedProxyError: null,
+      redirectChain: [],
+      successfulStrategy: null,
+      finalUrl: null,
+    };
+  }
+
   const classification = classifySourceDiagnostic(
     detectedKind,
-    noHeadersAttempt,
-    withHeadersAttempt,
-    targetUrl.origin
+    noHeadersRes.diagnostic,
+    withHeadersRes.diagnostic,
+    targetUrl.origin,
+    embedDiagnostic
   );
 
   return {
@@ -284,9 +437,10 @@ export async function diagnoseVideoSource(
     label,
     url: targetUrl.toString(),
     detectedKind,
-    noHeaders: noHeadersAttempt,
-    withHeaders: withHeadersAttempt,
+    noHeaders: noHeadersRes.diagnostic,
+    withHeaders: withHeadersRes.diagnostic,
     ...classification,
+    embedDiagnostic,
   };
 }
 

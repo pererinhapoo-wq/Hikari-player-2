@@ -50,7 +50,10 @@ import type {
   SourceTestReport,
 } from '@/lib/types';
 import {
+  classifyEmbedHost,
   detectSourceKind,
+  EMBED_DIRECT_HOSTS,
+  EMBED_PROXIED_HOSTS,
   type ExplicitSourceKind,
   normalizeVideoSource,
   validateHttpUrl,
@@ -299,7 +302,8 @@ function AdminPage() {
     const check = validateHttpUrl(trimmed);
     const normalized = normalizeVideoSource(trimmed, 1, form.source_kind || null);
     const detectedKind = detectSourceKind(trimmed, form.source_kind || null);
-    return { trimmed, check, normalized, detectedKind };
+    const embedHostMode = classifyEmbedHost(check.normalizedUrl ?? trimmed);
+    return { trimmed, check, normalized, detectedKind, embedHostMode };
   }, [form.video_url, form.source_kind]);
 
   const copyLink = async (id: string, url: string) => {
@@ -1099,6 +1103,39 @@ function AdminPage() {
                       Aceita URL direta (.m3u8, .mp4, .webm) ou página do provedor (.php, embed).
                     </p>
 
+                    <div className="rounded-lg bg-[#090B10] border border-white/10 px-3 py-2 text-[11px] text-slate-300 space-y-1 leading-relaxed">
+                      <div>
+                        <span className="text-amber-300 font-medium">Exige /api/embed:</span>{' '}
+                        <span className="font-mono text-slate-200">
+                          {EMBED_PROXIED_HOSTS.join(', ')}
+                        </span>{' '}
+                        (CSP frame-ancestors bloqueia iframe direto)
+                      </div>
+                      <div>
+                        <span className="text-emerald-300 font-medium">Iframe direto:</span>{' '}
+                        <span className="font-mono text-slate-200">
+                          {EMBED_DIRECT_HOSTS.join(', ')}
+                        </span>
+                      </div>
+                      {primarySourceInfo?.check.valid &&
+                        primarySourceInfo.detectedKind === 'iframe' && (
+                          <div className="pt-0.5 text-slate-200">
+                            Modo detectado para esta URL:{' '}
+                            <span
+                              className={`font-mono font-semibold ${
+                                primarySourceInfo.embedHostMode === 'proxied'
+                                  ? 'text-amber-300'
+                                  : 'text-emerald-300'
+                              }`}
+                            >
+                              {primarySourceInfo.embedHostMode === 'proxied'
+                                ? 'via /api/embed'
+                                : 'iframe direto'}
+                            </span>
+                          </div>
+                        )}
+                    </div>
+
                     {slotTestError && (
                       <p className="text-xs text-rose-400" role="alert">
                         {slotTestError}
@@ -1142,6 +1179,71 @@ function AdminPage() {
                           · ACAO:{' '}
                           {slotReport.withHeaders.accessControlAllowOrigin ?? 'ausente'}
                         </div>
+                        {slotReport.embedDiagnostic && (
+                          <div className="text-slate-200 pt-1 border-t border-white/10 space-y-0.5">
+                            <div>
+                              Embed:{' '}
+                              <span
+                                className={
+                                  slotReport.embedDiagnostic.hostCategory === 'proxied'
+                                    ? 'text-amber-300'
+                                    : 'text-emerald-300'
+                                }
+                              >
+                                {slotReport.embedDiagnostic.hostLabel}
+                              </span>
+                            </div>
+                            <div>
+                              Fetch direto:{' '}
+                              {slotReport.embedDiagnostic.directStatus !== null
+                                ? `HTTP ${slotReport.embedDiagnostic.directStatus}`
+                                : 'erro'}{' '}
+                              · frame-ancestors:{' '}
+                              {slotReport.embedDiagnostic.hasFrameAncestors
+                                ? `presente (${slotReport.embedDiagnostic.frameAncestorsValue})`
+                                : 'ausente'}
+                            </div>
+                            {slotReport.embedDiagnostic.hostCategory === 'proxied' && (
+                              <>
+                                <div>
+                                  Via /api/embed:{' '}
+                                  {slotReport.embedDiagnostic.embedProxyStatus !== null
+                                    ? `HTTP ${slotReport.embedDiagnostic.embedProxyStatus}`
+                                    : slotReport.embedDiagnostic.embedProxyError ?? 'erro'}
+                                  {slotReport.embedDiagnostic.embedProxyError
+                                    ? ` (${slotReport.embedDiagnostic.embedProxyError})`
+                                    : ''}
+                                </div>
+                                {slotReport.embedDiagnostic.successfulStrategy && (
+                                  <div>
+                                    Estratégia:{' '}
+                                    <span className="text-emerald-300">
+                                      {slotReport.embedDiagnostic.successfulStrategy ===
+                                      'chrome_ua_no_referer'
+                                        ? 'UA Chrome sem Referer (fallback 403)'
+                                        : 'UA Chrome + Referer (origem)'}
+                                    </span>
+                                  </div>
+                                )}
+                                {slotReport.embedDiagnostic.redirectChain.length > 0 && (
+                                  <div className="pt-0.5 space-y-0.5">
+                                    <div className="text-slate-400">Cadeia de saltos:</div>
+                                    {slotReport.embedDiagnostic.redirectChain.map((hop, idx) => (
+                                      <div key={`${hop.url}-${idx}`} className="pl-2 text-slate-300">
+                                        {idx + 1}. {hop.host} ·{' '}
+                                        {hop.status !== null ? `HTTP ${hop.status}` : 'bloqueado/erro'}
+                                        {hop.authMode === 'chrome_ua_no_referer'
+                                          ? ' [sem Referer]'
+                                          : ' [com Referer]'}
+                                        {hop.error ? ` · ${hop.error}` : ''}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </>
+                            )}
+                          </div>
+                        )}
                         {(slotReport.withHeaders.firstLine || slotReport.noHeaders.firstLine) && (
                           <div className="text-emerald-300/90 truncate">
                             1ª linha:{' '}
@@ -1717,6 +1819,47 @@ function SourceDiagnosticTable({ reports }: { reports: SourceTestReport[] }) {
                   >
                     {report.verdictLabel}
                   </span>
+                  {report.embedDiagnostic && (
+                    <div className="text-[10px] text-slate-300 mt-0.5 space-y-0.5">
+                      <div>{report.embedDiagnostic.hostLabel}</div>
+                      <div>
+                        Direto:{' '}
+                        {report.embedDiagnostic.directStatus !== null
+                          ? `HTTP ${report.embedDiagnostic.directStatus}`
+                          : 'erro'}{' '}
+                        · frame-ancestors:{' '}
+                        {report.embedDiagnostic.hasFrameAncestors ? 'presente' : 'ausente'}
+                      </div>
+                      {report.embedDiagnostic.hostCategory === 'proxied' && (
+                        <>
+                          <div>
+                            /api/embed:{' '}
+                            {report.embedDiagnostic.embedProxyStatus !== null
+                              ? `HTTP ${report.embedDiagnostic.embedProxyStatus}`
+                              : report.embedDiagnostic.embedProxyError ?? 'erro'}
+                          </div>
+                          {report.embedDiagnostic.successfulStrategy && (
+                            <div className="text-emerald-300">
+                              {report.embedDiagnostic.successfulStrategy === 'chrome_ua_no_referer'
+                                ? 'Fallback sem Referer (403)'
+                                : 'UA Chrome + Referer'}
+                            </div>
+                          )}
+                          {report.embedDiagnostic.redirectChain.length > 0 && (
+                            <div className="space-y-0.5 pt-0.5">
+                              {report.embedDiagnostic.redirectChain.map((hop, idx) => (
+                                <div key={`${hop.url}-${idx}`} className="text-slate-400">
+                                  {idx + 1}. {hop.host}:{' '}
+                                  {hop.status !== null ? `HTTP ${hop.status}` : hop.error ?? 'erro'}
+                                  {hop.authMode === 'chrome_ua_no_referer' ? ' (sem Ref)' : ''}
+                                </div>
+                              ))}
+                            </div>
+                          )}
+                        </>
+                      )}
+                    </div>
+                  )}
                 </td>
                 <td className="px-2.5 py-2 max-w-[200px] truncate text-emerald-300/90" title={firstLine}>
                   {firstLine}

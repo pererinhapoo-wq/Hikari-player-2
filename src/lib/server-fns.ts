@@ -52,7 +52,11 @@ import type {
   PublicEpisodeResult,
   SourceTestReport,
 } from '@/lib/types';
-import { collectEpisodeSources, type ExplicitSourceKind } from '@/lib/video-sources';
+import {
+  buildIframePlayUrl,
+  collectEpisodeSources,
+  type ExplicitSourceKind,
+} from '@/lib/video-sources';
 
 export function resolveProxyPlayUrl(
   targetUrl: string,
@@ -149,12 +153,16 @@ export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
         !src.requiresServerResolve &&
         forceProxyBySlot[src.slot] !== false &&
         src.needsProxy;
+      const playUrl =
+        src.kind === 'iframe'
+          ? buildIframePlayUrl(src.resolvedUrl)
+          : shouldProxy
+            ? resolveProxyPlayUrl(src.resolvedUrl)
+            : src.resolvedUrl;
       return {
         ...src,
         needsProxy: shouldProxy,
-        playUrl: shouldProxy
-          ? resolveProxyPlayUrl(src.resolvedUrl)
-          : src.resolvedUrl,
+        playUrl,
       };
     });
 

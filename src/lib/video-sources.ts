@@ -31,6 +31,67 @@ export interface UrlValidationResult {
 
 const MAX_URL_LENGTH = 2048;
 
+export const EMBED_PROXIED_HOSTS = ['allappinc.com'] as const;
+export const EMBED_ALLOWED_FINAL_HOSTS = [
+  'allappinc.com',
+  'api.anivideo.net',
+  'cdn-sv01.maximaimg.online',
+  'cdn-s01.mywallpaper-4k-image.net',
+  'anitube.biz',
+  'anitube22.vip',
+  'anitube.zip',
+  'anitube.ninja',
+  'animesdigital.org',
+] as const;
+export const EMBED_DIRECT_HOSTS = [
+  'anitube22.vip',
+  'anitube.biz',
+  'anitube.zip',
+  'anitube.ninja',
+  'animesdigital.org',
+] as const;
+
+function matchesHostList(hostname: string, allowlist: readonly string[]): boolean {
+  const lower = hostname.toLowerCase().replace(/\.+$/, '');
+  if (!lower) return false;
+  return allowlist.some((allowed) => lower === allowed || lower.endsWith(`.${allowed}`));
+}
+
+export function isEmbedProxiedHost(hostname: string): boolean {
+  return matchesHostList(hostname, EMBED_PROXIED_HOSTS);
+}
+
+export function isEmbedAllowedFinalHost(hostname: string): boolean {
+  return matchesHostList(hostname, EMBED_ALLOWED_FINAL_HOSTS);
+}
+
+export function isEmbedDirectHost(hostname: string): boolean {
+  return matchesHostList(hostname, EMBED_DIRECT_HOSTS);
+}
+
+export function classifyEmbedHost(rawUrl: string): 'direct' | 'proxied' | 'other' {
+  try {
+    const parsed = new URL(rawUrl);
+    if (isEmbedDirectHost(parsed.hostname)) return 'direct';
+    if (isEmbedProxiedHost(parsed.hostname)) return 'proxied';
+    return 'other';
+  } catch {
+    return 'other';
+  }
+}
+
+export function buildIframePlayUrl(rawUrl: string): string {
+  const hostType = classifyEmbedHost(rawUrl);
+  if (hostType === 'proxied') {
+    return `/api/embed?u=${encodeURIComponent(rawUrl)}`;
+  }
+  return rawUrl;
+}
+
+export function isPlayerricasSource(rawUrl: string): boolean {
+  return rawUrl.toLowerCase().includes('playerricas');
+}
+
 export function normalizeExplicitSourceKind(raw: unknown): ExplicitSourceKind | null {
   if (typeof raw !== 'string') return null;
   const normalized = raw.trim().toLowerCase();
@@ -223,6 +284,20 @@ export function buildIframeSrcWithFreshTime(
   rawUrl: string,
   nowSeconds = Math.floor(Date.now() / 1000)
 ): string {
+  if (rawUrl.startsWith('/api/embed?')) {
+    try {
+      const wrapper = new URL(rawUrl, 'http://localhost');
+      const inner = wrapper.searchParams.get('u');
+      if (inner && /[?&]time=/i.test(inner)) {
+        const refreshedInner = inner.replace(/([?&]time=)[^&#]*/i, `$1${nowSeconds}`);
+        return `/api/embed?u=${encodeURIComponent(refreshedInner)}`;
+      }
+      return rawUrl;
+    } catch {
+      return rawUrl;
+    }
+  }
+
   try {
     const parsed = new URL(rawUrl);
     if (!parsed.searchParams.has('time')) {
@@ -368,6 +443,25 @@ export function normalizeVideoSource(
     };
   }
 
+  // 3b. Embed proxied hosts (e.g. allappinc.com) -> iframe routed via /api/embed unless direct media extension
+  if (
+    isEmbedProxiedHost(host) &&
+    !/\.(m3u8|m3u|mp4|m4v|webm)$/i.test(parsed.pathname)
+  ) {
+    return {
+      slot,
+      label,
+      rawUrl: normalizedUrl,
+      resolvedUrl: normalizedUrl,
+      fallbackIframeUrl: normalizedUrl,
+      kind: 'iframe',
+      provider: 'iframe',
+      needsProxy: false,
+      requiresServerResolve: false,
+      formatLabel: 'Iframe · Embed Proxy',
+    };
+  }
+
   // 4. Direct video (MP4 / WebM) & Streaming (HLS / M3U8 / M3U) -> proxy ativo por padrão
   if (!isLikelyHtmlPage(parsed)) {
     const mediaKind = detectDirectOrStreamKind(parsed);
@@ -440,6 +534,17 @@ export interface EpisodeUrlsInput {
   source_kind_5?: ExplicitSourceKind | string | null;
 }
 
+function getSourcePriorityRank(src: NormalizedVideoSource): number {
+  if (src.kind !== 'iframe') return 0;
+  if (isPlayerricasSource(src.resolvedUrl) || classifyEmbedHost(src.resolvedUrl) === 'direct') {
+    return 0;
+  }
+  if (classifyEmbedHost(src.resolvedUrl) === 'proxied') {
+    return 1;
+  }
+  return 0;
+}
+
 export function collectEpisodeSources(episode: EpisodeUrlsInput): NormalizedVideoSource[] {
   const candidates: Array<{
     slot: 1 | 2 | 3 | 4 | 5;
@@ -461,7 +566,7 @@ export function collectEpisodeSources(episode: EpisodeUrlsInput): NormalizedVide
       sources.push(normalized);
     }
   }
-  return sources;
+  return sources.sort((a, b) => getSourcePriorityRank(a) - getSourcePriorityRank(b));
 }
 
 export function getNextFallbackSourceIndex(

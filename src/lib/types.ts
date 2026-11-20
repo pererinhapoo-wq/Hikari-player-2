@@ -146,6 +146,31 @@ export interface SourceAttemptDiagnostic {
   error: string | null;
 }
 
+export type EmbedAuthStrategy = 'chrome_ua_with_referer' | 'chrome_ua_no_referer';
+
+export interface EmbedRedirectHopDiagnostic {
+  host: string;
+  url: string;
+  status: number | null;
+  location: string | null;
+  authMode: EmbedAuthStrategy;
+  error: string | null;
+}
+
+export interface EmbedHostDiagnostic {
+  hostCategory: 'proxied' | 'direct' | 'other';
+  hostLabel: string;
+  directStatus: number | null;
+  hasFrameAncestors: boolean;
+  frameAncestorsValue: string | null;
+  embedProxyStatus: number | null;
+  embedProxyOk: boolean;
+  embedProxyError: string | null;
+  redirectChain: EmbedRedirectHopDiagnostic[];
+  successfulStrategy: EmbedAuthStrategy | null;
+  finalUrl: string | null;
+}
+
 export interface SourceTestReport {
   slot: 1 | 2 | 3 | 4 | 5;
   label: string;
@@ -156,4 +181,5 @@ export interface SourceTestReport {
   verdict: SourceTestVerdict;
   verdictLabel: 'direto ok' | 'proxy necessário' | 'bloqueado';
   verdictReason: string;
+  embedDiagnostic?: EmbedHostDiagnostic;
 }
