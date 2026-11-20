@@ -28,11 +28,24 @@ export function createProxySignature(targetUrl: string, expUnixSeconds: number):
     .digest('base64url');
 }
 
+export const PROXY_EXP_BUCKET_SECONDS = 60 * 60 * 6; // Janela fixa de 6h
+
+export function getStableProxyExpiry(
+  nowSeconds = Math.floor(Date.now() / 1000),
+  bucketSeconds = PROXY_EXP_BUCKET_SECONDS
+): number {
+  return (Math.floor(nowSeconds / bucketSeconds) + 2) * bucketSeconds;
+}
+
 export function buildSignedProxyPath(
   targetUrl: string,
-  ttlSeconds = 60 * 60 * 6
+  ttlSeconds?: number,
+  nowSeconds = Math.floor(Date.now() / 1000)
 ): string {
-  const exp = Math.floor(Date.now() / 1000) + ttlSeconds;
+  const exp =
+    typeof ttlSeconds === 'number' && ttlSeconds < 0
+      ? nowSeconds + ttlSeconds
+      : getStableProxyExpiry(nowSeconds);
   const sig = createProxySignature(targetUrl, exp);
   const params = new URLSearchParams({
     url: targetUrl,

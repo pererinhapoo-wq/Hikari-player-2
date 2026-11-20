@@ -5,6 +5,7 @@ import {
   getRequest,
   getRequestIP,
   setCookie,
+  setResponseHeader,
 } from '@tanstack/react-start/server';
 import { formatEpisodeDisplayTitle } from '@/lib/anime-library';
 import {
@@ -31,7 +32,12 @@ import {
   sanitizeDiagnosticError,
   updateEpisode,
 } from '@/lib/db';
-import { buildSignedProxyPath, createProxySignature } from '@/lib/proxy-signing';
+import { IMAGE_WIDTH_LIMITS, resizeImageUrlForWidth } from '@/lib/image-optimization';
+import {
+  buildSignedProxyPath,
+  createProxySignature,
+  getStableProxyExpiry,
+} from '@/lib/proxy-signing';
 import {
   diagnoseEpisodeSources,
   diagnoseVideoSource,
@@ -48,11 +54,10 @@ import type {
 } from '@/lib/types';
 import { collectEpisodeSources, type ExplicitSourceKind } from '@/lib/video-sources';
 
-const WORKER_EXP_BUCKET_SECONDS = 60 * 60 * 6; // Janela de 6h para chave de cache estável no Worker
-
 export function resolveProxyPlayUrl(
   targetUrl: string,
-  workerBaseEnv = process.env.WORKER_BASE
+  workerBaseEnv = process.env.WORKER_BASE,
+  nowSeconds = Math.floor(Date.now() / 1000)
 ): string {
   const rawBase = workerBaseEnv?.trim();
   if (rawBase) {
@@ -63,9 +68,7 @@ export function resolveProxyPlayUrl(
           .toString()
           .replace(/\/+$/, '')
           .replace(/\/api\/proxy\/stream$/, '');
-        const nowSeconds = Math.floor(Date.now() / 1000);
-        const stableExp =
-          (Math.floor(nowSeconds / WORKER_EXP_BUCKET_SECONDS) + 2) * WORKER_EXP_BUCKET_SECONDS;
+        const stableExp = getStableProxyExpiry(nowSeconds);
         const sig = createProxySignature(targetUrl, stableExp);
         const params = new URLSearchParams({
           url: targetUrl,
@@ -78,7 +81,15 @@ export function resolveProxyPlayUrl(
       // WORKER_BASE inválida: mantém fallback para /api/proxy/stream na Vercel
     }
   }
-  return buildSignedProxyPath(targetUrl);
+  return buildSignedProxyPath(targetUrl, undefined, nowSeconds);
+}
+
+function trySetResponseHeader(name: string, value: string): void {
+  try {
+    setResponseHeader(name, value);
+  } catch {
+    // Ignorado fora do contexto HTTP (ex.: testes unitários)
+  }
 }
 
 function toEpisodeDto(ep: PlayerEpisode): EpisodeDto {
@@ -109,6 +120,11 @@ function requireAdminSession(): void {
 export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
   .validator((data: { id: string }) => ({ id: String(data?.id ?? '') }))
   .handler(async ({ data }): Promise<PublicEpisodeResult> => {
+    trySetResponseHeader(
+      'Cache-Control',
+      'public, s-maxage=60, stale-while-revalidate=300, stale-if-error=86400'
+    );
+
     if (!isDatabaseConfigured()) {
       return { status: 'db_unconfigured' };
     }
@@ -147,7 +163,7 @@ export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
       episode: {
         id: episode.id,
         title: formatEpisodeDisplayTitle(episode),
-        poster_url: episode.poster_url,
+        poster_url: resizeImageUrlForWidth(episode.poster_url, IMAGE_WIDTH_LIMITS.banner),
         opening_start_seconds: episode.opening_start_seconds,
         opening_end_seconds: episode.opening_end_seconds,
         sources,
@@ -157,6 +173,8 @@ export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
 
 export const getAdminDashboardFn = createServerFn({ method: 'GET' }).handler(
   async (): Promise<AdminDashboardState> => {
+    trySetResponseHeader('Cache-Control', 'private, no-store');
+
     const authEnv = isAuthEnvConfigured();
     const databaseConfigured = isDatabaseConfigured();
     const publicBaseUrl = getPublicBaseUrl();

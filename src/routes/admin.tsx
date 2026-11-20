@@ -32,6 +32,7 @@ import {
   sanitizeAnimeName,
   UNASSIGNED_ANIME_KEY,
 } from '@/lib/anime-library';
+import { getOptimizedImageProps } from '@/lib/image-optimization';
 import { formatOpeningTimestamp, parseOpeningRange } from '@/lib/opening-skip';
 import {
   adminCreateEpisodeFn,
@@ -59,6 +60,10 @@ export const Route = createFileRoute('/admin')({
   loader: async () => {
     return await getAdminDashboardFn();
   },
+  headers: () => ({
+    'Cache-Control': 'private, no-store',
+    'CDN-Cache-Control': 'private, no-store',
+  }),
   head: () => ({
     meta: [{ title: 'Administração · Player' }],
   }),
@@ -124,14 +129,15 @@ function AnimeThumbnail({
     );
   }
 
+  const imgProps = getOptimizedImageProps(posterUrl, 'miniatura');
+
   return (
     <div
       className={`${className} rounded-lg overflow-hidden bg-[#090B10] border border-white/10 shrink-0`}
     >
       <img
-        src={posterUrl}
+        {...imgProps}
         alt={alt}
-        loading="lazy"
         referrerPolicy="no-referrer"
         onError={() => setFailed(true)}
         className="w-full h-full object-cover"
@@ -1169,10 +1175,10 @@ function AdminPage() {
                     {posterValidation && !posterValidation.valid && (
                       <p className="mt-1 text-xs text-rose-400">{posterValidation.error}</p>
                     )}
-                    {posterValidation?.valid && !posterPreviewError && (
+                    {posterValidation?.valid && posterValidation.normalizedUrl && !posterPreviewError && (
                       <div className="mt-2.5 aspect-video max-w-sm w-full rounded-lg overflow-hidden border border-white/10 bg-[#090B10]">
                         <img
-                          src={posterValidation.normalizedUrl}
+                          {...getOptimizedImageProps(posterValidation.normalizedUrl, 'capa')}
                           alt="Prévia da imagem do episódio"
                           referrerPolicy="no-referrer"
                           onError={() => setPosterPreviewError(true)}

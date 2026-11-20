@@ -202,7 +202,8 @@ function buildBinaryResponseHeaders(
 ): Headers {
   const outHeaders = new Headers();
   outHeaders.set('Content-Type', resolveBinaryContentType(contentType, targetUrl));
-  outHeaders.set('Cache-Control', 'private, max-age=300');
+  outHeaders.set('Cache-Control', 'public, max-age=31536000, immutable');
+  outHeaders.set('CDN-Cache-Control', 'public, max-age=31536000, immutable');
   outHeaders.set('X-Content-Type-Options', 'nosniff');
   outHeaders.set('Access-Control-Allow-Origin', '*');
   outHeaders.set('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Length, Content-Range');
@@ -216,6 +217,15 @@ function buildBinaryResponseHeaders(
   return outHeaders;
 }
 
+function buildManifestResponseHeaders(): Headers {
+  const outHeaders = new Headers();
+  outHeaders.set('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
+  outHeaders.set('Cache-Control', 'public, max-age=5, stale-while-revalidate=30');
+  outHeaders.set('CDN-Cache-Control', 'public, max-age=5, stale-while-revalidate=30');
+  outHeaders.set('Access-Control-Allow-Origin', '*');
+  return outHeaders;
+}
+
 async function handleInspectedUpstreamResponse(
   upstream: Response,
   finalUrl: string,
@@ -226,16 +236,13 @@ async function handleInspectedUpstreamResponse(
     const rawBytes = new Uint8Array(await upstream.arrayBuffer());
     if (bytesStartWithExtM3u(rawBytes)) {
       const text = new TextDecoder('utf-8').decode(rawBytes);
+      const nowSeconds = Math.floor(Date.now() / 1000);
       const rewritten = rewriteM3u8Playlist(text, finalUrl, (resolved) =>
-        buildSignedProxyPath(resolved)
+        buildSignedProxyPath(resolved, undefined, nowSeconds)
       );
       return new Response(rewritten, {
         status: 200,
-        headers: {
-          'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
-          'Cache-Control': 'no-store',
-          'Access-Control-Allow-Origin': '*',
-        },
+        headers: buildManifestResponseHeaders(),
       });
     }
 
@@ -279,16 +286,13 @@ async function handleInspectedUpstreamResponse(
     }
     const fullBytes = concatChunks(bufferedChunks);
     const text = new TextDecoder('utf-8').decode(fullBytes);
+    const nowSeconds = Math.floor(Date.now() / 1000);
     const rewritten = rewriteM3u8Playlist(text, finalUrl, (resolved) =>
-      buildSignedProxyPath(resolved)
+      buildSignedProxyPath(resolved, undefined, nowSeconds)
     );
     return new Response(rewritten, {
       status: 200,
-      headers: {
-        'Content-Type': 'application/vnd.apple.mpegurl; charset=utf-8',
-        'Cache-Control': 'no-store',
-        'Access-Control-Allow-Origin': '*',
-      },
+      headers: buildManifestResponseHeaders(),
     });
   }
 

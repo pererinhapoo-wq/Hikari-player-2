@@ -2,6 +2,10 @@ import { createFileRoute, Link } from '@tanstack/react-router';
 import { Film, Lock } from 'lucide-react';
 
 export const Route = createFileRoute('/')({
+  headers: () => ({
+    'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=900',
+    'CDN-Cache-Control': 'public, s-maxage=300, stale-while-revalidate=900',
+  }),
   component: HomePage,
 });
 

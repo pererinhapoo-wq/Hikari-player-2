@@ -462,6 +462,7 @@ function buildBinaryResponseHeaders(
   const outHeaders = new Headers(getCorsHeaders());
   outHeaders.set('Content-Type', resolveBinaryContentType(contentType, targetUrl));
   outHeaders.set('Cache-Control', `public, max-age=${SEGMENT_CACHE_TTL_SECONDS}, immutable`);
+  outHeaders.set('CDN-Cache-Control', `public, max-age=${SEGMENT_CACHE_TTL_SECONDS}, immutable`);
   outHeaders.set('X-Content-Type-Options', 'nosniff');
 
   const passthroughHeaders = [
@@ -484,6 +485,7 @@ function buildManifestResponseHeaders(upstream: Response): Headers {
   const outHeaders = new Headers(getCorsHeaders());
   outHeaders.set('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
   outHeaders.set('Cache-Control', `public, max-age=${MANIFEST_CACHE_TTL_SECONDS}`);
+  outHeaders.set('CDN-Cache-Control', `public, max-age=${MANIFEST_CACHE_TTL_SECONDS}, stale-while-revalidate=30`);
 
   const cfStatus = upstream.headers.get('cf-cache-status');
   if (cfStatus) {

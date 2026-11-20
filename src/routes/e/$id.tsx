@@ -1,25 +1,43 @@
 import { createFileRoute } from '@tanstack/react-router';
 import { AlertTriangle, Film } from 'lucide-react';
 import { EpisodePlayer } from '@/components/EpisodePlayer';
+import { getOptimizedImageProps } from '@/lib/image-optimization';
 import { getPublicEpisodeFn } from '@/lib/server-fns';
 
 export const Route = createFileRoute('/e/$id')({
   loader: async ({ params }) => {
     return await getPublicEpisodeFn({ data: { id: params.id } });
   },
+  headers: () => ({
+    'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300, stale-if-error=86400',
+    'CDN-Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300, stale-if-error=86400',
+  }),
   head: ({ loaderData }) => {
     const title =
       loaderData?.status === 'ok'
         ? `${loaderData.episode.title} · Player`
         : 'Episódio não encontrado · Player';
+    const lcpImage =
+      loaderData?.status === 'ok' && loaderData.episode.poster_url
+        ? getOptimizedImageProps(loaderData.episode.poster_url, 'banner', { isLcp: true })
+        : null;
     return {
       meta: [
         { title },
         { property: 'og:title', content: title },
-        ...(loaderData?.status === 'ok'
-          ? [{ property: 'og:image', content: loaderData.episode.poster_url }]
-          : []),
+        ...(lcpImage ? [{ property: 'og:image', content: lcpImage.src }] : []),
       ],
+      links: lcpImage
+        ? [
+            {
+              rel: 'preload',
+              as: 'image',
+              href: lcpImage.src,
+              imageSrcSet: lcpImage.srcSet,
+              fetchPriority: lcpImage.fetchPriority,
+            },
+          ]
+        : [],
     };
   },
   component: PublicEpisodePage,
