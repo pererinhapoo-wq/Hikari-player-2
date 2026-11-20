@@ -12,10 +12,14 @@ import {
   EyeOff,
   Film,
   FolderOpen,
+  ListPlus,
   LogOut,
   MoreVertical,
+  Pause,
   Pencil,
+  Play,
   Plus,
+  RotateCcw,
   Search,
   Trash2,
   X,
@@ -32,6 +36,20 @@ import {
   sanitizeAnimeName,
   UNASSIGNED_ANIME_KEY,
 } from '@/lib/anime-library';
+import {
+  BATCH_ITEM_DELAY_MS,
+  BATCH_MAX_ITEMS,
+  type BatchImportJobState,
+  type BatchImportMode,
+  type BatchItemReport,
+  clearBatchJobState,
+  computeBatchTotals,
+  hasPendingBatchResume,
+  loadBatchJobState,
+  parseBatchInputLines,
+  runBatchSequence,
+  saveBatchJobState,
+} from '@/lib/batch-import';
 import { getOptimizedImageProps } from '@/lib/image-optimization';
 import { formatOpeningTimestamp, parseOpeningRange } from '@/lib/opening-skip';
 import {
@@ -40,6 +58,7 @@ import {
   adminDiagnoseDatabaseFn,
   adminLoginFn,
   adminLogoutFn,
+  adminProcessBatchItemFn,
   adminTestSourceFn,
   adminUpdateEpisodeFn,
   getAdminDashboardFn,
@@ -199,7 +218,28 @@ function AdminPage() {
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
 
+  // Batch import state ("Importar em lote")
+  const [batchOpen, setBatchOpen] = useState(false);
+  const [batchInput, setBatchInput] = useState('');
+  const [batchJob, setBatchJob] = useState<BatchImportJobState | null>(null);
+  const [batchRunning, setBatchRunning] = useState(false);
+  const [batchError, setBatchError] = useState<string | null>(null);
+  const batchStopRef = useRef(false);
+
   const menuContainerRef = useRef<HTMLDivElement | null>(null);
+
+  // Restore saved batch import job on load/reload so progress is never lost
+  useEffect(() => {
+    const saved = loadBatchJobState();
+    if (!saved) return;
+    setBatchJob(saved);
+    if (saved.rawInput && !batchInput) {
+      setBatchInput(saved.rawInput);
+    }
+    if (hasPendingBatchResume(saved)) {
+      setBatchOpen(true);
+    }
+  }, []);
 
   // Close three-dots menu when clicking outside or pressing Escape
   useEffect(() => {
@@ -546,6 +586,136 @@ function AdminPage() {
     }
   };
 
+  const parsedBatchLines = useMemo(() => parseBatchInputLines(batchInput), [batchInput]);
+  const batchTotals = useMemo(
+    () =>
+      batchJob
+        ? computeBatchTotals(batchJob.items.length, batchJob.results)
+        : computeBatchTotals(0, []),
+    [batchJob]
+  );
+  const canResumeBatch = !batchRunning && hasPendingBatchResume(batchJob);
+
+  const executeBatchJob = async (jobToRun: BatchImportJobState, startIndex: number) => {
+    setBatchError(null);
+    setBatchRunning(true);
+    batchStopRef.current = false;
+
+    let currentJob: BatchImportJobState = {
+      ...jobToRun,
+      status: 'running',
+      updatedAt: new Date().toISOString(),
+    };
+    setBatchJob(currentJob);
+    saveBatchJobState(currentJob);
+
+    let fatalError: string | null = null;
+
+    const outcome = await runBatchSequence({
+      items: currentJob.items,
+      startIndex,
+      delayMs: BATCH_ITEM_DELAY_MS,
+      shouldStop: () => batchStopRef.current || Boolean(fatalError),
+      processItem: async (item) => {
+        const res = await adminProcessBatchItemFn({
+          data: {
+            ...item,
+            save: currentJob.mode === 'validate_and_save',
+          },
+        });
+        if (!res.ok) {
+          fatalError = res.error;
+          throw new Error(res.error);
+        }
+        return res.report;
+      },
+      onItemComplete: (idx, report: BatchItemReport) => {
+        const nextResults = [...currentJob.results];
+        nextResults[idx] = report;
+        currentJob = {
+          ...currentJob,
+          lastProcessedIndex: idx,
+          results: nextResults,
+          status: 'running',
+          updatedAt: new Date().toISOString(),
+        };
+        setBatchJob(currentJob);
+        saveBatchJobState(currentJob);
+      },
+    }).catch((err: unknown) => {
+      const msg = err instanceof Error ? err.message : 'Falha ao processar lote.';
+      fatalError = msg;
+      return {
+        completed: false,
+        lastProcessedIndex: currentJob.lastProcessedIndex,
+        results: currentJob.results,
+      };
+    });
+
+    const isDone = outcome.completed && currentJob.lastProcessedIndex >= currentJob.items.length - 1;
+    const finalizedJob: BatchImportJobState = {
+      ...currentJob,
+      status: isDone ? 'completed' : 'paused',
+      updatedAt: new Date().toISOString(),
+    };
+
+    setBatchJob(finalizedJob);
+    saveBatchJobState(finalizedJob);
+    setBatchRunning(false);
+
+    if (fatalError) {
+      setBatchError(fatalError);
+    }
+
+    if (finalizedJob.mode === 'validate_and_save' && finalizedJob.results.some((r) => r.saveStatus === 'salvo')) {
+      await router.invalidate();
+    }
+  };
+
+  const handleStartBatch = async (mode: BatchImportMode) => {
+    if (batchRunning) return;
+    setBatchError(null);
+
+    const items = parseBatchInputLines(batchInput);
+    if (items.length === 0) {
+      setBatchError('Informe ao menos uma linha válida ou de item para processar.');
+      return;
+    }
+    if (items.length > BATCH_MAX_ITEMS) {
+      setBatchError(`Limite máximo de ${BATCH_MAX_ITEMS} linhas por execução excedido.`);
+      return;
+    }
+
+    const newJob: BatchImportJobState = {
+      id: `batch_${Date.now()}`,
+      rawInput: batchInput,
+      mode,
+      items,
+      lastProcessedIndex: -1,
+      results: [],
+      status: 'running',
+      updatedAt: new Date().toISOString(),
+    };
+
+    await executeBatchJob(newJob, 0);
+  };
+
+  const handleResumeBatch = async () => {
+    if (batchRunning || !batchJob || !hasPendingBatchResume(batchJob)) return;
+    await executeBatchJob(batchJob, batchJob.lastProcessedIndex + 1);
+  };
+
+  const handlePauseBatch = () => {
+    batchStopRef.current = true;
+  };
+
+  const handleClearBatchJob = () => {
+    if (batchRunning) return;
+    clearBatchJobState();
+    setBatchJob(null);
+    setBatchError(null);
+  };
+
   const missingEnvItems: string[] = [];
   if (!initialState.databaseConfigured) missingEnvItems.push('DATABASE_URL');
   if (!initialState.passwordConfigured) missingEnvItems.push('PLAYER_ADMIN_PASSWORD');
@@ -571,6 +741,23 @@ function AdminPage() {
           <div className="flex items-center gap-2 shrink-0">
             {initialState.authenticated ? (
               <>
+                <button
+                  type="button"
+                  onClick={() => {
+                    setFormOpen(false);
+                    setBatchOpen((prev) => !prev);
+                  }}
+                  className={`h-9 px-2.5 sm:px-3 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                    batchOpen
+                      ? 'border-rose-500/60 bg-rose-600/15 text-rose-200'
+                      : 'border-white/10 text-slate-300 hover:bg-white/5 hover:text-white'
+                  }`}
+                >
+                  <ListPlus className="w-3.5 h-3.5" />
+                  <span className="hidden sm:inline">Importar em lote</span>
+                  <span className="sm:hidden">Lote</span>
+                </button>
+
                 <button
                   type="button"
                   onClick={() => {
@@ -888,8 +1075,250 @@ function AdminPage() {
               </div>
             )}
 
-            {/* VIEW 1: Create / Edit Episode Form (Single Player: Player 1 only) */}
-            {formOpen ? (
+            {/* VIEW 0: Batch Import Screen ("Importar em lote") */}
+            {batchOpen ? (
+              <section className="bg-[#11151E] border border-white/10 rounded-xl p-4 sm:p-6 space-y-5">
+                <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-white/10">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <button
+                      type="button"
+                      onClick={() => setBatchOpen(false)}
+                      className="h-9 px-2.5 rounded-lg border border-white/10 text-xs font-medium text-slate-200 hover:bg-white/5 inline-flex items-center gap-1.5 cursor-pointer shrink-0"
+                    >
+                      <ArrowLeft className="w-3.5 h-3.5" />
+                      Voltar
+                    </button>
+                    <h1 className="text-base sm:text-lg font-semibold text-white truncate">
+                      Importar em lote
+                    </h1>
+                  </div>
+                  <span
+                    className={`text-xs font-mono tabular-nums ${
+                      parsedBatchLines.length > BATCH_MAX_ITEMS ? 'text-rose-400' : 'text-slate-400'
+                    }`}
+                  >
+                    {parsedBatchLines.length} / {BATCH_MAX_ITEMS} linhas
+                  </span>
+                </div>
+
+                <div className="space-y-2">
+                  <label
+                    htmlFor="batch-import-textarea"
+                    className="block text-xs font-medium text-slate-300"
+                  >
+                    Lista de fontes (uma por linha)
+                  </label>
+                  <p className="text-[11px] text-slate-400 leading-relaxed">
+                    Formato: <code className="font-mono text-slate-200">&lt;id_do_episodio&gt; ; &lt;url&gt; [; &lt;kind&gt;]</code>
+                    {' · '}kind opcional (<code className="font-mono">auto</code>, <code className="font-mono">iframe</code>). Linhas vazias e comentários com <code className="font-mono">#</code> são ignorados. Execução em série (1 item por vez, 400ms entre itens).
+                  </p>
+                  <textarea
+                    id="batch-import-textarea"
+                    rows={8}
+                    disabled={batchRunning}
+                    value={batchInput}
+                    onChange={(e) => setBatchInput(e.target.value)}
+                    placeholder={`# Exemplo:\nep01_id ; https://anitube22.vip/playerricas.php?id=123 ; auto\nep02_id ; https://allappinc.com/embed/abc ; iframe`}
+                    className="w-full p-3 rounded-lg bg-[#090B10] border border-white/15 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-rose-500 disabled:opacity-60"
+                  />
+                  {parsedBatchLines.length > BATCH_MAX_ITEMS && (
+                    <p className="text-xs text-rose-400" role="alert">
+                      Limite máximo de {BATCH_MAX_ITEMS} linhas por execução excedido ({parsedBatchLines.length} detectadas).
+                    </p>
+                  )}
+                </div>
+
+                <div className="flex flex-wrap items-center gap-2.5">
+                  <button
+                    type="button"
+                    disabled={
+                      batchRunning ||
+                      parsedBatchLines.length === 0 ||
+                      parsedBatchLines.length > BATCH_MAX_ITEMS
+                    }
+                    onClick={() => void handleStartBatch('validate')}
+                    className="h-10 px-4 rounded-lg border border-white/15 bg-[#090B10] hover:bg-white/5 disabled:opacity-40 text-xs sm:text-sm font-medium text-slate-200 inline-flex items-center gap-2 cursor-pointer"
+                  >
+                    <Activity className="w-4 h-4" />
+                    Validar
+                  </button>
+
+                  <button
+                    type="button"
+                    disabled={
+                      batchRunning ||
+                      !initialState.databaseConfigured ||
+                      parsedBatchLines.length === 0 ||
+                      parsedBatchLines.length > BATCH_MAX_ITEMS
+                    }
+                    onClick={() => void handleStartBatch('validate_and_save')}
+                    className="h-10 px-4 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-xs sm:text-sm font-medium text-white inline-flex items-center gap-2 cursor-pointer"
+                  >
+                    <Plus className="w-4 h-4" />
+                    Validar e salvar
+                  </button>
+
+                  {batchRunning && (
+                    <button
+                      type="button"
+                      onClick={handlePauseBatch}
+                      className="h-10 px-4 rounded-lg border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 text-xs sm:text-sm font-medium text-amber-200 inline-flex items-center gap-2 cursor-pointer"
+                    >
+                      <Pause className="w-4 h-4" />
+                      Pausar
+                    </button>
+                  )}
+
+                  {canResumeBatch && batchJob && (
+                    <button
+                      type="button"
+                      onClick={() => void handleResumeBatch()}
+                      className="h-10 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs sm:text-sm font-medium text-white inline-flex items-center gap-2 cursor-pointer"
+                    >
+                      <Play className="w-4 h-4" />
+                      Continuar de onde parou (item {batchJob.lastProcessedIndex + 2}/{batchJob.items.length})
+                    </button>
+                  )}
+
+                  {!batchRunning && batchJob && (
+                    <button
+                      type="button"
+                      onClick={handleClearBatchJob}
+                      className="h-10 px-3 rounded-lg border border-white/10 text-xs text-slate-400 hover:text-white hover:bg-white/5 inline-flex items-center gap-1.5 cursor-pointer"
+                    >
+                      <RotateCcw className="w-3.5 h-3.5" />
+                      Limpar relatório
+                    </button>
+                  )}
+                </div>
+
+                {batchError && (
+                  <p className="text-xs text-rose-400" role="alert">
+                    {batchError}
+                  </p>
+                )}
+
+                {batchJob && (
+                  <div className="space-y-4 pt-2 border-t border-white/10">
+                    {/* Progress counter */}
+                    <div className="space-y-1.5">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
+                        <span className="font-medium text-slate-200 tabular-nums">
+                          Progresso: {batchTotals.processed} de {batchTotals.total} itens{' '}
+                          <span className="text-slate-400 font-normal">
+                            ({batchJob.mode === 'validate_and_save' ? 'Validar e salvar' : 'Somente validação'} ·{' '}
+                            {batchRunning
+                              ? 'em execução...'
+                              : batchJob.status === 'completed'
+                                ? 'concluído'
+                                : `pausado na linha ${batchJob.lastProcessedIndex + 1}`})
+                          </span>
+                        </span>
+                        <span className="font-mono text-slate-400 tabular-nums">
+                          {batchTotals.total > 0
+                            ? `${Math.round((batchTotals.processed / batchTotals.total) * 100)}%`
+                            : '0%'}
+                        </span>
+                      </div>
+                      <div className="h-2 rounded-full bg-[#090B10] overflow-hidden border border-white/10">
+                        <div
+                          className="h-full bg-rose-500 transition-all duration-200"
+                          style={{
+                            width: `${
+                              batchTotals.total > 0
+                                ? Math.min(100, (batchTotals.processed / batchTotals.total) * 100)
+                                : 0
+                            }%`,
+                          }}
+                        />
+                      </div>
+                    </div>
+
+                    {/* Totals */}
+                    <div className="grid grid-cols-3 gap-3 text-xs">
+                      <div className="rounded-lg bg-[#090B10] border border-white/10 px-3 py-2.5">
+                        <div className="text-slate-400">Aprovados</div>
+                        <div className="text-lg font-semibold text-emerald-400 tabular-nums">
+                          {batchTotals.aprovados}
+                        </div>
+                      </div>
+                      <div className="rounded-lg bg-[#090B10] border border-white/10 px-3 py-2.5">
+                        <div className="text-slate-400">Reprovados</div>
+                        <div className="text-lg font-semibold text-rose-400 tabular-nums">
+                          {batchTotals.reprovados}
+                        </div>
+                      </div>
+                      <div className="rounded-lg bg-[#090B10] border border-white/10 px-3 py-2.5">
+                        <div className="text-slate-400">Salvos</div>
+                        <div className="text-lg font-semibold text-sky-400 tabular-nums">
+                          {batchTotals.salvos}
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Report table */}
+                    {batchJob.results.length > 0 && (
+                      <div className="overflow-x-auto rounded-lg border border-white/10 bg-[#090B10]">
+                        <table className="w-full text-left border-collapse text-[11px]">
+                          <thead>
+                            <tr className="border-b border-white/10 text-slate-400">
+                              <th className="px-2.5 py-2 font-medium">Linha</th>
+                              <th className="px-2.5 py-2 font-medium">ID do episódio</th>
+                              <th className="px-2.5 py-2 font-medium">URL</th>
+                              <th className="px-2.5 py-2 font-medium">Veredito</th>
+                              <th className="px-2.5 py-2 font-medium">Salvo/Skipado</th>
+                              <th className="px-2.5 py-2 font-medium">Motivo</th>
+                            </tr>
+                          </thead>
+                          <tbody className="divide-y divide-white/10 font-mono">
+                            {batchJob.results.map((row, idx) => (
+                              <tr key={`${row.lineNumber}-${idx}`} className="align-top text-slate-200">
+                                <td className="px-2.5 py-2 tabular-nums whitespace-nowrap">
+                                  {row.lineNumber}
+                                </td>
+                                <td className="px-2.5 py-2 whitespace-nowrap">
+                                  {row.episodeId || '—'}
+                                </td>
+                                <td className="px-2.5 py-2 max-w-[240px] truncate" title={row.url}>
+                                  {row.url || '—'}
+                                </td>
+                                <td className="px-2.5 py-2 whitespace-nowrap">
+                                  <span
+                                    className={
+                                      row.verdict === 'aprovado'
+                                        ? 'text-emerald-400 font-semibold'
+                                        : 'text-rose-400 font-semibold'
+                                    }
+                                  >
+                                    {row.verdict}
+                                  </span>
+                                </td>
+                                <td className="px-2.5 py-2 whitespace-nowrap">
+                                  <span
+                                    className={
+                                      row.saveStatus === 'salvo'
+                                        ? 'text-sky-400 font-semibold'
+                                        : 'text-slate-400'
+                                    }
+                                  >
+                                    {row.saveStatus === 'salvo' && row.savedSlot
+                                      ? `salvo (Player ${row.savedSlot})`
+                                      : row.saveStatus}
+                                  </span>
+                                </td>
+                                <td className="px-2.5 py-2 font-sans text-slate-300">
+                                  {row.reason}
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </section>
+            ) : formOpen ? (
               <section className="bg-[#11151E] border border-white/10 rounded-xl p-4 sm:p-6 space-y-5">
                 <div className="flex items-center justify-between gap-3 pb-3 border-b border-white/10">
                   <div className="flex items-center gap-2.5 min-w-0">

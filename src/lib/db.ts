@@ -9,6 +9,7 @@ import type {
   DatabaseQueryDiagnostic,
   SanitizedDbError,
 } from '@/lib/types';
+import { planEpisodeSlotInsertion } from '@/lib/batch-import';
 import { type ExplicitSourceKind, normalizeExplicitSourceKind, validateHttpUrl } from '@/lib/video-sources';
 
 export interface PlayerEpisode {
@@ -820,6 +821,76 @@ export async function updateEpisode(
       }
     }
   }
+}
+
+export async function appendEpisodeIframeSource(
+  episodeId: string,
+  normalizedUrl: string,
+  sqlOverride?: DiagnosticSqlTag
+): Promise<{
+  saved: boolean;
+  slot: 1 | 2 | 3 | 4 | 5 | null;
+  reason: string;
+}> {
+  const episode = await getEpisodeById(episodeId);
+  if (!episode) {
+    return {
+      saved: false,
+      slot: null,
+      reason: 'Episódio não encontrado no banco de dados.',
+    };
+  }
+
+  const plan = planEpisodeSlotInsertion(episode, normalizedUrl, 'iframe');
+  if (plan.action === 'skip') {
+    return {
+      saved: false,
+      slot: null,
+      reason: plan.reason,
+    };
+  }
+
+  const updated = await updateEpisode(
+    episode.id,
+    {
+      anime_name: episode.anime_name,
+      episode_number: episode.episode_number,
+      opening_start_seconds: episode.opening_start_seconds,
+      opening_end_seconds: episode.opening_end_seconds,
+      title: episode.title,
+      poster_url: episode.poster_url,
+      video_url: plan.patch.video_url ?? episode.video_url,
+      video_url_2: plan.patch.video_url_2 !== undefined ? plan.patch.video_url_2 : episode.video_url_2,
+      video_url_3: plan.patch.video_url_3 !== undefined ? plan.patch.video_url_3 : episode.video_url_3,
+      video_url_4: plan.patch.video_url_4 !== undefined ? plan.patch.video_url_4 : episode.video_url_4,
+      video_url_5: plan.patch.video_url_5 !== undefined ? plan.patch.video_url_5 : episode.video_url_5,
+      source_kind: plan.patch.source_kind !== undefined ? plan.patch.source_kind : episode.source_kind,
+      source_kind_2: plan.patch.source_kind_2 !== undefined ? plan.patch.source_kind_2 : episode.source_kind_2,
+      source_kind_3: plan.patch.source_kind_3 !== undefined ? plan.patch.source_kind_3 : episode.source_kind_3,
+      source_kind_4: plan.patch.source_kind_4 !== undefined ? plan.patch.source_kind_4 : episode.source_kind_4,
+      source_kind_5: plan.patch.source_kind_5 !== undefined ? plan.patch.source_kind_5 : episode.source_kind_5,
+      force_proxy: episode.force_proxy,
+      force_proxy_2: episode.force_proxy_2,
+      force_proxy_3: episode.force_proxy_3,
+      force_proxy_4: episode.force_proxy_4,
+      force_proxy_5: episode.force_proxy_5,
+    },
+    sqlOverride
+  );
+
+  if (!updated) {
+    return {
+      saved: false,
+      slot: null,
+      reason: 'Episódio não encontrado ao confirmar gravação.',
+    };
+  }
+
+  return {
+    saved: true,
+    slot: plan.slot,
+    reason: plan.reason,
+  };
 }
 
 export async function deleteEpisode(id: string): Promise<boolean> {

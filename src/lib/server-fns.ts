@@ -21,6 +21,13 @@ import {
   verifySessionToken,
 } from '@/lib/auth';
 import {
+  type BatchItemReport,
+  type BatchValidateDeps,
+  type ParsedBatchLine,
+  validateBatchIframeItem,
+} from '@/lib/batch-import';
+import {
+  appendEpisodeIframeSource,
   createEpisode,
   DatabaseNotConfiguredError,
   deleteEpisode,
@@ -432,6 +439,112 @@ export const adminTestEpisodeSourcesFn = createServerFn({ method: 'POST' })
             err instanceof Error
               ? err.message
               : 'Falha ao testar fontes do episódio no servidor.',
+        };
+      }
+    }
+  );
+
+export interface ProcessBatchItemInput extends ParsedBatchLine {
+  save: boolean;
+}
+
+export interface ProcessBatchItemDeps {
+  validateDeps?: BatchValidateDeps;
+  saveSource?: (
+    episodeId: string,
+    normalizedUrl: string
+  ) => Promise<{ saved: boolean; slot: 1 | 2 | 3 | 4 | 5 | null; reason: string }>;
+}
+
+export async function processBatchItemServer(
+  input: ProcessBatchItemInput,
+  deps: ProcessBatchItemDeps = {}
+): Promise<BatchItemReport> {
+  const validation = await validateBatchIframeItem(input, deps.validateDeps);
+
+  if (validation.verdict !== 'aprovado' || !validation.normalizedUrl) {
+    return {
+      lineNumber: input.lineNumber,
+      episodeId: input.episodeId,
+      url: input.url,
+      explicitKind: input.explicitKind,
+      verdict: 'reprovado',
+      saveStatus: 'skipado',
+      savedSlot: null,
+      reason: validation.reason,
+    };
+  }
+
+  if (!input.save) {
+    return {
+      lineNumber: input.lineNumber,
+      episodeId: input.episodeId,
+      url: validation.normalizedUrl,
+      explicitKind: input.explicitKind,
+      verdict: 'aprovado',
+      saveStatus: 'skipado',
+      savedSlot: null,
+      reason: validation.reason,
+    };
+  }
+
+  const saver =
+    deps.saveSource ??
+    (async (episodeId: string, normalizedUrl: string) => {
+      if (!isDatabaseConfigured()) {
+        return {
+          saved: false,
+          slot: null,
+          reason: 'DATABASE_URL não configurada no servidor.',
+        };
+      }
+      return await appendEpisodeIframeSource(episodeId, normalizedUrl);
+    });
+
+  const saveRes = await saver(input.episodeId, validation.normalizedUrl);
+
+  return {
+    lineNumber: input.lineNumber,
+    episodeId: input.episodeId,
+    url: validation.normalizedUrl,
+    explicitKind: input.explicitKind,
+    verdict: 'aprovado',
+    saveStatus: saveRes.saved ? 'salvo' : 'skipado',
+    savedSlot: saveRes.slot,
+    reason: `${validation.reason} ${saveRes.reason}`,
+  };
+}
+
+export const adminProcessBatchItemFn = createServerFn({ method: 'POST' })
+  .validator((data: ProcessBatchItemInput) => ({
+    lineNumber: Number(data?.lineNumber) || 0,
+    rawLine: typeof data?.rawLine === 'string' ? data.rawLine : '',
+    episodeId: typeof data?.episodeId === 'string' ? data.episodeId : '',
+    url: typeof data?.url === 'string' ? data.url : '',
+    explicitKind:
+      data?.explicitKind === 'iframe' ||
+      data?.explicitKind === 'hls' ||
+      data?.explicitKind === 'mp4'
+        ? data.explicitKind
+        : null,
+    parseError: typeof data?.parseError === 'string' ? data.parseError : null,
+    save: Boolean(data?.save),
+  }))
+  .handler(
+    async ({
+      data,
+    }): Promise<{ ok: true; report: BatchItemReport } | { ok: false; error: string }> => {
+      try {
+        requireAdminSession();
+        const report = await processBatchItemServer(data);
+        return { ok: true, report };
+      } catch (err) {
+        return {
+          ok: false,
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Falha ao processar item do lote no servidor.',
         };
       }
     }
