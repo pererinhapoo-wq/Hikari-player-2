@@ -14,6 +14,7 @@ import {
   parseOpeningTimestamp,
   validateOpeningSecondsPair,
 } from '@/lib/opening-skip';
+import { splitSqlStatements } from '../scripts/migrate';
 
 describe('Pular abertura — conversão, validação e formatação de horários', () => {
   it('1. aceita MM:SS e HH:MM:SS e converte corretamente para segundos', () => {
@@ -311,5 +312,406 @@ describe('Pular abertura — persistência no banco e integração Player / Admi
     expect(migrationSql).toContain('ADD COLUMN IF NOT EXISTS opening_start_seconds');
     expect(migrationSql).toContain('ADD COLUMN IF NOT EXISTS opening_end_seconds');
     expect(migrationSql.trim().startsWith('--')).toBe(false);
+  });
+
+  it('8. erro 42703 por ausência de anime_name não descarta opening_start_seconds e opening_end_seconds em createEpisode e updateEpisode', async () => {
+    const createQueries: string[] = [];
+    const createMockSql: DiagnosticSqlTag = async (strings, ...values) => {
+      const query = strings.join(' ');
+      createQueries.push(query);
+      if (query.includes('anime_name')) {
+        const err = new Error('column "anime_name" of relation "player_episodes" does not exist') as Error & {
+          code?: string;
+        };
+        err.code = '42703';
+        throw err;
+      }
+
+      // Fallback 1: [id, opening_start_seconds, opening_end_seconds, title, poster_url, video_url, ...]
+      return [
+        {
+          id: String(values[0]),
+          opening_start_seconds: values[1],
+          opening_end_seconds: values[2],
+          title: values[3],
+          poster_url: values[4],
+          video_url: values[5],
+          video_url_2: null,
+          video_url_3: null,
+          video_url_4: null,
+          video_url_5: null,
+          source_kind: values[10],
+          source_kind_2: null,
+          source_kind_3: null,
+          source_kind_4: null,
+          source_kind_5: null,
+          force_proxy: true,
+          force_proxy_2: true,
+          force_proxy_3: true,
+          force_proxy_4: true,
+          force_proxy_5: true,
+          created_at: '2026-11-19T12:00:00.000Z',
+          updated_at: '2026-11-19T12:00:00.000Z',
+        },
+      ];
+    };
+
+    const created = await createEpisode(
+      {
+        anime_name: 'Frieren',
+        episode_number: '01',
+        opening_start_seconds: 2,
+        opening_end_seconds: 180,
+        title: 'Episódio 1',
+        poster_url: 'https://cdn.example.com/p.jpg',
+        video_url: 'https://cdn.example.com/ep1.m3u8',
+        source_kind: 'hls',
+      },
+      createMockSql
+    );
+
+    expect(createQueries).toHaveLength(2);
+    expect(createQueries[1]).toContain('opening_start_seconds');
+    expect(createQueries[1]).toContain('opening_end_seconds');
+    expect(created.opening_start_seconds).toBe(2);
+    expect(created.opening_end_seconds).toBe(180);
+
+    const updateQueries: string[] = [];
+    const updateMockSql: DiagnosticSqlTag = async (strings, ...values) => {
+      const query = strings.join(' ');
+      updateQueries.push(query);
+      if (query.includes('anime_name =')) {
+        const err = new Error('column "anime_name" of relation "player_episodes" does not exist') as Error & {
+          code?: string;
+        };
+        err.code = '42703';
+        throw err;
+      }
+
+      // Fallback 1 (preserveAdditionalSources=true):
+      // [opening_start_seconds, opening_end_seconds, title, poster_url, video_url, source_kind, force_proxy, cleanId]
+      return [
+        {
+          id: String(values[7]),
+          opening_start_seconds: values[0],
+          opening_end_seconds: values[1],
+          title: values[2],
+          poster_url: values[3],
+          video_url: values[4],
+          video_url_2: 'https://cdn.example.com/old-p2.mp4',
+          video_url_3: 'https://cdn.example.com/old-p3.m3u8',
+          video_url_4: null,
+          video_url_5: null,
+          source_kind: values[5],
+          source_kind_2: 'mp4',
+          source_kind_3: 'hls',
+          source_kind_4: null,
+          source_kind_5: null,
+          force_proxy: values[6],
+          force_proxy_2: true,
+          force_proxy_3: true,
+          force_proxy_4: true,
+          force_proxy_5: true,
+          created_at: '2025-10-01T12:00:00.000Z',
+          updated_at: '2026-11-19T12:00:00.000Z',
+        },
+      ];
+    };
+
+    const updated = await updateEpisode(
+      'ep_prod_missing_0004',
+      {
+        anime_name: 'Frieren',
+        episode_number: '01',
+        opening_start_seconds: 2,
+        opening_end_seconds: 180,
+        title: 'Episódio 1',
+        poster_url: 'https://cdn.example.com/p.jpg',
+        video_url: 'https://cdn.example.com/ep1.m3u8',
+        source_kind: 'hls',
+      },
+      updateMockSql
+    );
+
+    expect(updateQueries).toHaveLength(2);
+    expect(updateQueries[1]).toContain('opening_start_seconds =');
+    expect(updateQueries[1]).toContain('opening_end_seconds =');
+    expect(updateQueries[1]).not.toContain('video_url_2 =');
+    expect(updated?.opening_start_seconds).toBe(2);
+    expect(updated?.opening_end_seconds).toBe(180);
+    expect(updated?.video_url_2).toBe('https://cdn.example.com/old-p2.mp4');
+    expect(updated?.video_url_3).toBe('https://cdn.example.com/old-p3.m3u8');
+  });
+
+  it('9. erro 42703 por ausência de episode_number também preserva opening_start_seconds e opening_end_seconds em createEpisode e updateEpisode', async () => {
+    const missingEpisodeNumberMock = (isUpdate: boolean): DiagnosticSqlTag =>
+      async (strings, ...values) => {
+        const query = strings.join(' ');
+        if (query.includes('episode_number')) {
+          const err = new Error('column "episode_number" of relation "player_episodes" does not exist') as Error & {
+            code?: string;
+          };
+          err.code = '42703';
+          throw err;
+        }
+        if (isUpdate) {
+          return [
+            {
+              id: String(values[7]),
+              opening_start_seconds: values[0],
+              opening_end_seconds: values[1],
+              title: values[2],
+              poster_url: values[3],
+              video_url: values[4],
+              video_url_2: null,
+              video_url_3: null,
+              video_url_4: null,
+              video_url_5: null,
+              source_kind: values[5],
+              source_kind_2: null,
+              source_kind_3: null,
+              source_kind_4: null,
+              source_kind_5: null,
+              force_proxy: values[6],
+              force_proxy_2: true,
+              force_proxy_3: true,
+              force_proxy_4: true,
+              force_proxy_5: true,
+              created_at: '2026-11-19T12:00:00.000Z',
+              updated_at: '2026-11-19T12:00:00.000Z',
+            },
+          ];
+        }
+        return [
+          {
+            id: String(values[0]),
+            opening_start_seconds: values[1],
+            opening_end_seconds: values[2],
+            title: values[3],
+            poster_url: values[4],
+            video_url: values[5],
+            video_url_2: null,
+            video_url_3: null,
+            video_url_4: null,
+            video_url_5: null,
+            source_kind: values[10],
+            source_kind_2: null,
+            source_kind_3: null,
+            source_kind_4: null,
+            source_kind_5: null,
+            force_proxy: true,
+            force_proxy_2: true,
+            force_proxy_3: true,
+            force_proxy_4: true,
+            force_proxy_5: true,
+            created_at: '2026-11-19T12:00:00.000Z',
+            updated_at: '2026-11-19T12:00:00.000Z',
+          },
+        ];
+      };
+
+    const created = await createEpisode(
+      {
+        episode_number: '02',
+        opening_start_seconds: 15,
+        opening_end_seconds: 105,
+        title: 'Episódio 2',
+        poster_url: 'https://cdn.example.com/p2.jpg',
+        video_url: 'https://cdn.example.com/ep2.mp4',
+      },
+      missingEpisodeNumberMock(false)
+    );
+    expect(created.opening_start_seconds).toBe(15);
+    expect(created.opening_end_seconds).toBe(105);
+
+    const updated = await updateEpisode(
+      'ep_missing_ep_num',
+      {
+        episode_number: '02',
+        opening_start_seconds: 20,
+        opening_end_seconds: 110,
+        title: 'Episódio 2',
+        poster_url: 'https://cdn.example.com/p2.jpg',
+        video_url: 'https://cdn.example.com/ep2.mp4',
+      },
+      missingEpisodeNumberMock(true)
+    );
+    expect(updated?.opening_start_seconds).toBe(20);
+    expect(updated?.opening_end_seconds).toBe(110);
+  });
+
+  it('10. fallback nunca retorna sucesso falso quando opening não pôde ser persistida nem mascara erros reais do banco', async () => {
+    const missing0005Mock: DiagnosticSqlTag = async (strings) => {
+      const query = strings.join(' ');
+      if (
+        query.includes('anime_name') ||
+        query.includes('source_kind') ||
+        query.includes('opening_start_seconds')
+      ) {
+        const err = new Error('column "opening_start_seconds" of relation "player_episodes" does not exist') as Error & {
+          code?: string;
+        };
+        err.code = '42703';
+        throw err;
+      }
+      throw new Error('Fallback legado não deveria ser executado quando há tempos de opening');
+    };
+
+    await expect(
+      createEpisode(
+        {
+          opening_start_seconds: 2,
+          opening_end_seconds: 180,
+          title: 'Sem 0005',
+          poster_url: 'https://cdn.example.com/p.jpg',
+          video_url: 'https://cdn.example.com/ep.m3u8',
+        },
+        missing0005Mock
+      )
+    ).rejects.toThrow(/opening_start_seconds\/opening_end_seconds ainda não existem/i);
+
+    await expect(
+      updateEpisode(
+        'ep_no_0005',
+        {
+          opening_start_seconds: 2,
+          opening_end_seconds: 180,
+          title: 'Sem 0005',
+          poster_url: 'https://cdn.example.com/p.jpg',
+          video_url: 'https://cdn.example.com/ep.m3u8',
+        },
+        missing0005Mock
+      )
+    ).rejects.toThrow(/opening_start_seconds\/opening_end_seconds ainda não existem/i);
+
+    // Erro real de banco (ex.: violação NOT NULL / conexão) não deve entrar em fallback 42703
+    let calls = 0;
+    const realDbErrorMock: DiagnosticSqlTag = async () => {
+      calls += 1;
+      const err = new Error('null value in column "poster_url" violates not-null constraint') as Error & {
+        code?: string;
+      };
+      err.code = '23502';
+      throw err;
+    };
+
+    await expect(
+      updateEpisode(
+        'ep_real_err',
+        {
+          opening_start_seconds: 2,
+          opening_end_seconds: 180,
+          title: 'Erro real',
+          poster_url: 'https://cdn.example.com/p.jpg',
+          video_url: 'https://cdn.example.com/ep.m3u8',
+        },
+        realDbErrorMock
+      )
+    ).rejects.toThrow(/violates not-null constraint/i);
+    expect(calls).toBe(1);
+
+    // Se banco sem opening (null/null) rodar em schema legado 0001, continua compatível
+    const legacyNoOpeningMock: DiagnosticSqlTag = async (strings, ...values) => {
+      const query = strings.join(' ');
+      if (
+        query.includes('anime_name') ||
+        query.includes('source_kind') ||
+        query.includes('opening_start_seconds')
+      ) {
+        const err = new Error('column "opening_start_seconds" does not exist') as Error & {
+          code?: string;
+        };
+        err.code = '42703';
+        throw err;
+      }
+      return [
+        {
+          id: String(values[0]),
+          title: values[1],
+          poster_url: values[2],
+          video_url: values[3],
+          video_url_2: null,
+          video_url_3: null,
+          video_url_4: null,
+          video_url_5: null,
+          created_at: '2026-11-19T12:00:00.000Z',
+          updated_at: '2026-11-19T12:00:00.000Z',
+        },
+      ];
+    };
+
+    const createdLegacy = await createEpisode(
+      {
+        title: 'Sem opening',
+        poster_url: 'https://cdn.example.com/p.jpg',
+        video_url: 'https://cdn.example.com/ep.mp4',
+      },
+      legacyNoOpeningMock
+    );
+    expect(createdLegacy.opening_start_seconds).toBeNull();
+    expect(createdLegacy.opening_end_seconds).toBeNull();
+  });
+});
+
+describe('Parser de migrations SQL (scripts/migrate.ts)', () => {
+  it('11. migrations iniciadas com comentários executam a primeira instrução SQL e preservam a ordem', () => {
+    const sqlWithLeadingComments = `
+      -- Migration inicial; com ponto e vírgula no comentário
+      -- Segunda linha de comentário
+      ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS force_proxy boolean DEFAULT true;
+
+      /* Comentário de bloco com ; e /* comentário aninhado ; */ */
+      ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS force_proxy_2 boolean DEFAULT true;
+    `;
+
+    const statements = splitSqlStatements(sqlWithLeadingComments);
+    expect(statements).toEqual([
+      'ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS force_proxy boolean DEFAULT true',
+      'ALTER TABLE player_episodes ADD COLUMN IF NOT EXISTS force_proxy_2 boolean DEFAULT true',
+    ]);
+
+    const m0001 = fs.readFileSync(path.resolve(process.cwd(), 'migrations/0001_player_episodes.sql'), 'utf8');
+    const m0002 = fs.readFileSync(path.resolve(process.cwd(), 'migrations/0002_add_force_proxy.sql'), 'utf8');
+    const m0003 = fs.readFileSync(path.resolve(process.cwd(), 'migrations/0003_add_source_kind.sql'), 'utf8');
+    const m0004 = fs.readFileSync(path.resolve(process.cwd(), 'migrations/0004_add_anime_grouping.sql'), 'utf8');
+    const m0005 = fs.readFileSync(path.resolve(process.cwd(), 'migrations/0005_add_opening_timestamps.sql'), 'utf8');
+
+    expect(splitSqlStatements(m0001)).toHaveLength(2);
+    expect(splitSqlStatements(m0001)[0]).toContain('CREATE TABLE IF NOT EXISTS player_episodes');
+
+    expect(splitSqlStatements(m0002)).toHaveLength(10);
+    expect(splitSqlStatements(m0002)[0]).toContain('ADD COLUMN IF NOT EXISTS force_proxy boolean DEFAULT true');
+
+    expect(splitSqlStatements(m0003)).toHaveLength(5);
+    expect(splitSqlStatements(m0003)[0]).toContain('ADD COLUMN IF NOT EXISTS source_kind TEXT DEFAULT NULL');
+
+    expect(splitSqlStatements(m0004)).toHaveLength(3);
+    expect(splitSqlStatements(m0005)).toHaveLength(2);
+  });
+
+  it('12. preserva ponto e vírgula dentro de strings, identificadores e dollar-quotes, ignora blocos só de comentários e rejeita SQL incompleto', () => {
+    const complexSql = `
+      -- Apenas comentário
+      INSERT INTO demo ("col;name", body) VALUES ('a; -- b /* c */', E'it\\'s; ok');
+      DO $mig$
+      BEGIN
+        PERFORM 'x; y';
+      END
+      $mig$;
+      -- Comentário final sem instruções
+      /* bloco final vazio */
+    `;
+
+    const parsed = splitSqlStatements(complexSql);
+    expect(parsed).toHaveLength(2);
+    expect(parsed[0]).toContain(`'a; -- b /* c */'`);
+    expect(parsed[0]).toContain(`"col;name"`);
+    expect(parsed[1]).toContain(`DO $mig$`);
+
+    expect(splitSqlStatements('  -- só comentário \n /* outro */  ; ; ')).toEqual([]);
+    expect(() => splitSqlStatements("SELECT 'não fechada;")).toThrow(/incompleta/i);
+    expect(() => splitSqlStatements('/* comentário aberto; SELECT 1;')).toThrow(/incompleta/i);
+    expect(() => splitSqlStatements('CREATE TABLE broken (id TEXT;')).toThrow(/incompleta/i);
+    expect(() => splitSqlStatements('DO $$ BEGIN SELECT 1;')).toThrow(/incompleta/i);
   });
 });

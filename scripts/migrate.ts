@@ -13,6 +13,236 @@ export const EXPECTED_PROXY_COLUMNS = [
   'force_proxy_5',
 ] as const;
 
+function matchDollarQuoteTag(sql: string, startIndex: number): string | null {
+  if (sql[startIndex] !== '$') return null;
+  let i = startIndex + 1;
+  if (i < sql.length && sql[i] === '$') {
+    return '$$';
+  }
+  if (i >= sql.length || !/[A-Za-z_]/.test(sql[i])) {
+    return null;
+  }
+  i++;
+  while (i < sql.length && /[A-Za-z0-9_]/.test(sql[i])) {
+    i++;
+  }
+  if (i < sql.length && sql[i] === '$') {
+    return sql.slice(startIndex, i + 1);
+  }
+  return null;
+}
+
+export function splitSqlStatements(sqlContent: string): string[] {
+  const statements: string[] = [];
+  let buffer = '';
+  let hasMeaningfulToken = false;
+  let parenDepth = 0;
+  let i = 0;
+
+  while (i < sqlContent.length) {
+    const ch = sqlContent[i];
+    const next = sqlContent[i + 1] ?? '';
+
+    // 1. Single-line comment: -- until newline (consume comment without breaking token separation)
+    if (ch === '-' && next === '-') {
+      i += 2;
+      while (i < sqlContent.length && sqlContent[i] !== '\n') {
+        i++;
+      }
+      if (buffer.length > 0 && !/\s$/.test(buffer)) {
+        buffer += '\n';
+      }
+      continue;
+    }
+
+    // 2. Block comment (supports PostgreSQL nested /* ... /* ... */ ... */)
+    if (ch === '/' && next === '*') {
+      let depth = 1;
+      i += 2;
+      while (i < sqlContent.length && depth > 0) {
+        if (sqlContent[i] === '/' && sqlContent[i + 1] === '*') {
+          depth++;
+          i += 2;
+        } else if (sqlContent[i] === '*' && sqlContent[i + 1] === '/') {
+          depth--;
+          i += 2;
+        } else {
+          i++;
+        }
+      }
+      if (depth !== 0) {
+        throw new Error('Instrução SQL incompleta: comentário de bloco /* ... */ não fechado.');
+      }
+      if (buffer.length > 0 && !/\s$/.test(buffer)) {
+        buffer += ' ';
+      }
+      continue;
+    }
+
+    // 3. Escape string literal E'...' / e'...'
+    if ((ch === 'E' || ch === 'e') && next === "'") {
+      const prevChar = i > 0 ? sqlContent[i - 1] : '';
+      const isIdentifierPart = /[A-Za-z0-9_$]/.test(prevChar);
+      if (!isIdentifierPart) {
+        hasMeaningfulToken = true;
+        buffer += ch + next;
+        i += 2;
+        let closed = false;
+        while (i < sqlContent.length) {
+          const c = sqlContent[i];
+          buffer += c;
+          if (c === '\\') {
+            if (i + 1 < sqlContent.length) {
+              buffer += sqlContent[i + 1];
+              i += 2;
+              continue;
+            }
+            i++;
+            break;
+          }
+          if (c === "'") {
+            if (sqlContent[i + 1] === "'") {
+              buffer += "'";
+              i += 2;
+              continue;
+            }
+            closed = true;
+            i++;
+            break;
+          }
+          i++;
+        }
+        if (!closed) {
+          throw new Error('Instrução SQL incompleta: string literal E\'...\' não fechada.');
+        }
+        continue;
+      }
+    }
+
+    // 4. Standard single-quoted string literal '...'
+    if (ch === "'") {
+      hasMeaningfulToken = true;
+      buffer += ch;
+      i++;
+      let closed = false;
+      while (i < sqlContent.length) {
+        const c = sqlContent[i];
+        buffer += c;
+        if (c === "'") {
+          if (sqlContent[i + 1] === "'") {
+            buffer += "'";
+            i += 2;
+            continue;
+          }
+          closed = true;
+          i++;
+          break;
+        }
+        i++;
+      }
+      if (!closed) {
+        throw new Error('Instrução SQL incompleta: string literal \'...\' não fechada.');
+      }
+      continue;
+    }
+
+    // 5. Double-quoted identifier "..."
+    if (ch === '"') {
+      hasMeaningfulToken = true;
+      buffer += ch;
+      i++;
+      let closed = false;
+      while (i < sqlContent.length) {
+        const c = sqlContent[i];
+        buffer += c;
+        if (c === '"') {
+          if (sqlContent[i + 1] === '"') {
+            buffer += '"';
+            i += 2;
+            continue;
+          }
+          closed = true;
+          i++;
+          break;
+        }
+        i++;
+      }
+      if (!closed) {
+        throw new Error('Instrução SQL incompleta: identificador "..." não fechado.');
+      }
+      continue;
+    }
+
+    // 6. PostgreSQL dollar-quoted string $tag$...$tag$
+    const dollarTag = matchDollarQuoteTag(sqlContent, i);
+    if (dollarTag) {
+      hasMeaningfulToken = true;
+      const closeIndex = sqlContent.indexOf(dollarTag, i + dollarTag.length);
+      if (closeIndex === -1) {
+        throw new Error(`Instrução SQL incompleta: bloco ${dollarTag}...${dollarTag} não fechado.`);
+      }
+      const endIndex = closeIndex + dollarTag.length;
+      buffer += sqlContent.slice(i, endIndex);
+      i = endIndex;
+      continue;
+    }
+
+    // 7. Parentheses balance tracking
+    if (ch === '(') {
+      parenDepth++;
+      hasMeaningfulToken = true;
+      buffer += ch;
+      i++;
+      continue;
+    }
+    if (ch === ')') {
+      parenDepth--;
+      if (parenDepth < 0) {
+        throw new Error('Instrução SQL inválida: parêntese de fechamento inesperado.');
+      }
+      hasMeaningfulToken = true;
+      buffer += ch;
+      i++;
+      continue;
+    }
+
+    // 8. Statement terminator ;
+    if (ch === ';') {
+      if (parenDepth !== 0) {
+        throw new Error('Instrução SQL incompleta: parênteses não balanceados antes de ";".');
+      }
+      const trimmed = buffer.trim();
+      if (hasMeaningfulToken && trimmed.length > 0) {
+        statements.push(trimmed);
+      }
+      buffer = '';
+      hasMeaningfulToken = false;
+      i++;
+      continue;
+    }
+
+    // 9. Normal code / whitespace
+    if (!/\s/.test(ch)) {
+      hasMeaningfulToken = true;
+    }
+    if (hasMeaningfulToken) {
+      buffer += ch;
+    }
+    i++;
+  }
+
+  if (parenDepth !== 0) {
+    throw new Error('Instrução SQL incompleta: parênteses não fechados ao final do arquivo.');
+  }
+
+  const trailing = buffer.trim();
+  if (hasMeaningfulToken && trailing.length > 0) {
+    statements.push(trailing);
+  }
+
+  return statements;
+}
+
 export async function runMigrations(): Promise<void> {
   const databaseUrl = process.env.DATABASE_URL?.trim();
   if (!databaseUrl) {
@@ -35,10 +265,7 @@ export async function runMigrations(): Promise<void> {
     const content = fs.readFileSync(filePath, 'utf8');
     console.log(`[MIGRATION RUNNER] Executando: ${file}`);
     try {
-      const statements = content
-        .split(';')
-        .map((s) => s.trim())
-        .filter((s) => s.length > 0 && !s.startsWith('--'));
+      const statements = splitSqlStatements(content);
 
       for (const stmt of statements) {
         await sql.query(stmt);
