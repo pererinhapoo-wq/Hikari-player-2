@@ -8,6 +8,8 @@ export interface EpisodeDto {
   id: string;
   anime_name: string | null;
   episode_number: string | null;
+  opening_start_seconds: number | null;
+  opening_end_seconds: number | null;
   title: string;
   poster_url: string;
   video_url: string;
@@ -28,6 +30,8 @@ export interface EpisodeDto {
 export interface EpisodeFormPayload {
   anime_name?: string | null;
   episode_number?: string | null;
+  opening_start_seconds?: number | null;
+  opening_end_seconds?: number | null;
   title: string;
   poster_url: string;
   video_url: string;
@@ -49,6 +53,8 @@ export type PublicEpisodeResult =
         id: string;
         title: string;
         poster_url: string;
+        opening_start_seconds: number | null;
+        opening_end_seconds: number | null;
         sources: PlayableSource[];
       };
     }

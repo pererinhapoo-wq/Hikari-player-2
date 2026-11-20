@@ -23,6 +23,8 @@ function makeEpisode(overrides: Partial<EpisodeDto> = {}): EpisodeDto {
     id: 'ep_default_01',
     anime_name: null,
     episode_number: null,
+    opening_start_seconds: null,
+    opening_end_seconds: null,
     title: 'Episódio sem título',
     poster_url: 'https://cdn.example.com/poster.jpg',
     video_url: 'https://cdn.example.com/ep.m3u8',

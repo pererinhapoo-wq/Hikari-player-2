@@ -1,6 +1,7 @@
 import crypto from 'node:crypto';
 import { neon } from '@neondatabase/serverless';
 import { sanitizeAnimeName, sanitizeEpisodeNumber } from '@/lib/anime-library';
+import { validateOpeningSecondsPair } from '@/lib/opening-skip';
 import type {
   DatabaseDiagnosisCode,
   DatabaseDiagnosticResult,
@@ -14,6 +15,8 @@ export interface PlayerEpisode {
   id: string;
   anime_name: string | null;
   episode_number: string | null;
+  opening_start_seconds: number | null;
+  opening_end_seconds: number | null;
   title: string;
   poster_url: string;
   video_url: string;
@@ -38,6 +41,8 @@ export interface PlayerEpisode {
 export interface EpisodeWriteInput {
   anime_name?: string | null;
   episode_number?: string | null;
+  opening_start_seconds?: number | null;
+  opening_end_seconds?: number | null;
   title: string;
   poster_url: string;
   video_url: string;
@@ -107,6 +112,11 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
     throw new Error('Informe o nome do anime ou o título do episódio.');
   }
 
+  const openingRange = validateOpeningSecondsPair(
+    input.opening_start_seconds,
+    input.opening_end_seconds
+  );
+
   const posterCheck = validateHttpUrl(input.poster_url ?? '');
   if (!posterCheck.valid || !posterCheck.normalizedUrl) {
     throw new Error(`Imagem de capa inválida: ${posterCheck.error}`);
@@ -145,6 +155,8 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
   return {
     anime_name: animeName,
     episode_number: episodeNumber,
+    opening_start_seconds: openingRange.opening_start_seconds,
+    opening_end_seconds: openingRange.opening_end_seconds,
     title,
     poster_url: posterCheck.normalizedUrl,
     video_url: primaryCheck.normalizedUrl,
@@ -197,11 +209,20 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
   };
 }
 
+function normalizeOptionalSeconds(raw: unknown): number | null {
+  if (raw === null || raw === undefined || raw === '') return null;
+  const num = Number(raw);
+  if (!Number.isFinite(num) || num < 0) return null;
+  return Math.floor(num);
+}
+
 function mapEpisodeRow(row: Record<string, unknown>): PlayerEpisode {
   return {
     id: String(row.id),
     anime_name: sanitizeAnimeName(row.anime_name),
     episode_number: sanitizeEpisodeNumber(row.episode_number),
+    opening_start_seconds: normalizeOptionalSeconds(row.opening_start_seconds),
+    opening_end_seconds: normalizeOptionalSeconds(row.opening_end_seconds),
     title: typeof row.title === 'string' ? row.title : String(row.title ?? ''),
     poster_url: String(row.poster_url),
     video_url: String(row.video_url),
@@ -228,7 +249,8 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
   const sql = getSql();
   try {
     const rows = await sql`
-      SELECT id, anime_name, episode_number, title, poster_url,
+      SELECT id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
+             title, poster_url,
              video_url, video_url_2, video_url_3, video_url_4, video_url_5,
              source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
              COALESCE(force_proxy, true) AS force_proxy,
@@ -262,6 +284,8 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
           ...row,
           anime_name: data.anime_name ?? null,
           episode_number: data.episode_number ?? null,
+          opening_start_seconds: data.opening_start_seconds ?? null,
+          opening_end_seconds: data.opening_end_seconds ?? null,
           source_kind: data.source_kind ?? null,
           source_kind_2: data.source_kind_2 ?? null,
           source_kind_3: data.source_kind_3 ?? null,
@@ -288,7 +312,8 @@ export async function getEpisodeById(id: string): Promise<PlayerEpisode | null> 
   const sql = getSql();
   try {
     const rows = await sql`
-      SELECT id, anime_name, episode_number, title, poster_url,
+      SELECT id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
+             title, poster_url,
              video_url, video_url_2, video_url_3, video_url_4, video_url_5,
              source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
              COALESCE(force_proxy, true) AS force_proxy,
@@ -320,6 +345,8 @@ export async function getEpisodeById(id: string): Promise<PlayerEpisode | null> 
         ...row,
         anime_name: data.anime_name ?? null,
         episode_number: data.episode_number ?? null,
+        opening_start_seconds: data.opening_start_seconds ?? null,
+        opening_end_seconds: data.opening_end_seconds ?? null,
         source_kind: data.source_kind ?? null,
         source_kind_2: data.source_kind_2 ?? null,
         source_kind_3: data.source_kind_3 ?? null,
@@ -347,7 +374,8 @@ export async function createEpisode(
   try {
     const rows = await sql`
       INSERT INTO public.player_episodes (
-        id, anime_name, episode_number, title, poster_url,
+        id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
+        title, poster_url,
         video_url, video_url_2, video_url_3, video_url_4, video_url_5,
         source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
         force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5
@@ -355,6 +383,8 @@ export async function createEpisode(
         ${id},
         ${input.anime_name ?? null},
         ${input.episode_number ?? null},
+        ${input.opening_start_seconds ?? null},
+        ${input.opening_end_seconds ?? null},
         ${input.title},
         ${input.poster_url},
         ${input.video_url},
@@ -373,7 +403,8 @@ export async function createEpisode(
         ${input.force_proxy_4 ?? true},
         ${input.force_proxy_5 ?? true}
       )
-      RETURNING id, anime_name, episode_number, title, poster_url,
+      RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
+                title, poster_url,
                 video_url, video_url_2, video_url_3, video_url_4, video_url_5,
                 source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
                 COALESCE(force_proxy, true) AS force_proxy,
@@ -441,6 +472,8 @@ export async function updateEpisode(
           SET
             anime_name = ${input.anime_name ?? null},
             episode_number = ${input.episode_number ?? null},
+            opening_start_seconds = ${input.opening_start_seconds ?? null},
+            opening_end_seconds = ${input.opening_end_seconds ?? null},
             title = ${input.title},
             poster_url = ${input.poster_url},
             video_url = ${input.video_url},
@@ -448,7 +481,8 @@ export async function updateEpisode(
             force_proxy = ${input.force_proxy ?? true},
             updated_at = NOW()
           WHERE id = ${cleanId}
-          RETURNING id, anime_name, episode_number, title, poster_url,
+          RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
+                    title, poster_url,
                     video_url, video_url_2, video_url_3, video_url_4, video_url_5,
                     source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
                     COALESCE(force_proxy, true) AS force_proxy,
@@ -463,6 +497,8 @@ export async function updateEpisode(
           SET
             anime_name = ${input.anime_name ?? null},
             episode_number = ${input.episode_number ?? null},
+            opening_start_seconds = ${input.opening_start_seconds ?? null},
+            opening_end_seconds = ${input.opening_end_seconds ?? null},
             title = ${input.title},
             poster_url = ${input.poster_url},
             video_url = ${input.video_url},
@@ -482,7 +518,8 @@ export async function updateEpisode(
             force_proxy_5 = ${input.force_proxy_5 ?? true},
             updated_at = NOW()
           WHERE id = ${cleanId}
-          RETURNING id, anime_name, episode_number, title, poster_url,
+          RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
+                    title, poster_url,
                     video_url, video_url_2, video_url_3, video_url_4, video_url_5,
                     source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
                     COALESCE(force_proxy, true) AS force_proxy,

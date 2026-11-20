@@ -148,6 +148,8 @@ export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
         id: episode.id,
         title: formatEpisodeDisplayTitle(episode),
         poster_url: episode.poster_url,
+        opening_start_seconds: episode.opening_start_seconds,
+        opening_end_seconds: episode.opening_end_seconds,
         sources,
       },
     };

@@ -75,6 +75,8 @@ function PublicEpisodePage() {
           title={episode.title}
           posterUrl={episode.poster_url}
           sources={episode.sources}
+          openingStartSeconds={episode.opening_start_seconds}
+          openingEndSeconds={episode.opening_end_seconds}
         />
       </div>
     </main>

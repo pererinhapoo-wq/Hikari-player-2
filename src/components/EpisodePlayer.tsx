@@ -7,9 +7,11 @@ import {
   Play,
   RotateCcw,
   RotateCw,
+  SkipForward,
   Volume2,
   VolumeX,
 } from 'lucide-react';
+import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   canUseDirectMaximaimgFallback,
@@ -17,6 +19,7 @@ import {
   decideHlsErrorAction,
   type PlaybackStrategy,
 } from '@/lib/hls-playback';
+import { isOpeningSkipVisible } from '@/lib/opening-skip';
 import type { PlayableSource } from '@/lib/types';
 import {
   buildIframeSrcWithFreshTime,
@@ -27,6 +30,8 @@ interface EpisodePlayerProps {
   title: string;
   posterUrl: string;
   sources: PlayableSource[];
+  openingStartSeconds?: number | null;
+  openingEndSeconds?: number | null;
 }
 
 const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
@@ -41,7 +46,14 @@ function formatTime(seconds: number): string {
   return hrs > 0 ? `${hrs}:${pad(mins)}:${pad(secs)}` : `${pad(mins)}:${pad(secs)}`;
 }
 
-export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps) {
+export function EpisodePlayer({
+  title,
+  posterUrl,
+  sources,
+  openingStartSeconds = null,
+  openingEndSeconds = null,
+}: EpisodePlayerProps) {
+  const prefersReducedMotion = useReducedMotion();
   const containerRef = useRef<HTMLDivElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const scrubberRef = useRef<HTMLDivElement>(null);
@@ -667,6 +679,25 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
     [scheduleHideControls]
   );
 
+  const handleSkipOpening = useCallback(() => {
+    const video = videoRef.current;
+    if (
+      !video ||
+      typeof openingEndSeconds !== 'number' ||
+      !Number.isFinite(openingEndSeconds)
+    ) {
+      return;
+    }
+    const maxTime =
+      Number.isFinite(video.duration) && video.duration > 0
+        ? video.duration
+        : openingEndSeconds;
+    const targetTime = Math.min(openingEndSeconds, maxTime);
+    video.currentTime = targetTime;
+    setCurrentTime(targetTime);
+    scheduleHideControls();
+  }, [openingEndSeconds, scheduleHideControls]);
+
   const toggleMute = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
@@ -1039,6 +1070,15 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
 
   const displayedTime = scrubTime ?? currentTime;
 
+  const showSkipOpening = isOpeningSkipVisible({
+    currentTime,
+    openingStartSeconds,
+    openingEndSeconds,
+    hasStarted,
+    isIframeMode: resolvedRuntime?.mode === 'iframe',
+    fatalError: Boolean(fatalError),
+  });
+
   const progressPct = useMemo(() => {
     if (!duration || duration <= 0) return 0;
     return Math.min(100, Math.max(0, (displayedTime / duration) * 100));
@@ -1232,6 +1272,11 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
                   setBufferedEnd(v.buffered.end(v.buffered.length - 1));
                 }
               }}
+              onSeeked={() => {
+                const v = videoRef.current;
+                if (!v) return;
+                setCurrentTime(v.currentTime);
+              }}
               onLoadedMetadata={() => {
                 const v = videoRef.current;
                 if (!v) return;
@@ -1327,6 +1372,47 @@ export function EpisodePlayer({ title, posterUrl, sources }: EpisodePlayerProps)
                 <Play className="w-7 h-7 fill-current ml-0.5" />
               </button>
             )}
+
+            {/* Skip Opening button (HTML5 / HLS playback only) */}
+            <AnimatePresence>
+              {showSkipOpening && (
+                <motion.button
+                  key="skip-opening-button"
+                  type="button"
+                  initial={
+                    prefersReducedMotion
+                      ? { opacity: 0 }
+                      : { opacity: 0, y: 10, scale: 0.95 }
+                  }
+                  animate={
+                    prefersReducedMotion
+                      ? { opacity: 1 }
+                      : { opacity: 1, y: 0, scale: 1 }
+                  }
+                  exit={
+                    prefersReducedMotion
+                      ? { opacity: 0 }
+                      : { opacity: 0, scale: 0.94 }
+                  }
+                  transition={
+                    prefersReducedMotion
+                      ? { duration: 0.01 }
+                      : { duration: 0.24, ease: [0.22, 1, 0.36, 1] }
+                  }
+                  onPointerDown={(e) => e.stopPropagation()}
+                  onPointerUp={(e) => e.stopPropagation()}
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    handleSkipOpening();
+                  }}
+                  aria-label="Pular abertura"
+                  className="absolute bottom-[88px] sm:bottom-[96px] right-3 sm:right-5 z-20 inline-flex items-center gap-2 px-3.5 py-2 sm:px-4 sm:py-2.5 rounded-xl bg-[#11151E]/90 hover:bg-[#a855f7]/25 active:scale-95 text-white text-xs sm:text-sm font-medium border border-[#a855f7]/50 hover:border-[#a855f7] backdrop-blur-md shadow-[0_0_22px_rgba(168,85,247,0.32)] hover:shadow-[0_0_28px_rgba(168,85,247,0.5)] transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer"
+                >
+                  <SkipForward className="w-4 h-4 text-[#a855f7]" />
+                  <span>Pular abertura</span>
+                </motion.button>
+              )}
+            </AnimatePresence>
 
             {/* Floating translucent bottom controls bar */}
             <div

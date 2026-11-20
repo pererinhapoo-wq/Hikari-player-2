@@ -32,6 +32,7 @@ import {
   sanitizeAnimeName,
   UNASSIGNED_ANIME_KEY,
 } from '@/lib/anime-library';
+import { formatOpeningTimestamp, parseOpeningRange } from '@/lib/opening-skip';
 import {
   adminCreateEpisodeFn,
   adminDeleteEpisodeFn,
@@ -68,6 +69,8 @@ interface SinglePlayerFormState {
   anime_name: string;
   episode_number: string;
   title: string;
+  opening_start: string;
+  opening_end: string;
   poster_url: string;
   video_url: string;
   source_kind: ExplicitSourceKind | '';
@@ -77,6 +80,8 @@ const EMPTY_FORM: SinglePlayerFormState = {
   anime_name: '',
   episode_number: '',
   title: '',
+  opening_start: '',
+  opening_end: '',
   poster_url: '',
   video_url: '',
   source_kind: '',
@@ -363,6 +368,8 @@ function AdminPage() {
       anime_name: ep.anime_name ?? '',
       episode_number: ep.episode_number ?? '',
       title: ep.title ?? '',
+      opening_start: formatOpeningTimestamp(ep.opening_start_seconds),
+      opening_end: formatOpeningTimestamp(ep.opening_end_seconds),
       poster_url: ep.poster_url,
       video_url: ep.video_url,
       source_kind: ep.source_kind ?? '',
@@ -446,11 +453,22 @@ function AdminPage() {
   const handleSaveEpisode = async (e: FormEvent) => {
     e.preventDefault();
     setFormError(null);
+
+    let openingRange: { opening_start_seconds: number | null; opening_end_seconds: number | null };
+    try {
+      openingRange = parseOpeningRange(form.opening_start, form.opening_end);
+    } catch (err) {
+      setFormError(err instanceof Error ? err.message : 'Horários da opening inválidos.');
+      return;
+    }
+
     setSaveBusy(true);
 
     const payload = {
       anime_name: sanitizeAnimeName(form.anime_name),
       episode_number: form.episode_number.trim() || null,
+      opening_start_seconds: openingRange.opening_start_seconds,
+      opening_end_seconds: openingRange.opening_end_seconds,
       title: form.title.trim(),
       poster_url: form.poster_url.trim(),
       video_url: form.video_url.trim(),
@@ -943,6 +961,63 @@ function AdminPage() {
                       placeholder="Ex.: O Fim da Jornada"
                       className="w-full h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
                     />
+                  </div>
+
+                  {/* Opening timestamps (optional) */}
+                  <div className="pt-2 border-t border-white/10 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-medium text-slate-200">
+                        Opening{' '}
+                        <span className="text-slate-500 font-normal">(opcional)</span>
+                      </span>
+                      <span className="text-[11px] text-slate-400">
+                        MM:SS ou HH:MM:SS
+                      </span>
+                    </div>
+
+                    <div className="grid grid-cols-2 gap-3">
+                      <div>
+                        <label
+                          htmlFor="ep-opening-start"
+                          className="block text-xs font-medium text-slate-300 mb-1.5"
+                        >
+                          Início da opening
+                        </label>
+                        <input
+                          id="ep-opening-start"
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={12}
+                          value={form.opening_start}
+                          onChange={(e) => setForm({ ...form, opening_start: e.target.value })}
+                          placeholder="Ex.: 01:30"
+                          className="w-full h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-sm font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
+                        />
+                      </div>
+
+                      <div>
+                        <label
+                          htmlFor="ep-opening-end"
+                          className="block text-xs font-medium text-slate-300 mb-1.5"
+                        >
+                          Fim da opening
+                        </label>
+                        <input
+                          id="ep-opening-end"
+                          type="text"
+                          inputMode="numeric"
+                          maxLength={12}
+                          value={form.opening_end}
+                          onChange={(e) => setForm({ ...form, opening_end: e.target.value })}
+                          placeholder="Ex.: 03:00"
+                          className="w-full h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-sm font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
+                        />
+                      </div>
+                    </div>
+
+                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                      Deixe ambos os campos vazios se o episódio não tiver abertura configurada.
+                    </p>
                   </div>
 
                   {/* Single Video Source: Player 1 only */}
