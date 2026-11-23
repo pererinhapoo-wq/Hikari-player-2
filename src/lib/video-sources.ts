@@ -49,7 +49,9 @@ export const EMBED_DIRECT_HOSTS = [
   'anitube.zip',
   'anitube.ninja',
   'animesdigital.org',
+  'filevideo1.com',
 ] as const;
+export const EMBED_NO_REFERRER_HOSTS = ['filevideo1.com'] as const;
 
 function matchesHostList(hostname: string, allowlist: readonly string[]): boolean {
   const lower = hostname.toLowerCase().replace(/\.+$/, '');
@@ -67,6 +69,33 @@ export function isEmbedAllowedFinalHost(hostname: string): boolean {
 
 export function isEmbedDirectHost(hostname: string): boolean {
   return matchesHostList(hostname, EMBED_DIRECT_HOSTS);
+}
+
+export function isEmbedNoReferrerHost(hostname: string): boolean {
+  return matchesHostList(hostname, EMBED_NO_REFERRER_HOSTS);
+}
+
+export function getIframeReferrerPolicy(
+  rawUrl: string
+): 'no-referrer' | 'no-referrer-when-downgrade' {
+  try {
+    const parsed = new URL(rawUrl, 'http://localhost');
+    if (parsed.pathname === '/api/embed' && parsed.searchParams.has('u')) {
+      const inner = parsed.searchParams.get('u');
+      if (inner) {
+        const innerParsed = new URL(inner);
+        if (isEmbedNoReferrerHost(innerParsed.hostname)) {
+          return 'no-referrer';
+        }
+      }
+    }
+    if (isEmbedNoReferrerHost(parsed.hostname)) {
+      return 'no-referrer';
+    }
+  } catch {
+    // Mantém política padrão quando a URL não puder ser analisada
+  }
+  return 'no-referrer-when-downgrade';
 }
 
 export function classifyEmbedHost(rawUrl: string): 'direct' | 'proxied' | 'other' {
@@ -280,10 +309,45 @@ export function detectSourceKind(
   return 'iframe';
 }
 
+const HASH_PARAM_NAMES = new Set(['cv', 'cv2', 'cv3', 'cv4']);
+
+export function hasUrlHashParams(rawUrl: string): boolean {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return false;
+
+  if (trimmed.startsWith('/api/embed?')) {
+    try {
+      const wrapper = new URL(trimmed, 'http://localhost');
+      const inner = wrapper.searchParams.get('u');
+      if (inner) {
+        return hasUrlHashParams(inner);
+      }
+    } catch {
+      // Segue para tentativa de parse direto/regex
+    }
+  }
+
+  try {
+    const parsed = new URL(trimmed);
+    for (const key of parsed.searchParams.keys()) {
+      if (HASH_PARAM_NAMES.has(key.toLowerCase())) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return /(?:^|[?&])(?:cv|cv2|cv3|cv4)(?:=|&|$)/i.test(trimmed);
+  }
+}
+
 export function buildIframeSrcWithFreshTime(
   rawUrl: string,
   nowSeconds = Math.floor(Date.now() / 1000)
 ): string {
+  if (hasUrlHashParams(rawUrl)) {
+    return rawUrl;
+  }
+
   if (rawUrl.startsWith('/api/embed?')) {
     try {
       const wrapper = new URL(rawUrl, 'http://localhost');

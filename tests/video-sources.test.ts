@@ -4,7 +4,9 @@ import {
   buildIframeSrcWithFreshTime,
   collectEpisodeSources,
   detectSourceKind,
+  getIframeReferrerPolicy,
   getNextFallbackSourceIndex,
+  hasUrlHashParams,
   normalizeVideoSource,
   validateHttpUrl,
 } from '@/lib/video-sources';
@@ -177,6 +179,29 @@ describe('collectEpisodeSources e seleção/fallback de fontes', () => {
 
     const withoutTime = 'https://embeds.example.com/e/12345?runtime=900';
     expect(buildIframeSrcWithFreshTime(withoutTime, 1795120001)).toBe(withoutTime);
+  });
+
+  it('não reescreve time quando a URL possui parâmetros de hash (cv, cv2, cv3, cv4) e detecta hasUrlHashParams', () => {
+    const urls = [
+      'https://filevideo1.com/remote_control.php?time=1700000000&cv=abc123&file=ep.mp4',
+      'https://filevideo1.com/remote_control.php?time=1700000000&cv2=def456&file=ep.mp4',
+      'https://filevideo1.com/remote_control.php?time=1700000000&cv3=ghi789&file=ep.mp4',
+      'https://filevideo1.com/remote_control.php?time=1700000000&cv4=jkl012&file=ep.mp4',
+      'https://filevideo1.com/remote_control.php?file=ep.mp4&time=1700000000&cv=a&cv2=b&cv3=c&cv4=d',
+    ];
+
+    for (const url of urls) {
+      expect(hasUrlHashParams(url)).toBe(true);
+      expect(buildIframeSrcWithFreshTime(url, 1795120999)).toBe(url);
+      expect(getIframeReferrerPolicy(url)).toBe('no-referrer');
+      const norm = normalizeVideoSource(url, 1);
+      expect(norm?.kind).toBe('iframe');
+      expect(norm?.needsProxy).toBe(false);
+    }
+
+    expect(
+      hasUrlHashParams('https://www.anitube22.vip/playerricas.php?id=123&time=1700000000')
+    ).toBe(false);
   });
 
   it('ativa needsProxy=true por padrão para fontes hls/mp4 (incluindo mywallpaper-4k-image.net) e mantém false apenas para iframe', () => {

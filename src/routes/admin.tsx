@@ -72,8 +72,11 @@ import {
   classifyEmbedHost,
   detectSourceKind,
   EMBED_DIRECT_HOSTS,
+  EMBED_NO_REFERRER_HOSTS,
   EMBED_PROXIED_HOSTS,
   type ExplicitSourceKind,
+  getIframeReferrerPolicy,
+  hasUrlHashParams,
   normalizeVideoSource,
   validateHttpUrl,
 } from '@/lib/video-sources';
@@ -342,8 +345,19 @@ function AdminPage() {
     const check = validateHttpUrl(trimmed);
     const normalized = normalizeVideoSource(trimmed, 1, form.source_kind || null);
     const detectedKind = detectSourceKind(trimmed, form.source_kind || null);
-    const embedHostMode = classifyEmbedHost(check.normalizedUrl ?? trimmed);
-    return { trimmed, check, normalized, detectedKind, embedHostMode };
+    const candidateUrl = check.normalizedUrl ?? trimmed;
+    const embedHostMode = classifyEmbedHost(candidateUrl);
+    const hasHashParams = hasUrlHashParams(candidateUrl);
+    const referrerPolicy = getIframeReferrerPolicy(candidateUrl);
+    return {
+      trimmed,
+      check,
+      normalized,
+      detectedKind,
+      embedHostMode,
+      hasHashParams,
+      referrerPolicy,
+    };
   }, [form.video_url, form.source_kind]);
 
   const copyLink = async (id: string, url: string) => {
@@ -587,6 +601,10 @@ function AdminPage() {
   };
 
   const parsedBatchLines = useMemo(() => parseBatchInputLines(batchInput), [batchInput]);
+  const hasBatchHashLinks = useMemo(
+    () => parsedBatchLines.some((item) => !item.parseError && hasUrlHashParams(item.url)),
+    [parsedBatchLines]
+  );
   const batchTotals = useMemo(
     () =>
       batchJob
@@ -1126,6 +1144,15 @@ function AdminPage() {
                       Limite máximo de {BATCH_MAX_ITEMS} linhas por execução excedido ({parsedBatchLines.length} detectadas).
                     </p>
                   )}
+                  {hasBatchHashLinks && (
+                    <div
+                      role="note"
+                      className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
+                    >
+                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                      <span>link com hash, use sempre um link novo e não reaproveite</span>
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2.5">
@@ -1532,6 +1559,16 @@ function AdminPage() {
                       Aceita URL direta (.m3u8, .mp4, .webm) ou página do provedor (.php, embed).
                     </p>
 
+                    {primarySourceInfo?.hasHashParams && (
+                      <div
+                        role="note"
+                        className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
+                      >
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                        <span>link com hash, use sempre um link novo e não reaproveite</span>
+                      </div>
+                    )}
+
                     <div className="rounded-lg bg-[#090B10] border border-white/10 px-3 py-2 text-[11px] text-slate-300 space-y-1 leading-relaxed">
                       <div>
                         <span className="text-amber-300 font-medium">Exige /api/embed:</span>{' '}
@@ -1544,6 +1581,12 @@ function AdminPage() {
                         <span className="text-emerald-300 font-medium">Iframe direto:</span>{' '}
                         <span className="font-mono text-slate-200">
                           {EMBED_DIRECT_HOSTS.join(', ')}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-sky-300 font-medium">Iframe sem Referer:</span>{' '}
+                        <span className="font-mono text-slate-200">
+                          {EMBED_NO_REFERRER_HOSTS.join(', ')}
                         </span>
                       </div>
                       {primarySourceInfo?.check.valid &&
@@ -1559,7 +1602,9 @@ function AdminPage() {
                             >
                               {primarySourceInfo.embedHostMode === 'proxied'
                                 ? 'via /api/embed'
-                                : 'iframe direto'}
+                                : primarySourceInfo.referrerPolicy === 'no-referrer'
+                                  ? 'iframe direto (sem Referer)'
+                                  : 'iframe direto'}
                             </span>
                           </div>
                         )}
@@ -1815,6 +1860,13 @@ function AdminPage() {
                       const isTesting = episodeTestingId === ep.id;
                       const testReports = episodeTests[ep.id];
                       const testError = episodeTestErrors[ep.id];
+                      const hasHashSource = [
+                        ep.video_url,
+                        ep.video_url_2,
+                        ep.video_url_3,
+                        ep.video_url_4,
+                        ep.video_url_5,
+                      ].some((url) => Boolean(url && hasUrlHashParams(url)));
 
                       return (
                         <li
@@ -1846,6 +1898,13 @@ function AdminPage() {
                                 <span aria-hidden="true"> · </span>
                                 {formatDatePtBr(ep.created_at)}
                               </p>
+
+                              {hasHashSource && (
+                                <p className="inline-flex items-center gap-1.5 text-[11px] text-amber-300">
+                                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                  <span>link com hash, use sempre um link novo e não reaproveite</span>
+                                </p>
+                              )}
                             </div>
 
                             {/* Compact actions: Copiar link, Abrir + 3-dots menu */}

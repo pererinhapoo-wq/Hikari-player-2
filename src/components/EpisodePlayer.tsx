@@ -23,6 +23,7 @@ import { isOpeningSkipVisible } from '@/lib/opening-skip';
 import type { PlayableSource } from '@/lib/types';
 import {
   buildIframeSrcWithFreshTime,
+  getIframeReferrerPolicy,
   getNextFallbackSourceIndex,
 } from '@/lib/video-sources';
 
@@ -1235,7 +1236,7 @@ export function EpisodePlayer({
               className="w-full h-full border-0 bg-black"
               allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
               allowFullScreen
-              referrerPolicy="no-referrer-when-downgrade"
+              referrerPolicy={getIframeReferrerPolicy(resolvedRuntime.url)}
             />
             {!iframeLoaded && isLoadingSource && (
               <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-black/35">

@@ -14,7 +14,9 @@ import {
   collectEpisodeSources,
   EMBED_ALLOWED_FINAL_HOSTS,
   EMBED_DIRECT_HOSTS,
+  EMBED_NO_REFERRER_HOSTS,
   EMBED_PROXIED_HOSTS,
+  getIframeReferrerPolicy,
   normalizeVideoSource,
 } from '@/lib/video-sources';
 
@@ -53,7 +55,9 @@ describe('Part A: allowlists separadas, buildIframePlayUrl e prioridade de fonte
       'anitube.zip',
       'anitube.ninja',
       'animesdigital.org',
+      'filevideo1.com',
     ]);
+    expect([...EMBED_NO_REFERRER_HOSTS]).toEqual(['filevideo1.com']);
   });
 
   it('monta URL direta para EMBED_DIRECT_HOSTS/outros e /api/embed?u=... para EMBED_PROXIED_HOSTS', () => {
@@ -62,6 +66,9 @@ describe('Part A: allowlists separadas, buildIframePlayUrl e prioridade de fonte
     expect(buildIframePlayUrl('https://animesdigital.org/embed/abc')).toBe(
       'https://animesdigital.org/embed/abc'
     );
+    const filevideoUrl =
+      'https://filevideo1.com/remote_control.php?time=1700000000&cv=abc&cv2=def&file=ep01.mp4';
+    expect(buildIframePlayUrl(filevideoUrl)).toBe(filevideoUrl);
     expect(buildIframePlayUrl('https://outro-host.example/embed/1')).toBe(
       'https://outro-host.example/embed/1'
     );
@@ -72,7 +79,22 @@ describe('Part A: allowlists separadas, buildIframePlayUrl e prioridade de fonte
     );
   });
 
-  it('renova parâmetro time tanto em URL direta quanto dentro de /api/embed?u=...', () => {
+  it('aplica referrerPolicy no-referrer apenas para EMBED_NO_REFERRER_HOSTS e mantém no-referrer-when-downgrade nos demais', () => {
+    expect(
+      getIframeReferrerPolicy('https://filevideo1.com/remote_control.php?file=ep01.mp4')
+    ).toBe('no-referrer');
+    expect(
+      getIframeReferrerPolicy('https://cdn.filevideo1.com/remote_control.php?file=ep01.mp4')
+    ).toBe('no-referrer');
+    expect(
+      getIframeReferrerPolicy('https://anitube22.vip/playerricas.php?id=123&time=1000')
+    ).toBe('no-referrer-when-downgrade');
+    expect(
+      getIframeReferrerPolicy(`/api/embed?u=${encodeURIComponent('https://allappinc.com/embed/1')}`)
+    ).toBe('no-referrer-when-downgrade');
+  });
+
+  it('renova parâmetro time tanto em URL direta quanto dentro de /api/embed?u=..., mas preserva link literal com parâmetros cv*', () => {
     const direct = 'https://anitube22.vip/playerricas.php?id=42&time=111';
     expect(buildIframeSrcWithFreshTime(direct, 9999)).toBe(
       'https://anitube22.vip/playerricas.php?id=42&time=9999'
@@ -82,6 +104,10 @@ describe('Part A: allowlists separadas, buildIframePlayUrl e prioridade de fonte
     expect(buildIframeSrcWithFreshTime(wrapped, 9999)).toBe(
       `/api/embed?u=${encodeURIComponent('https://allappinc.com/embed/42?time=9999')}`
     );
+
+    const filevideoHashed =
+      'https://filevideo1.com/remote_control.php?time=111&cv=h1&cv2=h2&cv3=h3&cv4=h4&file=ep01.mp4';
+    expect(buildIframeSrcWithFreshTime(filevideoHashed, 9999)).toBe(filevideoHashed);
   });
 
   it('prioriza fontes playerricas acima de fontes allappinc em collectEpisodeSources', () => {
