@@ -526,20 +526,23 @@ describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () =
     expect(reports[3].verdictLabel).toBe('bloqueado');
     expect(reports[3].withHeaders.status).toBe(403);
 
-    // Fonte iframe responde direto ok quando 200 mesmo sem ACAO
+    // Fonte iframe exige /api/embed para proxied host
     const iframeReport = await diagnoseVideoSource(
       { slot: 5, url: 'https://www.anitube22.vip/playerricas.php?name=1.mp4' },
       {
         fetchWithRedirects: async (url) => ({
           finalUrl: url,
-          response: new Response('<!doctype html><html></html>', {
+          response: new Response('Forbidden', { status: 403 }),
+        }),
+        embedFetchImpl: async () =>
+          new Response('<!doctype html><html></html>', {
             status: 200,
             headers: { 'content-type': 'text/html' },
           }),
-        }),
+        embedAssertSafeUrl: async (raw: string) => new URL(raw),
       }
     );
     expect(iframeReport.detectedKind).toBe('iframe');
-    expect(iframeReport.verdictLabel).toBe('direto ok');
+    expect(iframeReport.verdictLabel).toBe('proxy necessário');
   });
 });

@@ -31,7 +31,14 @@ export interface UrlValidationResult {
 
 const MAX_URL_LENGTH = 2048;
 
-export const EMBED_PROXIED_HOSTS = ['allappinc.com'] as const;
+export const EMBED_PROXIED_HOSTS = [
+  'allappinc.com',
+  'anitube22.vip',
+  'anitube.biz',
+  'anitube.zip',
+  'anitube.ninja',
+  'hinatasoul.com',
+] as const;
 export const EMBED_ALLOWED_FINAL_HOSTS = [
   'allappinc.com',
   'api.anivideo.net',
@@ -41,13 +48,10 @@ export const EMBED_ALLOWED_FINAL_HOSTS = [
   'anitube22.vip',
   'anitube.zip',
   'anitube.ninja',
+  'hinatasoul.com',
   'animesdigital.org',
 ] as const;
 export const EMBED_DIRECT_HOSTS = [
-  'anitube22.vip',
-  'anitube.biz',
-  'anitube.zip',
-  'anitube.ninja',
   'animesdigital.org',
   'filevideo1.com',
 ] as const;

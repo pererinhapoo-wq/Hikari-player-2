@@ -70,7 +70,7 @@ describe('parseBatchInputLines', () => {
 
 describe('validateBatchIframeItem', () => {
   it('aprova host em EMBED_DIRECT_HOSTS por allowlist mesmo quando servidor responde 403 do WAF', async () => {
-    const [item] = parseBatchInputLines('ep01 ; https://anitube22.vip/playerricas.php?id=99');
+    const [item] = parseBatchInputLines('ep01 ; https://animesdigital.org/embed/99');
     const res = await validateBatchIframeItem(item, {
       probeDirectHost: async () => ({ status: 403 }),
     });
@@ -104,8 +104,8 @@ describe('validateBatchIframeItem', () => {
       [
         'ep01 ; https://desconhecido.example.com/embed/1',
         'ep02 ; https://cdn.example.com/video/playlist.m3u8',
-        'ep03 ; https://anitube22.vip/video.mp4 ; mp4',
-        'ep04 ; http://anitube22.vip/playerricas.php?id=1',
+        'ep03 ; https://allappinc.com/video.mp4 ; mp4',
+        'ep04 ; http://allappinc.com/embed/1',
       ].join('\n')
     );
 
@@ -192,7 +192,7 @@ describe('execução em série (100 itens, 400ms) e "Continuar de onde parou" ap
   it('processa lote de 100 itens estritamente em série (concorrência máxima = 1) com intervalo de 400ms e relatório completo', async () => {
     const lines = Array.from(
       { length: 100 },
-      (_, idx) => `ep_${idx + 1} ; https://anitube22.vip/playerricas.php?id=${idx + 1}`
+      (_, idx) => `ep_${idx + 1} ; https://allappinc.com/embed/${idx + 1}`
     ).join('\n');
     const items = parseBatchInputLines(lines);
     expect(items).toHaveLength(100);
@@ -273,18 +273,18 @@ describe('execução em série (100 itens, 400ms) e "Continuar de onde parou" ap
       salvos: 100,
     });
     expect(store.get('ep_100')?.video_url_2).toBe(
-      'https://anitube22.vip/playerricas.php?id=100'
+      'https://allappinc.com/embed/100'
     );
   });
 
   it('persiste estado no storage e retoma no índice exato via "Continuar de onde parou" após reload', async () => {
     const storage = createMemoryStorage();
     const rawInput = [
-      'ep1 ; https://anitube22.vip/playerricas.php?id=1',
-      'ep2 ; https://anitube.biz/playerricas.php?id=2',
+      'ep1 ; https://allappinc.com/embed/1',
+      'ep2 ; https://allappinc.com/embed/2',
       'ep3 ; https://host-desconhecido.test/e/3',
       'ep4 ; https://animesdigital.org/embed/4',
-      'ep5 ; https://anitube.ninja/embed/5',
+      'ep5 ; https://allappinc.com/embed/5',
     ].join('\n');
     const items = parseBatchInputLines(rawInput);
 

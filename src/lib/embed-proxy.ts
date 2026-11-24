@@ -462,7 +462,12 @@ export async function resolveEmbedProxy(
     };
   }
 
-  const entryOriginReferer = `${targetUrl.origin}/`;
+  const isCoempregosTarget =
+    targetUrl.hostname.toLowerCase().includes('anitube') ||
+    targetUrl.hostname.toLowerCase().includes('hinatasoul');
+  const entryOriginReferer = isCoempregosTarget
+    ? 'https://www.coempregos.com.br/'
+    : `${targetUrl.origin}/`;
   const redirectChain: EmbedRedirectHopDiagnostic[] = [];
 
   const attempt1 = await executeValidatedRedirectChain({
