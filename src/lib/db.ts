@@ -11,6 +11,7 @@ import type {
 } from '@/lib/types';
 import { planEpisodeSlotInsertion } from '@/lib/batch-import';
 import { type ExplicitSourceKind, normalizeExplicitSourceKind, validateHttpUrl } from '@/lib/video-sources';
+import { resolveVideoInputUrl } from '@/lib/r2-resolver';
 
 export interface PlayerEpisode {
   id: string;
@@ -397,7 +398,8 @@ export async function createEpisode(
   rawInput: EpisodeWriteInput,
   sqlOverride?: DiagnosticSqlTag
 ): Promise<PlayerEpisode> {
-  const input = sanitizeEpisodeInput(rawInput);
+  const resolvedRaw = await resolveEpisodeInputUrls(rawInput);
+  const input = sanitizeEpisodeInput(resolvedRaw);
   const id = generateEpisodeId();
   const sql = sqlOverride ?? (getSql() as unknown as DiagnosticSqlTag);
   const hasOpeningTimes =
@@ -568,6 +570,23 @@ export async function createEpisode(
   }
 }
 
+async function resolveEpisodeInputUrls(rawInput: EpisodeWriteInput): Promise<EpisodeWriteInput> {
+  const videoUrl = rawInput.video_url ? (await resolveVideoInputUrl(rawInput.video_url)).finalUrl : rawInput.video_url;
+  const videoUrl2 = rawInput.video_url_2 ? (await resolveVideoInputUrl(rawInput.video_url_2)).finalUrl : rawInput.video_url_2;
+  const videoUrl3 = rawInput.video_url_3 ? (await resolveVideoInputUrl(rawInput.video_url_3)).finalUrl : rawInput.video_url_3;
+  const videoUrl4 = rawInput.video_url_4 ? (await resolveVideoInputUrl(rawInput.video_url_4)).finalUrl : rawInput.video_url_4;
+  const videoUrl5 = rawInput.video_url_5 ? (await resolveVideoInputUrl(rawInput.video_url_5)).finalUrl : rawInput.video_url_5;
+
+  return {
+    ...rawInput,
+    video_url: videoUrl ?? rawInput.video_url,
+    video_url_2: videoUrl2,
+    video_url_3: videoUrl3,
+    video_url_4: videoUrl4,
+    video_url_5: videoUrl5,
+  };
+}
+
 export async function updateEpisode(
   id: string,
   rawInput: EpisodeWriteInput,
@@ -578,7 +597,8 @@ export async function updateEpisode(
     return null;
   }
 
-  const input = sanitizeEpisodeInput(rawInput);
+  const resolvedRaw = await resolveEpisodeInputUrls(rawInput);
+  const input = sanitizeEpisodeInput(resolvedRaw);
   const sql = sqlOverride ?? (getSql() as unknown as DiagnosticSqlTag);
   const preserveAdditionalSources =
     rawInput.video_url_2 === undefined &&

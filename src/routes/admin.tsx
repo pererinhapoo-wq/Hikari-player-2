@@ -80,6 +80,7 @@ import {
   normalizeVideoSource,
   validateHttpUrl,
 } from '@/lib/video-sources';
+import { extractPrefixFromPlayerricasName, isR2SignedUrl } from '@/lib/r2-resolver';
 
 export const Route = createFileRoute('/admin')({
   loader: async () => {
@@ -349,6 +350,14 @@ function AdminPage() {
     const embedHostMode = classifyEmbedHost(candidateUrl);
     const hasHashParams = hasUrlHashParams(candidateUrl);
     const referrerPolicy = getIframeReferrerPolicy(candidateUrl);
+    let detectedPrefix: string | null = null;
+    if (trimmed.toLowerCase().includes('playerricas.php')) {
+      try {
+        const parsed = new URL(trimmed);
+        detectedPrefix = extractPrefixFromPlayerricasName(parsed.searchParams.get('name'));
+      } catch {}
+    }
+    const isR2 = isR2SignedUrl(trimmed);
     return {
       trimmed,
       check,
@@ -357,6 +366,8 @@ function AdminPage() {
       embedHostMode,
       hasHashParams,
       referrerPolicy,
+      detectedPrefix,
+      isR2,
     };
   }, [form.video_url, form.source_kind]);
 
@@ -1497,6 +1508,16 @@ function AdminPage() {
                       </label>
 
                       <div className="flex items-center gap-2">
+                        {primarySourceInfo?.detectedPrefix && (
+                          <span className="text-[11px] font-mono text-cyan-300">
+                            Prefixo: {primarySourceInfo.detectedPrefix}
+                          </span>
+                        )}
+                        {primarySourceInfo?.isR2 && (
+                          <span className="text-[11px] font-mono text-amber-300" title="URL assinada do R2: prefixo verificado por tentativa ao salvar/testar">
+                            R2 Signed URL (tentativa automática)
+                          </span>
+                        )}
                         {primarySourceInfo?.detectedKind && (
                           <span className="text-[11px] font-mono text-emerald-300">
                             {primarySourceInfo.detectedKind}

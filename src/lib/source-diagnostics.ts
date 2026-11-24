@@ -15,6 +15,7 @@ import {
   type ExplicitSourceKind,
   validateHttpUrl,
 } from '@/lib/video-sources';
+import { resolveVideoInputUrl } from '@/lib/r2-resolver';
 
 export interface SourceTestInput {
   slot: 1 | 2 | 3 | 4 | 5;
@@ -288,8 +289,15 @@ export async function diagnoseVideoSource(
 ): Promise<SourceTestReport> {
   const fetchWithRedirects = deps.fetchWithRedirects ?? safeFetchWithRedirects;
   const label = input.label?.trim() || `Player ${input.slot}`;
-  const urlCheck = validateHttpUrl(input.url);
-  const detectedKind = detectSourceKind(input.url, input.kind);
+  let effectiveUrl = input.url;
+  try {
+    const resolved = await resolveVideoInputUrl(input.url);
+    effectiveUrl = resolved.finalUrl;
+  } catch {
+    // let validateHttpUrl handle error if resolution fails
+  }
+  const urlCheck = validateHttpUrl(effectiveUrl);
+  const detectedKind = detectSourceKind(effectiveUrl, input.kind);
 
   if (!urlCheck.valid || !urlCheck.normalizedUrl) {
     const invalidAttempt: SourceAttemptDiagnostic = {
