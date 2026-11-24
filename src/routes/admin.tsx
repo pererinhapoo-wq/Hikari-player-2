@@ -358,6 +358,7 @@ function AdminPage() {
       } catch {}
     }
     const isR2 = isR2SignedUrl(trimmed);
+    const isUnconfirmed = trimmed.includes('unconfirmed=1') || isR2;
     return {
       trimmed,
       check,
@@ -368,6 +369,7 @@ function AdminPage() {
       referrerPolicy,
       detectedPrefix,
       isR2,
+      isUnconfirmed,
     };
   }, [form.video_url, form.source_kind]);
 
@@ -1508,12 +1510,16 @@ function AdminPage() {
                       </label>
 
                       <div className="flex items-center gap-2">
-                        {primarySourceInfo?.detectedPrefix && (
+                        {primarySourceInfo?.isUnconfirmed ? (
+                          <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-1.5 py-0.5 rounded border border-amber-500/30">
+                            prefixo não confirmado
+                          </span>
+                        ) : primarySourceInfo?.detectedPrefix ? (
                           <span className="text-[11px] font-mono text-cyan-300">
                             Prefixo: {primarySourceInfo.detectedPrefix}
                           </span>
-                        )}
-                        {primarySourceInfo?.isR2 && (
+                        ) : null}
+                        {primarySourceInfo?.isR2 && !primarySourceInfo?.trimmed.includes('unconfirmed=1') && (
                           <span className="text-[11px] font-mono text-amber-300" title="URL assinada do R2: prefixo verificado por tentativa ao salvar/testar">
                             R2 Signed URL (tentativa automática)
                           </span>

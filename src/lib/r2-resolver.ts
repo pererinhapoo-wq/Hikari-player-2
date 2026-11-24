@@ -61,6 +61,7 @@ export interface R2ResolutionResult {
   finalUrl: string;
   prefix: string | null;
   isAttempt: boolean;
+  isConfirmed: boolean;
   cleanR2Url?: string;
 }
 
@@ -70,20 +71,24 @@ export async function resolveVideoInputUrl(
 ): Promise<R2ResolutionResult> {
   const trimmed = rawUrl.trim();
   if (!trimmed) {
-    return { finalUrl: trimmed, prefix: null, isAttempt: false };
+    return { finalUrl: trimmed, prefix: null, isAttempt: false, isConfirmed: true };
   }
 
   // 4) Se o texto colado for a URL do playerricas.php, usar o parse direto, sem tentativa
   if (trimmed.toLowerCase().includes('playerricas.php')) {
     let prefix: string | null = null;
+    let isConfirmed = !trimmed.includes('unconfirmed=1');
     try {
       const parsed = new URL(trimmed);
       const nameParam = parsed.searchParams.get('name');
       prefix = extractPrefixFromPlayerricasName(nameParam);
+      if (parsed.searchParams.get('unconfirmed') === '1') {
+        isConfirmed = false;
+      }
     } catch {
       // ignore
     }
-    return { finalUrl: trimmed, prefix, isAttempt: false };
+    return { finalUrl: trimmed, prefix, isAttempt: false, isConfirmed };
   }
 
   // 1) Cadastro por URL assinada do R2
@@ -103,7 +108,6 @@ export async function resolveVideoInputUrl(
       throw new Error('Nome do arquivo não encontrado na URL do R2.');
     }
 
-    // 2) & 5) Candidatos de prefixo, cache por host, máximo 6 tentativas
     const cachedPrefix = r2PrefixCache.get(r2Host);
     const candidates: string[] = [];
     if (cachedPrefix && KNOWN_PREFIXES.includes(cachedPrefix as any)) {
@@ -117,9 +121,11 @@ export async function resolveVideoInputUrl(
 
     let winningPrefix: string | null = null;
     let winningPlayerricasUrl = '';
+    let isConfirmed = false;
     let attemptsCount = 0;
 
-    // 3) Verificação obrigatória antes de gravar
+    // 1) A tentativa só aprova com HTTP 200 e corpo contendo "player" ou "EXTM3U".
+    // 403, 401, 429 e timeout não aprovam nem reprovam — a tentativa é descartada e passa para o próximo prefixo.
     for (const prefix of candidates) {
       if (attemptsCount >= 6) break;
       attemptsCount++;
@@ -128,35 +134,52 @@ export async function resolveVideoInputUrl(
       const candidatePlayerricasUrl = `https://anitube22.vip/playerricas.php?name=${encodeURIComponent(candidateName)}&url=${encodeURIComponent(cleanUrl)}`;
 
       try {
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 8000);
+
         const res = await fetchImpl(candidatePlayerricasUrl, {
           headers: {
             'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
           },
+          signal: controller.signal,
         });
+
+        clearTimeout(timeoutId);
 
         if (res.status === 200) {
           const text = await res.text();
           const lowerText = text.toLowerCase();
-          if (text.trim().length > 0 && !lowerText.includes('deleted') && !lowerText.includes('not found')) {
+          const hasDeleted = lowerText.includes('deleted') || lowerText.includes('not found');
+          const hasPlayerOrM3u = lowerText.includes('player') || lowerText.includes('extm3u');
+
+          if (text.trim().length > 0 && !hasDeleted && hasPlayerOrM3u) {
             winningPrefix = prefix;
             winningPlayerricasUrl = candidatePlayerricasUrl;
+            isConfirmed = true;
             r2PrefixCache.set(r2Host, prefix);
             break;
           }
         }
+        // Se 403, 401, 429, 404, ou 200 sem player/EXTM3U: descarta e continua para o próximo
       } catch {
-        // Falha de fetch neste candidato, continua
+        // Timeout ou erro de rede: descarta e continua para o próximo
       }
     }
 
+    // 2) Se nenhuma tentativa der 200, não gravar prefixo por dedução. Salvar a fonte assim mesmo, marcada como "prefixo não confirmado".
     if (!winningPrefix || !winningPlayerricasUrl) {
-      throw new Error('prefixo do arquivo não encontrado, cole a URL do playerricas.php');
+      const fallbackPrefix = cachedPrefix && KNOWN_PREFIXES.includes(cachedPrefix as any) ? cachedPrefix : 'apphd';
+      const fallbackName = `${fallbackPrefix}/${filename}`;
+      winningPlayerricasUrl = `https://anitube22.vip/playerricas.php?name=${encodeURIComponent(fallbackName)}&url=${encodeURIComponent(cleanUrl)}&unconfirmed=1`;
+      winningPrefix = fallbackPrefix;
+      isConfirmed = false;
     }
 
     return {
       finalUrl: winningPlayerricasUrl,
       prefix: winningPrefix,
       isAttempt: true,
+      isConfirmed,
       cleanR2Url: cleanUrl,
     };
   }
@@ -166,5 +189,5 @@ export async function resolveVideoInputUrl(
     throw new Error(check.error ?? 'URL inválida.');
   }
 
-  return { finalUrl: check.normalizedUrl, prefix: null, isAttempt: false };
+  return { finalUrl: check.normalizedUrl, prefix: null, isAttempt: false, isConfirmed: true };
 }
