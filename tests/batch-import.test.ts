@@ -235,6 +235,11 @@ describe('execução em série (100 itens, 400ms) e "Continuar de onde parou" ap
           return await processBatchItemServer(
             { ...item, save: true },
             {
+              validateDeps: {
+                embedAssertSafeUrl: passSafeUrl,
+                embedFetchImpl: async () =>
+                  new Response('<html><body>ok</body></html>', { status: 200 }),
+              },
               saveSource: async (episodeId, normalizedUrl) => {
                 const ep = store.get(episodeId);
                 if (!ep) {
@@ -309,7 +314,16 @@ describe('execução em série (100 itens, 400ms) e "Continuar de onde parou" ap
       shouldStop: () => job.lastProcessedIndex >= 2,
       processItem: async (item, idx) => {
         processedIndicesRun1.push(idx);
-        return await processBatchItemServer({ ...item, save: false });
+        return await processBatchItemServer(
+          { ...item, save: false },
+          {
+            validateDeps: {
+              embedAssertSafeUrl: passSafeUrl,
+              embedFetchImpl: async () =>
+                new Response('<html><body>ok</body></html>', { status: 200 }),
+            },
+          }
+        );
       },
       onItemComplete: (idx, report) => {
         const nextResults = [...job.results];
@@ -342,7 +356,16 @@ describe('execução em série (100 itens, 400ms) e "Continuar de onde parou" ap
       delayMs: 0,
       processItem: async (item, idx) => {
         processedIndicesRun2.push(idx);
-        return await processBatchItemServer({ ...item, save: false });
+        return await processBatchItemServer(
+          { ...item, save: false },
+          {
+            validateDeps: {
+              embedAssertSafeUrl: passSafeUrl,
+              embedFetchImpl: async () =>
+                new Response('<html><body>ok</body></html>', { status: 200 }),
+            },
+          }
+        );
       },
       onItemComplete: (idx, report) => {
         const nextResults = [...resumedJob.results];

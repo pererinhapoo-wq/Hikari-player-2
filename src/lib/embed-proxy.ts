@@ -13,6 +13,43 @@ export const MAX_EMBED_REDIRECTS = 3;
 export const EMBED_CHROME_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
+export const EMBED_NAVIGATION_HEADERS: Readonly<Record<string, string>> = {
+  'User-Agent': EMBED_CHROME_UA,
+  Accept:
+    'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8,application/signed-exchange;v=b3;q=0.7',
+  'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+  'sec-ch-ua': '"Google Chrome";v="131", "Chromium";v="131", "Not_A Brand";v="24"',
+  'sec-ch-ua-mobile': '?0',
+  'sec-ch-ua-platform': '"Windows"',
+  'sec-fetch-dest': 'document',
+  'sec-fetch-mode': 'navigate',
+  'sec-fetch-site': 'cross-site',
+  'upgrade-insecure-requests': '1',
+};
+
+export function buildEmbedRequestHeaders(referer?: string): Record<string, string> {
+  if (referer) {
+    return {
+      ...EMBED_NAVIGATION_HEADERS,
+      Referer: referer,
+    };
+  }
+  return { ...EMBED_NAVIGATION_HEADERS };
+}
+
+export function formatEmbedAttemptSequence(
+  redirectChain: readonly EmbedRedirectHopDiagnostic[]
+): string {
+  if (redirectChain.length === 0) return 'nenhuma';
+  return redirectChain
+    .map((hop, idx) => {
+      const mode = hop.authMode === 'chrome_ua_no_referer' ? 'sem Referer' : 'com Referer';
+      const statusText = hop.status !== null ? `HTTP ${hop.status}` : hop.error ?? 'erro';
+      return `#${idx + 1} ${hop.host} [${mode}]: ${statusText}`;
+    })
+    .join(' -> ');
+}
+
 export const EMBED_CACHE_CONTROL = 'public, s-maxage=300, stale-while-revalidate=900';
 
 const HOP_BY_HOP_HEADERS = new Set([
@@ -98,6 +135,7 @@ function buildErrorResponse(status: number, reason: string, title?: string): Res
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
       'Cache-Control': 'no-store',
+      'CDN-Cache-Control': 'no-store',
       'Access-Control-Allow-Origin': '*',
     },
   });
@@ -472,11 +510,7 @@ export async function resolveEmbedProxy(
 
   const attempt1 = await executeValidatedRedirectChain({
     startUrl: targetUrl.toString(),
-    headers: {
-      'User-Agent': EMBED_CHROME_UA,
-      Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      Referer: entryOriginReferer,
-    },
+    headers: buildEmbedRequestHeaders(entryOriginReferer),
     authMode: 'chrome_ua_with_referer',
     maxRedirects: MAX_EMBED_REDIRECTS,
     assertSafeUrl,
@@ -485,8 +519,13 @@ export async function resolveEmbedProxy(
   });
 
   if (attempt1.kind === 'error') {
+    const attemptSummary = formatEmbedAttemptSequence(redirectChain);
     return {
-      response: buildErrorResponse(attempt1.httpStatus, attempt1.reason, attempt1.title),
+      response: buildErrorResponse(
+        attempt1.httpStatus,
+        `${attempt1.reason} (${attemptSummary})`,
+        attempt1.title
+      ),
       redirectChain,
       successfulStrategy: null,
       finalUrl: null,
@@ -503,10 +542,7 @@ export async function resolveEmbedProxy(
 
     const attempt2 = await executeValidatedRedirectChain({
       startUrl: finalParsed.toString(),
-      headers: {
-        'User-Agent': EMBED_CHROME_UA,
-        Accept: 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
-      },
+      headers: buildEmbedRequestHeaders(),
       authMode: 'chrome_ua_no_referer',
       maxRedirects: remainingRedirects,
       assertSafeUrl,
@@ -515,8 +551,13 @@ export async function resolveEmbedProxy(
     });
 
     if (attempt2.kind === 'error') {
+      const attemptSummary = formatEmbedAttemptSequence(redirectChain);
       return {
-        response: buildErrorResponse(attempt2.httpStatus, attempt2.reason, attempt2.title),
+        response: buildErrorResponse(
+          attempt2.httpStatus,
+          `${attempt2.reason} (${attemptSummary})`,
+          attempt2.title
+        ),
         redirectChain,
         successfulStrategy: null,
         finalUrl: null,
@@ -530,10 +571,11 @@ export async function resolveEmbedProxy(
 
   if (!finalUpstream.ok) {
     await cancelBodySafely(finalUpstream);
+    const attemptSummary = formatEmbedAttemptSequence(redirectChain);
     const reason =
       successfulStrategy === 'chrome_ua_no_referer'
-        ? `Origem respondeu HTTP ${finalUpstream.status} mesmo após fallback sem Referer.`
-        : `Origem respondeu HTTP ${finalUpstream.status}.`;
+        ? `Origem respondeu HTTP ${finalUpstream.status} mesmo após fallback sem Referer (${attemptSummary}).`
+        : `Origem respondeu HTTP ${finalUpstream.status} (${attemptSummary}).`;
     return {
       response: buildErrorResponse(502, reason, 'Erro ao carregar embed'),
       redirectChain,

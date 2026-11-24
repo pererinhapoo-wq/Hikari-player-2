@@ -1,4 +1,4 @@
-import { resolveEmbedProxy } from '@/lib/embed-proxy';
+import { formatEmbedAttemptSequence, resolveEmbedProxy } from '@/lib/embed-proxy';
 import { safeFetchWithRedirects } from '@/lib/ssrf';
 import { BROWSER_UA, resolveUpstreamReferer } from '@/lib/stream-proxy';
 import type {
@@ -189,27 +189,30 @@ export function classifySourceDiagnostic(
       const faText = embedDiagnostic.hasFrameAncestors
         ? `frame-ancestors presente (${embedDiagnostic.frameAncestorsValue})`
         : 'frame-ancestors ausente';
+      const attemptSequence = formatEmbedAttemptSequence(embedDiagnostic.redirectChain);
       if (embedDiagnostic.embedProxyOk) {
         const strategyText =
           embedDiagnostic.successfulStrategy === 'chrome_ua_no_referer'
             ? 'UA Chrome sem Referer (fallback após 403)'
             : 'UA Chrome + Referer';
-        const chainSummary =
-          embedDiagnostic.redirectChain.length > 0
-            ? embedDiagnostic.redirectChain
-                .map((h) => `${h.host}:${h.status ?? 'erro'}`)
-                .join(' -> ')
-            : 'sem saltos';
         return {
           verdict: 'proxy_necessario',
           verdictLabel: 'proxy necessário',
-          verdictReason: `Host exige /api/embed (fetch direto: ${directStatusText}; ${faText}; /api/embed: HTTP ${embedDiagnostic.embedProxyStatus} via ${strategyText}; saltos: ${chainSummary}).`,
+          verdictReason: `Host exige /api/embed (fetch direto: ${directStatusText}; ${faText}; /api/embed: HTTP ${embedDiagnostic.embedProxyStatus} via ${strategyText}; tentativas: ${attemptSequence}).`,
         };
       }
+      const errorDetail =
+        embedDiagnostic.embedProxyError ?? `HTTP ${embedDiagnostic.embedProxyStatus ?? 'erro'}`;
+      const includesSequence =
+        embedDiagnostic.redirectChain.length > 0 && errorDetail.includes(attemptSequence);
+      const sequenceSuffix =
+        embedDiagnostic.redirectChain.length > 0 && !includesSequence
+          ? `; tentativas: ${attemptSequence}`
+          : '';
       return {
         verdict: 'bloqueado',
         verdictLabel: 'bloqueado',
-        verdictReason: `Host exige /api/embed, mas /api/embed falhou (${embedDiagnostic.embedProxyError ?? `HTTP ${embedDiagnostic.embedProxyStatus ?? 'erro'}`}). Fetch direto: ${directStatusText}; ${faText}.`,
+        verdictReason: `Host exige /api/embed, mas /api/embed falhou (${errorDetail}${sequenceSuffix}). Fetch direto: ${directStatusText}; ${faText}.`,
       };
     }
 
