@@ -1,4 +1,9 @@
-import { formatEmbedAttemptSequence, resolveEmbedProxy } from '@/lib/embed-proxy';
+import {
+  CLOUDFLARE_SERVER_BLOCK_MESSAGE,
+  formatEmbedAttemptSequence,
+  isCloudflareBlockedBody,
+  resolveEmbedProxy,
+} from '@/lib/embed-proxy';
 import { safeFetchWithRedirects } from '@/lib/ssrf';
 import { BROWSER_UA, resolveUpstreamReferer } from '@/lib/stream-proxy';
 import type {
@@ -34,6 +39,7 @@ interface InternalAttemptResult {
   diagnostic: SourceAttemptDiagnostic;
   cspHeader: string | null;
   xFrameOptions: string | null;
+  cloudflareBlocked: boolean;
 }
 
 function extractFrameAncestorsDirective(cspHeader: string | null): string | null {
@@ -116,6 +122,66 @@ async function readFirstLineSafely(response: Response, contentType: string | nul
   }
 }
 
+async function readTextSnippetSafely(
+  response: Response,
+  contentType: string | null,
+  maxBytes = 32_768
+): Promise<string | null> {
+  const lowerCt = (contentType ?? '').toLowerCase();
+  const isLikelyBinary =
+    lowerCt.startsWith('video/') ||
+    lowerCt.startsWith('audio/') ||
+    lowerCt.startsWith('image/') ||
+    lowerCt === 'application/octet-stream';
+
+  if (isLikelyBinary) {
+    if (response.body) {
+      try {
+        await response.body.cancel();
+      } catch {
+        // ignore
+      }
+    }
+    return null;
+  }
+
+  try {
+    let bytes: Uint8Array;
+    if (response.body) {
+      const reader = response.body.getReader();
+      const chunks: Uint8Array[] = [];
+      let total = 0;
+      while (total < maxBytes) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (value && value.byteLength > 0) {
+          chunks.push(value);
+          total += value.byteLength;
+        }
+      }
+      try {
+        await reader.cancel();
+      } catch {
+        // Ignora erro de cancelamento
+      }
+      bytes = new Uint8Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        bytes.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+    } else {
+      const buf = new Uint8Array(await response.arrayBuffer());
+      bytes = buf.slice(0, maxBytes);
+    }
+
+    if (bytes.byteLength === 0) return null;
+    return new TextDecoder('utf-8', { fatal: false }).decode(bytes);
+  } catch {
+    return null;
+  }
+}
+
 async function runSingleAttempt(
   url: string,
   headers: Record<string, string>,
@@ -131,12 +197,15 @@ async function runSingleAttempt(
     const contentType = response.headers.get('content-type');
     const cspHeader = response.headers.get('content-security-policy');
     const xFrameOptions = response.headers.get('x-frame-options');
-    const firstLine = await readFirstLineSafely(response, contentType);
-    if (response.status !== 200 && response.body) {
-      try {
-        await response.body.cancel();
-      } catch {
-        // Ignora erro ao descartar corpo
+    let firstLine: string | null = null;
+    let cloudflareBlocked = false;
+
+    if (response.status === 200) {
+      firstLine = await readFirstLineSafely(response, contentType);
+    } else {
+      const errSnippet = await readTextSnippetSafely(response, contentType);
+      if (errSnippet && isCloudflareBlockedBody(errSnippet)) {
+        cloudflareBlocked = true;
       }
     }
     return {
@@ -152,6 +221,7 @@ async function runSingleAttempt(
       },
       cspHeader,
       xFrameOptions,
+      cloudflareBlocked,
     };
   } catch (err) {
     return {
@@ -167,6 +237,7 @@ async function runSingleAttempt(
       },
       cspHeader: null,
       xFrameOptions: null,
+      cloudflareBlocked: false,
     };
   }
 }
@@ -176,7 +247,8 @@ export function classifySourceDiagnostic(
   noHeaders: SourceAttemptDiagnostic,
   withHeaders: SourceAttemptDiagnostic,
   targetOrigin: string,
-  embedDiagnostic?: EmbedHostDiagnostic
+  embedDiagnostic?: EmbedHostDiagnostic,
+  cloudflareServerBlocked = false
 ): {
   verdict: SourceTestVerdict;
   verdictLabel: 'direto ok' | 'proxy necessário' | 'bloqueado';
@@ -199,6 +271,16 @@ export function classifySourceDiagnostic(
           verdict: 'proxy_necessario',
           verdictLabel: 'proxy necessário',
           verdictReason: `Host exige /api/embed (fetch direto: ${directStatusText}; ${faText}; /api/embed: HTTP ${embedDiagnostic.embedProxyStatus} via ${strategyText}; tentativas: ${attemptSequence}).`,
+        };
+      }
+      if (
+        cloudflareServerBlocked ||
+        embedDiagnostic.embedProxyError === CLOUDFLARE_SERVER_BLOCK_MESSAGE
+      ) {
+        return {
+          verdict: 'bloqueado',
+          verdictLabel: 'bloqueado',
+          verdictReason: CLOUDFLARE_SERVER_BLOCK_MESSAGE,
         };
       }
       const errorDetail =
@@ -224,6 +306,13 @@ export function classifySourceDiagnostic(
           embedDiagnostic?.hostCategory === 'direct'
             ? 'Host em EMBED_DIRECT_HOSTS reproduz em iframe direto (sem /api/embed) e respondeu 2xx.'
             : 'Fonte iframe não depende de CORS/proxy e respondeu 2xx.',
+      };
+    }
+    if (cloudflareServerBlocked) {
+      return {
+        verdict: 'direto_ok',
+        verdictLabel: 'direto ok',
+        verdictReason: CLOUDFLARE_SERVER_BLOCK_MESSAGE,
       };
     }
     return {
@@ -435,12 +524,18 @@ export async function diagnoseVideoSource(
     };
   }
 
+  const cloudflareServerBlocked =
+    noHeadersRes.cloudflareBlocked ||
+    withHeadersRes.cloudflareBlocked ||
+    embedDiagnostic?.embedProxyError === CLOUDFLARE_SERVER_BLOCK_MESSAGE;
+
   const classification = classifySourceDiagnostic(
     detectedKind,
     noHeadersRes.diagnostic,
     withHeadersRes.diagnostic,
     targetUrl.origin,
-    embedDiagnostic
+    embedDiagnostic,
+    cloudflareServerBlocked
   );
 
   return {

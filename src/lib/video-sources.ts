@@ -33,11 +33,9 @@ const MAX_URL_LENGTH = 2048;
 
 export const EMBED_PROXIED_HOSTS = [
   'allappinc.com',
-  'anitube22.vip',
   'anitube.biz',
   'anitube.zip',
   'anitube.ninja',
-  'hinatasoul.com',
 ] as const;
 export const EMBED_ALLOWED_FINAL_HOSTS = [
   'allappinc.com',
@@ -54,8 +52,14 @@ export const EMBED_ALLOWED_FINAL_HOSTS = [
 export const EMBED_DIRECT_HOSTS = [
   'animesdigital.org',
   'filevideo1.com',
+  'anitube22.vip',
+  'hinatasoul.com',
 ] as const;
 export const EMBED_NO_REFERRER_HOSTS = ['filevideo1.com'] as const;
+
+export const DIRECT_IFRAME_ALLOW = 'autoplay; fullscreen; encrypted-media';
+export const DIRECT_IFRAME_SANDBOX =
+  'allow-scripts allow-same-origin allow-presentation allow-popups';
 
 function matchesHostList(hostname: string, allowlist: readonly string[]): boolean {
   const lower = hostname.toLowerCase().replace(/\.+$/, '');
@@ -119,6 +123,26 @@ export function buildIframePlayUrl(rawUrl: string): string {
     return `/api/embed?u=${encodeURIComponent(rawUrl)}`;
   }
   return rawUrl;
+}
+
+export function getIframeElementProps(rawUrl: string): {
+  referrerPolicy: 'no-referrer' | 'no-referrer-when-downgrade';
+  allow: string;
+  sandbox?: string;
+} {
+  const referrerPolicy = getIframeReferrerPolicy(rawUrl);
+  const isDirectHost = classifyEmbedHost(rawUrl) === 'direct';
+  if (isDirectHost) {
+    return {
+      referrerPolicy,
+      allow: DIRECT_IFRAME_ALLOW,
+      sandbox: DIRECT_IFRAME_SANDBOX,
+    };
+  }
+  return {
+    referrerPolicy,
+    allow: 'autoplay; fullscreen; picture-in-picture; encrypted-media',
+  };
 }
 
 export function isPlayerricasSource(rawUrl: string): boolean {

@@ -528,7 +528,7 @@ describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () =
 
     // Fonte iframe exige /api/embed para proxied host
     const iframeReport = await diagnoseVideoSource(
-      { slot: 5, url: 'https://www.anitube22.vip/playerricas.php?name=1.mp4' },
+      { slot: 5, url: 'https://anitube.biz/playerricas.php?name=1.mp4' },
       {
         fetchWithRedirects: async (url) => ({
           finalUrl: url,

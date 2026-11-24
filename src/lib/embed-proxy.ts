@@ -9,6 +9,12 @@ import {
 export const MAX_EMBED_BODY_BYTES = 1024 * 1024; // 1 MB
 export const EMBED_FETCH_TIMEOUT_MS = 10_000;
 export const MAX_EMBED_REDIRECTS = 3;
+export const CLOUDFLARE_SERVER_BLOCK_MESSAGE =
+  'Host bloqueia acesso de servidor — abrindo direto no navegador';
+
+export function isCloudflareBlockedBody(bodyText: string): boolean {
+  return bodyText.toLowerCase().includes('why have i been blocked');
+}
 
 export const EMBED_CHROME_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -536,8 +542,13 @@ export async function resolveEmbedProxy(
   let finalParsed = attempt1.finalUrl;
   let successfulStrategy: EmbedAuthStrategy = 'chrome_ua_with_referer';
 
+  let attempt1CloudflareBlocked = false;
+
   if (finalUpstream.status === 403) {
-    await cancelBodySafely(finalUpstream);
+    const errBody1 = await readBodyWithinLimit(finalUpstream, 65_536);
+    if (errBody1.ok && isCloudflareBlockedBody(errBody1.text)) {
+      attempt1CloudflareBlocked = true;
+    }
     const remainingRedirects = Math.max(0, MAX_EMBED_REDIRECTS - attempt1.redirectsUsed);
 
     const attempt2 = await executeValidatedRedirectChain({
@@ -570,7 +581,21 @@ export async function resolveEmbedProxy(
   }
 
   if (!finalUpstream.ok) {
-    await cancelBodySafely(finalUpstream);
+    const errBody = await readBodyWithinLimit(finalUpstream, 65_536);
+    const cloudflareBlocked =
+      attempt1CloudflareBlocked || (errBody.ok && isCloudflareBlockedBody(errBody.text));
+    if (cloudflareBlocked) {
+      return {
+        response: buildErrorResponse(
+          502,
+          CLOUDFLARE_SERVER_BLOCK_MESSAGE,
+          CLOUDFLARE_SERVER_BLOCK_MESSAGE
+        ),
+        redirectChain,
+        successfulStrategy: null,
+        finalUrl: finalParsed.toString(),
+      };
+    }
     const attemptSummary = formatEmbedAttemptSequence(redirectChain);
     const reason =
       successfulStrategy === 'chrome_ua_no_referer'

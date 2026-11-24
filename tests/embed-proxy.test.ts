@@ -5,12 +5,18 @@ import {
   EMBED_DIRECT_HOSTS,
   EMBED_NO_REFERRER_HOSTS,
   buildIframePlayUrl,
+  getIframeElementProps,
   getIframeReferrerPolicy,
   buildIframeSrcWithFreshTime,
   collectEpisodeSources,
   normalizeVideoSource,
 } from '@/lib/video-sources';
-import { handleEmbedRequest, resolveEmbedProxy } from '@/lib/embed-proxy';
+import {
+  CLOUDFLARE_SERVER_BLOCK_MESSAGE,
+  handleEmbedRequest,
+  resolveEmbedProxy,
+} from '@/lib/embed-proxy';
+import { resolveUpstreamReferer } from '@/lib/stream-proxy';
 import { diagnoseVideoSource } from '@/lib/source-diagnostics';
 
 function getHeaderVal(headers: Headers | Record<string, string> | Array<[string, string]>, name: string): string | undefined {
@@ -29,11 +35,9 @@ describe('Part A: allowlists separadas, buildIframePlayUrl e prioridade de fonte
   it('define EMBED_PROXIED_HOSTS, EMBED_ALLOWED_FINAL_HOSTS e EMBED_DIRECT_HOSTS conforme especificação', () => {
     expect([...EMBED_PROXIED_HOSTS]).toEqual([
       'allappinc.com',
-      'anitube22.vip',
       'anitube.biz',
       'anitube.zip',
       'anitube.ninja',
-      'hinatasoul.com',
     ]);
     expect([...EMBED_ALLOWED_FINAL_HOSTS]).toEqual([
       'allappinc.com',
@@ -50,15 +54,23 @@ describe('Part A: allowlists separadas, buildIframePlayUrl e prioridade de fonte
     expect([...EMBED_DIRECT_HOSTS]).toEqual([
       'animesdigital.org',
       'filevideo1.com',
+      'anitube22.vip',
+      'hinatasoul.com',
     ]);
     expect([...EMBED_NO_REFERRER_HOSTS]).toEqual(['filevideo1.com']);
   });
 
-  it('monta URL direta para EMBED_DIRECT_HOSTS/outros e /api/embed?u=... para EMBED_PROXIED_HOSTS', () => {
-    const anitubeUrl = 'https://anitube22.vip/playerricas.php?id=123&time=1000';
-    expect(buildIframePlayUrl(anitubeUrl)).toBe(
-      `/api/embed?u=${encodeURIComponent(anitubeUrl)}`
-    );
+  it('monta URL direta crua para EMBED_DIRECT_HOSTS (incluindo anitube22.vip e hinatasoul.com com e sem www) e /api/embed?u=... para EMBED_PROXIED_HOSTS', () => {
+    const anitubeUrl = 'https://anitube22.vip/playerricas.php?id=589829&time=1000';
+    expect(buildIframePlayUrl(anitubeUrl)).toBe(anitubeUrl);
+    const wwwAnitubeUrl = 'https://www.anitube22.vip/playerricas.php?id=589829';
+    expect(buildIframePlayUrl(wwwAnitubeUrl)).toBe(wwwAnitubeUrl);
+
+    const hinataUrl = 'https://hinatasoul.com/embed/ep01';
+    expect(buildIframePlayUrl(hinataUrl)).toBe(hinataUrl);
+    const wwwHinataUrl = 'https://www.hinatasoul.com/embed/ep01';
+    expect(buildIframePlayUrl(wwwHinataUrl)).toBe(wwwHinataUrl);
+
     expect(buildIframePlayUrl('https://animesdigital.org/embed/abc')).toBe(
       'https://animesdigital.org/embed/abc'
     );
@@ -72,6 +84,29 @@ describe('Part A: allowlists separadas, buildIframePlayUrl e prioridade de fonte
     const allappUrl = 'https://allappinc.com/embed/ep-1?v=2';
     expect(buildIframePlayUrl(allappUrl)).toBe(
       `/api/embed?u=${encodeURIComponent(allappUrl)}`
+    );
+    const bizUrl = 'https://anitube.biz/playerricas.php?id=1';
+    expect(buildIframePlayUrl(bizUrl)).toBe(
+      `/api/embed?u=${encodeURIComponent(bizUrl)}`
+    );
+  });
+
+  it('configura atributos de iframe direto com referrerPolicy, allow e sandbox compatíveis com player e mantém Referer coempregos no mapa do stream proxy', () => {
+    expect(getIframeElementProps('https://anitube22.vip/playerricas.php?id=589829')).toEqual({
+      referrerPolicy: 'no-referrer-when-downgrade',
+      allow: 'autoplay; fullscreen; encrypted-media',
+      sandbox: 'allow-scripts allow-same-origin allow-presentation allow-popups',
+    });
+    expect(getIframeElementProps('https://www.hinatasoul.com/embed/ep01')).toEqual({
+      referrerPolicy: 'no-referrer-when-downgrade',
+      allow: 'autoplay; fullscreen; encrypted-media',
+      sandbox: 'allow-scripts allow-same-origin allow-presentation allow-popups',
+    });
+    expect(resolveUpstreamReferer(new URL('https://anitube22.vip/stream/ep.m3u8'))).toBe(
+      'https://www.coempregos.com.br/'
+    );
+    expect(resolveUpstreamReferer(new URL('https://www.hinatasoul.com/stream/ep.m3u8'))).toBe(
+      'https://www.coempregos.com.br/'
     );
   });
 
@@ -146,7 +181,7 @@ describe('Part B: /api/embed, redirecionamentos validados, Referer da entrada e 
   it('segue até 3 saltos dentro de EMBED_ALLOWED_FINAL_HOSTS enviando Referer coempregos para anitube, sem Origin, e remove Set-Cookie/CSP/XFO', async () => {
     const fetchedCalls: Array<{ url: string; referer?: string; origin?: string; ua?: string }> = [];
     const req = new Request(
-      `https://app.test/api/embed?u=${encodeURIComponent('https://anitube22.vip/playerricas.php?id=589829')}`,
+      `https://app.test/api/embed?u=${encodeURIComponent('https://anitube.biz/playerricas.php?id=589829')}`,
       { headers: { Origin: 'https://meuplayer.vercel.app' } }
     );
 
@@ -187,7 +222,7 @@ describe('Part B: /api/embed, redirecionamentos validados, Referer da entrada e 
   it('envia cabeçalhos completos de navegação nas duas tentativas, faz fallback sem Referer após 403 e retorna 502 sem cache se ambos derem 403', async () => {
     const capturedHeaders: Array<Record<string, string>> = [];
     const req = new Request(
-      `https://app.test/api/embed?u=${encodeURIComponent('https://anitube22.vip/playerricas.php?id=589829')}`
+      `https://app.test/api/embed?u=${encodeURIComponent('https://anitube.biz/playerricas.php?id=589829')}`
     );
 
     const mockFetchBoth403 = async (_input: RequestInfo | URL, init?: RequestInit) => {
@@ -263,14 +298,34 @@ describe('Part B: /api/embed, redirecionamentos validados, Referer da entrada e 
     expect(resultFallbackOk.successfulStrategy).toBe('chrome_ua_no_referer');
     expect(resultFallbackOk.redirectChain.map((h) => h.status)).toEqual([403, 200]);
   });
+
+  it('substitui erro genérico por mensagem específica quando resposta contém "Why have I been blocked"', async () => {
+    const req = new Request(
+      `https://app.test/api/embed?u=${encodeURIComponent('https://anitube.biz/playerricas.php?id=589829')}`
+    );
+
+    const res = await handleEmbedRequest(req, {
+      fetchImpl: (async () =>
+        new Response('<html><head><title>Attention Required! | Cloudflare</title></head><body><h1>Sorry, you have been blocked</h1><h2>Why have I been blocked?</h2></body></html>', {
+          status: 403,
+          headers: { 'Content-Type': 'text/html; charset=utf-8' },
+        })) as any,
+      assertSafeUrl: async (raw) => new URL(raw),
+    });
+
+    expect(res.status).toBe(502);
+    const html = await res.text();
+    expect(html).toContain(CLOUDFLARE_SERVER_BLOCK_MESSAGE);
+    expect(html.toLowerCase()).not.toContain('erro ao carregar embed');
+  });
 });
 
 describe('Part C: diagnóstico "Testar fonte" com cadeia de saltos e estratégia vencedora', () => {
-  it('reporta proxy necessário e /api/embed ok para anitube22.vip/playerricas.php', async () => {
+  it('reporta proxy necessário e /api/embed ok para host em EMBED_PROXIED_HOSTS (anitube.biz)', async () => {
     const report = await diagnoseVideoSource(
       {
         slot: 1,
-        url: 'https://anitube22.vip/playerricas.php?id=589829',
+        url: 'https://anitube.biz/playerricas.php?id=589829',
       },
       {
         fetchWithRedirects: async (url) => ({
@@ -299,7 +354,7 @@ describe('Part C: diagnóstico "Testar fonte" com cadeia de saltos e estratégia
     const report = await diagnoseVideoSource(
       {
         slot: 1,
-        url: 'https://anitube22.vip/playerricas.php?id=589829',
+        url: 'https://anitube.biz/playerricas.php?id=589829',
       },
       {
         fetchWithRedirects: async (url) => ({
@@ -325,7 +380,34 @@ describe('Part C: diagnóstico "Testar fonte" com cadeia de saltos e estratégia
       ['chrome_ua_with_referer', 403],
       ['chrome_ua_no_referer', 403],
     ]);
-    expect(report.verdictReason).toContain('#1 anitube22.vip [com Referer]: HTTP 403');
-    expect(report.verdictReason).toContain('#2 anitube22.vip [sem Referer]: HTTP 403');
+    expect(report.verdictReason).toContain('#1 anitube.biz [com Referer]: HTTP 403');
+    expect(report.verdictReason).toContain('#2 anitube.biz [sem Referer]: HTTP 403');
+  });
+
+  it('para anitube22.vip e hinatasoul.com com corpo "Why have I been blocked", retorna mensagem de abertura direta no navegador sem "erro ao carregar embed"', async () => {
+    const report = await diagnoseVideoSource(
+      {
+        slot: 1,
+        url: 'https://anitube22.vip/playerricas.php?id=589829',
+      },
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(
+            '<html><body><h1>Sorry, you have been blocked</h1><h2>Why have I been blocked?</h2></body></html>',
+            {
+              status: 403,
+              headers: { 'Content-Type': 'text/html; charset=utf-8' },
+            }
+          ),
+        }),
+      }
+    );
+
+    expect(report.detectedKind).toBe('iframe');
+    expect(report.embedDiagnostic?.hostCategory).toBe('direct');
+    expect(report.verdict).toBe('direto_ok');
+    expect(report.verdictReason).toBe('Host bloqueia acesso de servidor — abrindo direto no navegador');
+    expect(report.verdictReason.toLowerCase()).not.toContain('erro ao carregar embed');
   });
 });

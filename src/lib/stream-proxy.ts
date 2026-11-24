@@ -10,6 +10,7 @@ export const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
 const DEFAULT_MAXIMAIMG_REFERER = 'https://api.anivideo.net/';
+const DEFAULT_COEMPREGOS_REFERER = 'https://www.coempregos.com.br/';
 const EXTM3U_BYTES = [0x23, 0x45, 0x58, 0x54, 0x4d, 0x33, 0x55] as const; // "#EXTM3U"
 const MAX_PEEK_BYTES = 512;
 
@@ -23,6 +24,11 @@ export function resolveUpstreamReferer(
   const rules = new Map<string, string>([
     ['maximaimg.online', maximaimgReferer?.trim() || DEFAULT_MAXIMAIMG_REFERER],
     ['mywallpaper-4k-image.net', ''],
+    ['anitube22.vip', DEFAULT_COEMPREGOS_REFERER],
+    ['anitube.biz', DEFAULT_COEMPREGOS_REFERER],
+    ['anitube.zip', DEFAULT_COEMPREGOS_REFERER],
+    ['anitube.ninja', DEFAULT_COEMPREGOS_REFERER],
+    ['hinatasoul.com', DEFAULT_COEMPREGOS_REFERER],
   ]);
 
   const rawMap = refererMapJson?.trim();

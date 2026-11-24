@@ -3,7 +3,9 @@ import {
   isR2SignedUrl,
   cleanR2SignedUrl,
   extractFilenameFromPath,
+  extractPlayerricasIframeFromHtml,
   extractPrefixFromPlayerricasName,
+  resolvePrefixFromEpisodePage,
   resolveVideoInputUrl,
 } from '@/lib/r2-resolver';
 
@@ -29,9 +31,9 @@ describe('R2 Resolver and Prefix Verification', () => {
 
   it('discards 403, 401, 429, timeouts and approves only on 200 with player or EXTM3U', async () => {
     const signed = 'https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/ziphonec/583375.mp4?X-Amz-Signature=abc';
-    
+
     let callCount = 0;
-    const fetchMock = vi.fn().mockImplementation(async (url: string) => {
+    const fetchMock = vi.fn().mockImplementation(async () => {
       callCount++;
       if (callCount === 1) {
         // apphd -> 403 (should discard, not fail)
@@ -39,7 +41,7 @@ describe('R2 Resolver and Prefix Verification', () => {
       }
       if (callCount === 2) {
         // appsd -> 200 with player content
-      return new Response('<html><body>player loaded successfully</body></html>', { status: 200 });
+        return new Response('<html><body>player loaded successfully</body></html>', { status: 200 });
       }
       return new Response('Not Found', { status: 404 });
     });
@@ -50,13 +52,56 @@ describe('R2 Resolver and Prefix Verification', () => {
     expect(result.isAttempt).toBe(true);
   });
 
-  it('saves source as unconfirmed when no attempt gives 200 with player/EXTM3U', async () => {
-    const signed = 'https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/ziphonec/999999.mp4?X-Amz-Signature=abc';
+  it('nunca aprova ou grava prefixo apphd quando nenhuma tentativa retorna 200', async () => {
+    const signed = 'https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/ziphonec/589829.mp4?X-Amz-Signature=abc';
 
     const fetchMock = vi.fn().mockResolvedValue(new Response('Forbidden', { status: 403 }));
 
     const result = await resolveVideoInputUrl(signed, fetchMock);
     expect(result.isConfirmed).toBe(false);
-    expect(result.finalUrl).toContain('unconfirmed=1');
+    expect(result.prefix).toBeNull();
+    expect(result.finalUrl).toBe(
+      'https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/ziphonec/589829.mp4'
+    );
+    expect(result.finalUrl).not.toContain('apphd');
+  });
+
+  it('extrai prefixo do src do iframe da página do episódio e só confirma quando responde 200', async () => {
+    const html =
+      '<html><body><iframe src="https://anitube22.vip/playerricas.php?name=appsd/589829.mp4&amp;url=https://r2.example/589829.mp4"></iframe></body></html>';
+    expect(extractPlayerricasIframeFromHtml(html)).toBe(
+      'https://anitube22.vip/playerricas.php?name=appsd/589829.mp4&url=https://r2.example/589829.mp4'
+    );
+
+    const confirmed = await resolvePrefixFromEpisodePage(
+      'https://www.anitube22.vip/episodio/589829',
+      (async (url: string) => {
+        if (url.includes('episodio/589829')) {
+          return new Response(html, { status: 200 });
+        }
+        return new Response('<html><body>player ok</body></html>', { status: 200 });
+      }) as any
+    );
+    expect(confirmed).toEqual({
+      playerricasUrl:
+        'https://anitube22.vip/playerricas.php?name=appsd/589829.mp4&url=https://r2.example/589829.mp4',
+      prefix: 'appsd',
+      isConfirmed: true,
+    });
+
+    const deniedOn403 = await resolvePrefixFromEpisodePage(
+      'https://www.anitube22.vip/episodio/589829',
+      (async (url: string) => {
+        if (url.includes('episodio/589829')) {
+          return new Response(html, { status: 200 });
+        }
+        return new Response('Why have I been blocked', { status: 403 });
+      }) as any
+    );
+    expect(deniedOn403).toEqual({
+      playerricasUrl: null,
+      prefix: null,
+      isConfirmed: false,
+    });
   });
 });

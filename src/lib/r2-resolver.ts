@@ -57,6 +57,101 @@ export function extractPrefixFromPlayerricasName(nameParam: string | null): stri
   return KNOWN_PREFIXES.includes(prefix as any) ? prefix : null;
 }
 
+export function extractPlayerricasIframeFromHtml(html: string): string | null {
+  const iframeRegex = /<iframe\b[^>]*\bsrc\s*=\s*(?:"([^"]+)"|'([^']+)'|([^\s>]+))/gi;
+  let match: RegExpExecArray | null;
+  while ((match = iframeRegex.exec(html)) !== null) {
+    const rawSrc = (match[1] ?? match[2] ?? match[3] ?? '').replace(/&amp;/g, '&').trim();
+    if (!rawSrc) continue;
+    if (rawSrc.toLowerCase().includes('playerricas.php')) {
+      return rawSrc;
+    }
+  }
+  return null;
+}
+
+export async function confirmPlayerricasPrefixUrl(
+  playerricasUrl: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<{ confirmed: boolean; prefix: string | null }> {
+  let prefix: string | null = null;
+  try {
+    const parsed = new URL(playerricasUrl);
+    prefix = extractPrefixFromPlayerricasName(parsed.searchParams.get('name'));
+  } catch {
+    return { confirmed: false, prefix: null };
+  }
+
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const res = await fetchImpl(playerricasUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (res.status !== 200) {
+      return { confirmed: false, prefix: null };
+    }
+
+    const text = await res.text();
+    const lowerText = text.toLowerCase();
+    const hasDeleted = lowerText.includes('deleted') || lowerText.includes('not found');
+    const hasPlayerOrM3u = lowerText.includes('player') || lowerText.includes('extm3u');
+    if (text.trim().length > 0 && !hasDeleted && hasPlayerOrM3u) {
+      return { confirmed: true, prefix };
+    }
+  } catch {
+    // Non-200, timeout, or network failure: never approve prefix
+  }
+
+  return { confirmed: false, prefix: null };
+}
+
+export async function resolvePrefixFromEpisodePage(
+  episodePageUrl: string,
+  fetchImpl: typeof fetch = fetch
+): Promise<{ playerricasUrl: string | null; prefix: string | null; isConfirmed: boolean }> {
+  try {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 8000);
+    const res = await fetchImpl(episodePageUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+      },
+      signal: controller.signal,
+    });
+    clearTimeout(timeoutId);
+
+    if (res.status !== 200) {
+      return { playerricasUrl: null, prefix: null, isConfirmed: false };
+    }
+
+    const html = await res.text();
+    const iframeSrc = extractPlayerricasIframeFromHtml(html);
+    if (!iframeSrc) {
+      return { playerricasUrl: null, prefix: null, isConfirmed: false };
+    }
+
+    const resolvedIframeUrl = new URL(iframeSrc, episodePageUrl).toString();
+    const confirmation = await confirmPlayerricasPrefixUrl(resolvedIframeUrl, fetchImpl);
+    if (!confirmation.confirmed) {
+      return { playerricasUrl: null, prefix: null, isConfirmed: false };
+    }
+
+    return {
+      playerricasUrl: resolvedIframeUrl,
+      prefix: confirmation.prefix,
+      isConfirmed: true,
+    };
+  } catch {
+    return { playerricasUrl: null, prefix: null, isConfirmed: false };
+  }
+}
+
 export interface R2ResolutionResult {
   finalUrl: string;
   prefix: string | null;
@@ -69,9 +164,16 @@ export async function resolveVideoInputUrl(
   rawUrl: string,
   fetchImpl: typeof fetch = fetch
 ): Promise<R2ResolutionResult> {
-  const trimmed = rawUrl.trim();
+  let trimmed = rawUrl.trim();
   if (!trimmed) {
     return { finalUrl: trimmed, prefix: null, isAttempt: false, isConfirmed: true };
+  }
+
+  if (trimmed.toLowerCase().includes('<iframe')) {
+    const extracted = extractPlayerricasIframeFromHtml(trimmed);
+    if (extracted) {
+      trimmed = extracted;
+    }
   }
 
   // 4) Se o texto colado for a URL do playerricas.php, usar o parse direto, sem tentativa
@@ -80,15 +182,16 @@ export async function resolveVideoInputUrl(
     let isConfirmed = !trimmed.includes('unconfirmed=1');
     try {
       const parsed = new URL(trimmed);
-      const nameParam = parsed.searchParams.get('name');
-      prefix = extractPrefixFromPlayerricasName(nameParam);
       if (parsed.searchParams.get('unconfirmed') === '1') {
         isConfirmed = false;
+      } else {
+        const nameParam = parsed.searchParams.get('name');
+        prefix = extractPrefixFromPlayerricasName(nameParam);
       }
     } catch {
       // ignore
     }
-    return { finalUrl: trimmed, prefix, isAttempt: false, isConfirmed };
+    return { finalUrl: trimmed, prefix: isConfirmed ? prefix : null, isAttempt: false, isConfirmed };
   }
 
   // 1) Cadastro por URL assinada do R2
@@ -133,46 +236,26 @@ export async function resolveVideoInputUrl(
       const candidateName = `${prefix}/${filename}`;
       const candidatePlayerricasUrl = `https://anitube22.vip/playerricas.php?name=${encodeURIComponent(candidateName)}&url=${encodeURIComponent(cleanUrl)}`;
 
-      try {
-        const controller = new AbortController();
-        const timeoutId = setTimeout(() => controller.abort(), 8000);
-
-        const res = await fetchImpl(candidatePlayerricasUrl, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-          },
-          signal: controller.signal,
-        });
-
-        clearTimeout(timeoutId);
-
-        if (res.status === 200) {
-          const text = await res.text();
-          const lowerText = text.toLowerCase();
-          const hasDeleted = lowerText.includes('deleted') || lowerText.includes('not found');
-          const hasPlayerOrM3u = lowerText.includes('player') || lowerText.includes('extm3u');
-
-          if (text.trim().length > 0 && !hasDeleted && hasPlayerOrM3u) {
-            winningPrefix = prefix;
-            winningPlayerricasUrl = candidatePlayerricasUrl;
-            isConfirmed = true;
-            r2PrefixCache.set(r2Host, prefix);
-            break;
-          }
-        }
-        // Se 403, 401, 429, 404, ou 200 sem player/EXTM3U: descarta e continua para o próximo
-      } catch {
-        // Timeout ou erro de rede: descarta e continua para o próximo
+      const check = await confirmPlayerricasPrefixUrl(candidatePlayerricasUrl, fetchImpl);
+      if (check.confirmed) {
+        winningPrefix = prefix;
+        winningPlayerricasUrl = candidatePlayerricasUrl;
+        isConfirmed = true;
+        r2PrefixCache.set(r2Host, prefix);
+        break;
       }
     }
 
-    // 2) Se nenhuma tentativa der 200, não gravar prefixo por dedução. Salvar a fonte assim mesmo, marcada como "prefixo não confirmado".
+    // 2) Nunca aprovar prefixo (como "apphd") quando a resposta não for 200.
+    // Sem confirmação 200, retorna apenas a URL limpa do R2 com prefix: null e isConfirmed: false.
     if (!winningPrefix || !winningPlayerricasUrl) {
-      const fallbackPrefix = cachedPrefix && KNOWN_PREFIXES.includes(cachedPrefix as any) ? cachedPrefix : 'apphd';
-      const fallbackName = `${fallbackPrefix}/${filename}`;
-      winningPlayerricasUrl = `https://anitube22.vip/playerricas.php?name=${encodeURIComponent(fallbackName)}&url=${encodeURIComponent(cleanUrl)}&unconfirmed=1`;
-      winningPrefix = fallbackPrefix;
-      isConfirmed = false;
+      return {
+        finalUrl: cleanUrl,
+        prefix: null,
+        isAttempt: true,
+        isConfirmed: false,
+        cleanR2Url: cleanUrl,
+      };
     }
 
     return {

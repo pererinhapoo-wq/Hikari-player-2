@@ -23,7 +23,7 @@ import { isOpeningSkipVisible } from '@/lib/opening-skip';
 import type { PlayableSource } from '@/lib/types';
 import {
   buildIframeSrcWithFreshTime,
-  getIframeReferrerPolicy,
+  getIframeElementProps,
   getNextFallbackSourceIndex,
 } from '@/lib/video-sources';
 
@@ -1213,38 +1213,42 @@ export function EpisodePlayer({
         )}
 
         {/* ACTIVE PLAYBACK: Iframe mode */}
-        {hasStarted && resolvedRuntime?.mode === 'iframe' && !fatalError && (
-          <>
-            <iframe
-              key={`${resolvedRuntime.slot}-${iframeReloadKey}-${resolvedRuntime.url}`}
-              src={resolvedRuntime.url}
-              title={title}
-              onLoad={() => {
-                clearIframeLoadTimer();
-                setIframeLoaded(true);
-                setIsLoadingSource(false);
-              }}
-              onError={() => {
-                clearIframeLoadTimer();
-                setIsLoadingSource(false);
-                triggerFailoverRef.current(
-                  resolvedRuntime.slot,
-                  'Player do provedor não carregou.',
-                  'iframe'
-                );
-              }}
-              className="w-full h-full border-0 bg-black"
-              allow="autoplay; fullscreen; picture-in-picture; encrypted-media"
-              allowFullScreen
-              referrerPolicy={getIframeReferrerPolicy(resolvedRuntime.url)}
-            />
-            {!iframeLoaded && isLoadingSource && (
-              <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-black/35">
-                <div className="w-10 h-10 rounded-full border-2 border-white/25 border-t-[#a855f7] animate-spin" />
-              </div>
-            )}
-          </>
-        )}
+        {hasStarted && resolvedRuntime?.mode === 'iframe' && !fatalError && (() => {
+          const iframeProps = getIframeElementProps(resolvedRuntime.url);
+          return (
+            <>
+              <iframe
+                key={`${resolvedRuntime.slot}-${iframeReloadKey}-${resolvedRuntime.url}`}
+                src={resolvedRuntime.url}
+                title={title}
+                onLoad={() => {
+                  clearIframeLoadTimer();
+                  setIframeLoaded(true);
+                  setIsLoadingSource(false);
+                }}
+                onError={() => {
+                  clearIframeLoadTimer();
+                  setIsLoadingSource(false);
+                  triggerFailoverRef.current(
+                    resolvedRuntime.slot,
+                    'Player do provedor não carregou.',
+                    'iframe'
+                  );
+                }}
+                className="w-full h-full border-0 bg-black"
+                allow={iframeProps.allow}
+                sandbox={iframeProps.sandbox}
+                allowFullScreen
+                referrerPolicy={iframeProps.referrerPolicy}
+              />
+              {!iframeLoaded && isLoadingSource && (
+                <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center bg-black/35">
+                  <div className="w-10 h-10 rounded-full border-2 border-white/25 border-t-[#a855f7] animate-spin" />
+                </div>
+              )}
+            </>
+          );
+        })()}
 
         {/* ACTIVE PLAYBACK: HTML5 Video / HLS mode */}
         {hasStarted && resolvedRuntime && resolvedRuntime.mode !== 'iframe' && !fatalError && (

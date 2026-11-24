@@ -350,15 +350,22 @@ function AdminPage() {
     const embedHostMode = classifyEmbedHost(candidateUrl);
     const hasHashParams = hasUrlHashParams(candidateUrl);
     const referrerPolicy = getIframeReferrerPolicy(candidateUrl);
+    const isR2 = isR2SignedUrl(trimmed);
+    const isCleanR2 = (() => {
+      try {
+        return new URL(trimmed).hostname.toLowerCase().includes('r2.cloudflarestorage.com');
+      } catch {
+        return false;
+      }
+    })();
+    const isUnconfirmed = trimmed.includes('unconfirmed=1') || isR2 || isCleanR2;
     let detectedPrefix: string | null = null;
-    if (trimmed.toLowerCase().includes('playerricas.php')) {
+    if (!isUnconfirmed && trimmed.toLowerCase().includes('playerricas.php')) {
       try {
         const parsed = new URL(trimmed);
         detectedPrefix = extractPrefixFromPlayerricasName(parsed.searchParams.get('name'));
       } catch {}
     }
-    const isR2 = isR2SignedUrl(trimmed);
-    const isUnconfirmed = trimmed.includes('unconfirmed=1') || isR2;
     return {
       trimmed,
       check,
