@@ -14,6 +14,7 @@ import { Route as AdminRouteImport } from './routes/admin'
 import { Route as ApiEmbedRouteImport } from './routes/api/embed'
 import { Route as ApiMirrorRouteImport } from './routes/api/mirror'
 import { Route as ApiResolveBunnyRouteImport } from './routes/api/resolve-bunny'
+import { Route as ApiThumbnailsRouteImport } from './routes/api/thumbnails'
 import { Route as EIdRouteImport } from './routes/e/$id'
 import { Route as ApiProxyStreamRouteImport } from './routes/api/proxy/stream'
 
@@ -42,6 +43,11 @@ const ApiResolveBunnyRoute = ApiResolveBunnyRouteImport.update({
   path: '/api/resolve-bunny',
   getParentRoute: () => rootRouteImport,
 } as any)
+const ApiThumbnailsRoute = ApiThumbnailsRouteImport.update({
+  id: '/api/thumbnails',
+  path: '/api/thumbnails',
+  getParentRoute: () => rootRouteImport,
+} as any)
 const EIdRoute = EIdRouteImport.update({
   id: '/e/$id',
   path: '/e/$id',
@@ -59,6 +65,7 @@ export interface FileRoutesByFullPath {
   '/api/embed': typeof ApiEmbedRoute
   '/api/mirror': typeof ApiMirrorRoute
   '/api/resolve-bunny': typeof ApiResolveBunnyRoute
+  '/api/thumbnails': typeof ApiThumbnailsRoute
   '/e/$id': typeof EIdRoute
   '/api/proxy/stream': typeof ApiProxyStreamRoute
 }
@@ -68,6 +75,7 @@ export interface FileRoutesByTo {
   '/api/embed': typeof ApiEmbedRoute
   '/api/mirror': typeof ApiMirrorRoute
   '/api/resolve-bunny': typeof ApiResolveBunnyRoute
+  '/api/thumbnails': typeof ApiThumbnailsRoute
   '/e/$id': typeof EIdRoute
   '/api/proxy/stream': typeof ApiProxyStreamRoute
 }
@@ -78,6 +86,7 @@ export interface FileRoutesById {
   '/api/embed': typeof ApiEmbedRoute
   '/api/mirror': typeof ApiMirrorRoute
   '/api/resolve-bunny': typeof ApiResolveBunnyRoute
+  '/api/thumbnails': typeof ApiThumbnailsRoute
   '/e/$id': typeof EIdRoute
   '/api/proxy/stream': typeof ApiProxyStreamRoute
 }
@@ -89,6 +98,7 @@ export interface FileRouteTypes {
     | '/api/embed'
     | '/api/mirror'
     | '/api/resolve-bunny'
+    | '/api/thumbnails'
     | '/e/$id'
     | '/api/proxy/stream'
   fileRoutesByTo: FileRoutesByTo
@@ -98,6 +108,7 @@ export interface FileRouteTypes {
     | '/api/embed'
     | '/api/mirror'
     | '/api/resolve-bunny'
+    | '/api/thumbnails'
     | '/e/$id'
     | '/api/proxy/stream'
   id:
@@ -107,6 +118,7 @@ export interface FileRouteTypes {
     | '/api/embed'
     | '/api/mirror'
     | '/api/resolve-bunny'
+    | '/api/thumbnails'
     | '/e/$id'
     | '/api/proxy/stream'
   fileRoutesById: FileRoutesById
@@ -117,6 +129,7 @@ export interface RootRouteChildren {
   ApiEmbedRoute: typeof ApiEmbedRoute
   ApiMirrorRoute: typeof ApiMirrorRoute
   ApiResolveBunnyRoute: typeof ApiResolveBunnyRoute
+  ApiThumbnailsRoute: typeof ApiThumbnailsRoute
   EIdRoute: typeof EIdRoute
   ApiProxyStreamRoute: typeof ApiProxyStreamRoute
 }
@@ -158,6 +171,13 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof ApiResolveBunnyRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/api/thumbnails': {
+      id: '/api/thumbnails'
+      path: '/api/thumbnails'
+      fullPath: '/api/thumbnails'
+      preLoaderRoute: typeof ApiThumbnailsRouteImport
+      parentRoute: typeof rootRouteImport
+    }
     '/e/$id': {
       id: '/e/$id'
       path: '/e/$id'
@@ -181,6 +201,7 @@ const rootRouteChildren: RootRouteChildren = {
   ApiEmbedRoute: ApiEmbedRoute,
   ApiMirrorRoute: ApiMirrorRoute,
   ApiResolveBunnyRoute: ApiResolveBunnyRoute,
+  ApiThumbnailsRoute: ApiThumbnailsRoute,
   EIdRoute: EIdRoute,
   ApiProxyStreamRoute: ApiProxyStreamRoute,
 }

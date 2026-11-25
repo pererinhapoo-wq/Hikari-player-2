@@ -59,6 +59,8 @@ import type {
   PublicEpisodeResult,
   SourceTestReport,
 } from '@/lib/types';
+import { resolveThumbnailSourceForAdmin } from '@/lib/thumbnails';
+import type { ThumbnailSourcePlan } from '@/lib/thumbnail-utils';
 import {
   buildIframePlayUrl,
   collectEpisodeSources,
@@ -566,4 +568,42 @@ export const adminProcessBatchItemFn = createServerFn({ method: 'POST' })
       }
     }
   );
+
+export const adminResolveThumbnailSourceFn = createServerFn({ method: 'POST' })
+  .validator(
+    (data: {
+      episodeId?: string | null;
+      videoUrl?: string | null;
+      sourceKind?: ExplicitSourceKind | '' | null;
+    }) => ({
+      episodeId: typeof data?.episodeId === 'string' ? data.episodeId : null,
+      videoUrl: typeof data?.videoUrl === 'string' ? data.videoUrl : null,
+      sourceKind:
+        data?.sourceKind === 'iframe' ||
+        data?.sourceKind === 'hls' ||
+        data?.sourceKind === 'mp4'
+          ? data.sourceKind
+          : null,
+    })
+  )
+  .handler(
+    async ({
+      data,
+    }): Promise<{ ok: true; plan: ThumbnailSourcePlan } | { ok: false; error: string }> => {
+      try {
+        requireAdminSession();
+        const plan = await resolveThumbnailSourceForAdmin(data);
+        return { ok: true, plan };
+      } catch (err) {
+        return {
+          ok: false,
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Falha ao preparar fonte de vídeo para gerar thumbnails.',
+        };
+      }
+    }
+  );
+
 

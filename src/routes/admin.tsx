@@ -3,6 +3,7 @@ import {
   Activity,
   AlertTriangle,
   ArrowLeft,
+  Camera,
   Check,
   ChevronRight,
   Copy,
@@ -13,7 +14,9 @@ import {
   EyeOff,
   Film,
   FolderOpen,
+  Image as ImageIcon,
   ListPlus,
+  Loader2,
   LogOut,
   MoreVertical,
   Pause,
@@ -25,7 +28,7 @@ import {
   Trash2,
   X,
 } from 'lucide-react';
-import { type FormEvent, useEffect, useMemo, useRef, useState } from 'react';
+import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   type AnimeGroup,
   type AnimeSortMode,
@@ -51,6 +54,10 @@ import {
   runBatchSequence,
   saveBatchJobState,
 } from '@/lib/batch-import';
+import {
+  extractVideoThumbnails,
+  revokeThumbnailCandidates,
+} from '@/lib/client-thumbnail-extractor';
 import { getOptimizedImageProps } from '@/lib/image-optimization';
 import { formatOpeningTimestamp, parseOpeningRange } from '@/lib/opening-skip';
 import {
@@ -60,11 +67,13 @@ import {
   adminLoginFn,
   adminLogoutFn,
   adminProcessBatchItemFn,
+  adminResolveThumbnailSourceFn,
   adminTestEpisodeSourcesFn,
   adminTestSourceFn,
   adminUpdateEpisodeFn,
   getAdminDashboardFn,
 } from '@/lib/server-fns';
+import type { GeneratedThumbnailCandidate } from '@/lib/thumbnail-utils';
 import type {
   DatabaseDiagnosticResult,
   EpisodeDto,
@@ -232,6 +241,22 @@ function AdminPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [saveBusy, setSaveBusy] = useState(false);
   const [posterPreviewError, setPosterPreviewError] = useState(false);
+
+  // Manual episode thumbnail generation & selection state (never auto-selected or auto-saved)
+  const [thumbBusy, setThumbBusy] = useState(false);
+  const [thumbProgress, setThumbProgress] = useState<{ completed: number; total: number } | null>(
+    null
+  );
+  const [thumbCandidates, setThumbCandidates] = useState<GeneratedThumbnailCandidate[]>([]);
+  const [selectedThumbId, setSelectedThumbId] = useState<string | null>(null);
+  const [thumbError, setThumbError] = useState<string | null>(null);
+  const [thumbSourceInfo, setThumbSourceInfo] = useState<{
+    label: string;
+    blobPreferred: boolean;
+  } | null>(null);
+  const thumbAbortRef = useRef<AbortController | null>(null);
+  const thumbCandidatesRef = useRef<GeneratedThumbnailCandidate[]>([]);
+  thumbCandidatesRef.current = thumbCandidates;
 
   const [savedBanner, setSavedBanner] = useState<{
     label: string;
@@ -462,6 +487,7 @@ function AdminPage() {
     setFormOpen(false);
     setEditingId(null);
     setForm(EMPTY_FORM);
+    resetFormTestState();
     setSelectedAnimeKey(null);
     setSearchQuery('');
     setSavedBanner(null);
@@ -471,12 +497,40 @@ function AdminPage() {
     await router.invalidate();
   };
 
+  const resetThumbnailState = useCallback(() => {
+    if (thumbAbortRef.current) {
+      thumbAbortRef.current.abort();
+      thumbAbortRef.current = null;
+    }
+    if (thumbCandidatesRef.current.length > 0) {
+      revokeThumbnailCandidates(thumbCandidatesRef.current);
+    }
+    setThumbBusy(false);
+    setThumbProgress(null);
+    setThumbCandidates([]);
+    setSelectedThumbId(null);
+    setThumbError(null);
+    setThumbSourceInfo(null);
+  }, []);
+
+  useEffect(() => {
+    return () => {
+      if (thumbAbortRef.current) {
+        thumbAbortRef.current.abort();
+      }
+      if (thumbCandidatesRef.current.length > 0) {
+        revokeThumbnailCandidates(thumbCandidatesRef.current);
+      }
+    };
+  }, []);
+
   const resetFormTestState = () => {
     setFormError(null);
     setPosterPreviewError(false);
     setSlotTesting(false);
     setSlotReport(null);
     setSlotTestError(null);
+    resetThumbnailState();
   };
 
   const handleOpenCreateForm = (prefillAnimeName?: string) => {
@@ -597,6 +651,120 @@ function AdminPage() {
     }
   };
 
+  const selectedThumbnail = useMemo(
+    () => thumbCandidates.find((item) => item.id === selectedThumbId) ?? null,
+    [thumbCandidates, selectedThumbId]
+  );
+
+  const editingEpisodeSources = useMemo(() => {
+    if (!editingId) return [];
+    const ep = initialState.episodes.find((item) => item.id === editingId);
+    return ep ? getEpisodeSourcesList(ep) : [];
+  }, [editingId, initialState.episodes]);
+
+  const hasAnyThumbnailSource = Boolean(
+    form.video_url.trim() || editingEpisodeSources.length > 0
+  );
+  const hasBlobThumbnailSource = Boolean(
+    isVercelBlobUrl(form.video_url.trim()) ||
+      editingEpisodeSources.some((src) => isVercelBlobUrl(src.url) || src.isMirror)
+  );
+
+  const handleGenerateThumbnails = async () => {
+    if (!hasAnyThumbnailSource) {
+      setThumbError('Informe uma URL de vídeo antes de gerar thumbnails.');
+      return;
+    }
+
+    if (thumbAbortRef.current) {
+      thumbAbortRef.current.abort();
+    }
+    const controller = new AbortController();
+    thumbAbortRef.current = controller;
+
+    if (thumbCandidatesRef.current.length > 0) {
+      revokeThumbnailCandidates(thumbCandidatesRef.current);
+    }
+    setThumbCandidates([]);
+    setSelectedThumbId(null);
+    setThumbError(null);
+    setThumbSourceInfo(null);
+    setThumbProgress(null);
+    setThumbBusy(true);
+
+    try {
+      const planRes = await adminResolveThumbnailSourceFn({
+        data: {
+          episodeId: editingId,
+          videoUrl: form.video_url.trim() || null,
+          sourceKind: form.source_kind,
+        },
+      });
+
+      if (controller.signal.aborted) return;
+
+      if (!planRes.ok) {
+        setThumbError(planRes.error);
+        return;
+      }
+
+      setThumbSourceInfo({
+        label: planRes.plan.sourceLabel,
+        blobPreferred: planRes.plan.blobPreferred,
+      });
+
+      if (!planRes.plan.ok || planRes.plan.mode === 'incompatible') {
+        setThumbError(
+          planRes.plan.reason ||
+            'Esta fonte não permite extrair frames no navegador. Insira a URL da capa manualmente.'
+        );
+        return;
+      }
+
+      const extraction = await extractVideoThumbnails({
+        plan: planRes.plan,
+        count: 6,
+        signal: controller.signal,
+        onProgress: ({ completed, total }) => {
+          if (!controller.signal.aborted) {
+            setThumbProgress({ completed, total });
+          }
+        },
+      });
+
+      if (controller.signal.aborted) {
+        revokeThumbnailCandidates(extraction.candidates);
+        return;
+      }
+
+      if (!extraction.ok || extraction.candidates.length === 0) {
+        revokeThumbnailCandidates(extraction.candidates);
+        setThumbError(
+          extraction.error ||
+            'Não foi possível capturar imagens deste vídeo. Você pode preencher o campo de capa manualmente.'
+        );
+        return;
+      }
+
+      // Nunca seleciona automaticamente a primeira imagem — decisão explícita do usuário
+      setThumbCandidates(extraction.candidates);
+      setSelectedThumbId(null);
+    } catch (err) {
+      if (!controller.signal.aborted) {
+        setThumbError(
+          err instanceof Error ? err.message : 'Erro inesperado ao gerar thumbnails.'
+        );
+      }
+    } finally {
+      if (thumbAbortRef.current === controller) {
+        thumbAbortRef.current = null;
+      }
+      if (!controller.signal.aborted) {
+        setThumbBusy(false);
+      }
+    }
+  };
+
   const handleSaveEpisode = async (e: FormEvent) => {
     e.preventDefault();
     setFormError(null);
@@ -611,18 +779,49 @@ function AdminPage() {
 
     setSaveBusy(true);
 
-    const payload = {
-      anime_name: sanitizeAnimeName(form.anime_name),
-      episode_number: form.episode_number.trim() || null,
-      opening_start_seconds: openingRange.opening_start_seconds,
-      opening_end_seconds: openingRange.opening_end_seconds,
-      title: form.title.trim(),
-      poster_url: form.poster_url.trim(),
-      video_url: form.video_url.trim(),
-      source_kind: form.source_kind,
-    };
-
     try {
+      let resolvedPosterUrl = form.poster_url.trim();
+
+      if (selectedThumbnail) {
+        const uploadBody = new FormData();
+        uploadBody.append('file', selectedThumbnail.blob, 'thumbnail.jpg');
+        uploadBody.append('animeName', sanitizeAnimeName(form.anime_name) ?? '');
+        uploadBody.append('episodeId', editingId ?? '');
+
+        const uploadResponse = await fetch('/api/thumbnails', {
+          method: 'POST',
+          body: uploadBody,
+        });
+
+        const uploadResult = (await uploadResponse.json().catch(() => null)) as
+          | { ok: true; url: string }
+          | { ok: false; error?: string }
+          | null;
+
+        if (!uploadResponse.ok || !uploadResult || !uploadResult.ok) {
+          setFormError(
+            uploadResult && !uploadResult.ok && uploadResult.error
+              ? uploadResult.error
+              : `Falha ao salvar a thumbnail selecionada (HTTP ${uploadResponse.status}).`
+          );
+          return;
+        }
+
+        resolvedPosterUrl = uploadResult.url;
+        setForm((prev) => ({ ...prev, poster_url: uploadResult.url }));
+      }
+
+      const payload = {
+        anime_name: sanitizeAnimeName(form.anime_name),
+        episode_number: form.episode_number.trim() || null,
+        opening_start_seconds: openingRange.opening_start_seconds,
+        opening_end_seconds: openingRange.opening_end_seconds,
+        title: form.title.trim(),
+        poster_url: resolvedPosterUrl,
+        video_url: form.video_url.trim(),
+        source_kind: form.source_kind,
+      };
+
       if (editingId) {
         const res = await adminUpdateEpisodeFn({
           data: { id: editingId, ...payload },
@@ -1898,39 +2097,185 @@ function AdminPage() {
                     )}
                   </div>
 
-                  {/* Episode poster image */}
-                  <div>
-                    <label
-                      htmlFor="ep-poster"
-                      className="block text-xs font-medium text-slate-300 mb-1.5"
-                    >
-                      Imagem do episódio (URL)
-                    </label>
-                    <input
-                      id="ep-poster"
-                      type="url"
-                      required
-                      value={form.poster_url}
-                      onChange={(e) => {
-                        setPosterPreviewError(false);
-                        setForm({ ...form, poster_url: e.target.value });
-                      }}
-                      placeholder="https://cdn.exemplo.com/capas/ep01.jpg"
-                      className="w-full h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
-                    />
-                    {posterValidation && !posterValidation.valid && (
-                      <p className="mt-1 text-xs text-rose-400">{posterValidation.error}</p>
-                    )}
-                    {posterValidation?.valid && posterValidation.normalizedUrl && !posterPreviewError && (
-                      <div className="mt-2.5 aspect-video max-w-sm w-full rounded-lg overflow-hidden border border-white/10 bg-[#090B10]">
-                        <img
-                          {...getOptimizedImageProps(posterValidation.normalizedUrl, 'capa')}
-                          alt="Prévia da imagem do episódio"
-                          referrerPolicy="no-referrer"
-                          onError={() => setPosterPreviewError(true)}
-                          className="w-full h-full object-cover"
-                        />
+                  {/* Episode poster image & manual thumbnail generator */}
+                  <div className="space-y-3">
+                    <div>
+                      <label
+                        htmlFor="ep-poster"
+                        className="block text-xs font-medium text-slate-300 mb-1.5"
+                      >
+                        Imagem do episódio (URL)
+                      </label>
+                      <input
+                        id="ep-poster"
+                        type="url"
+                        required={!selectedThumbnail}
+                        value={form.poster_url}
+                        onChange={(e) => {
+                          setPosterPreviewError(false);
+                          if (selectedThumbId !== null) {
+                            setSelectedThumbId(null);
+                          }
+                          setForm({ ...form, poster_url: e.target.value });
+                        }}
+                        placeholder="https://cdn.exemplo.com/capas/ep01.jpg"
+                        className="w-full h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
+                      />
+                      {posterValidation && !posterValidation.valid && !selectedThumbnail && (
+                        <p className="mt-1 text-xs text-rose-400">{posterValidation.error}</p>
+                      )}
+                    </div>
+
+                    {/* Visual thumbnail extraction & manual selection */}
+                    <div className="rounded-lg border border-white/10 bg-[#090B10]/80 p-3 space-y-3">
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="min-w-0">
+                          <div className="flex items-center gap-1.5 text-xs font-medium text-slate-200">
+                            <Camera className="w-3.5 h-3.5 text-rose-400 shrink-0" />
+                            <span>Gerar thumbnails do vídeo</span>
+                          </div>
+                          <p className="mt-0.5 text-[11px] text-slate-400">
+                            {hasBlobThumbnailSource
+                              ? 'Prioridade automática: usando o vídeo armazenado no Vercel Blob.'
+                              : hasAnyThumbnailSource
+                                ? 'Captura ~6 momentos do vídeo para você escolher a capa manualmente.'
+                                : 'Informe a URL do vídeo (ou gere a cópia no Vercel Blob) para extrair opções de capa.'}
+                          </p>
+                        </div>
+
+                        <div className="flex items-center gap-2 shrink-0">
+                          {selectedThumbnail && (
+                            <button
+                              type="button"
+                              onClick={() => setSelectedThumbId(null)}
+                              disabled={thumbBusy || saveBusy}
+                              className="h-9 px-2.5 rounded-lg border border-white/10 text-xs text-slate-300 hover:bg-white/5 disabled:opacity-50 cursor-pointer"
+                            >
+                              Limpar escolha
+                            </button>
+                          )}
+                          <button
+                            type="button"
+                            onClick={() => void handleGenerateThumbnails()}
+                            disabled={thumbBusy || saveBusy || !hasAnyThumbnailSource}
+                            className="h-9 px-3 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-50 text-xs font-medium text-slate-100 inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                          >
+                            {thumbBusy ? (
+                              <>
+                                <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-400" />
+                                {thumbProgress
+                                  ? `Capturando ${thumbProgress.completed}/${thumbProgress.total}...`
+                                  : 'Preparando vídeo...'}
+                              </>
+                            ) : (
+                              <>
+                                <ImageIcon className="w-3.5 h-3.5 text-rose-400" />
+                                {thumbCandidates.length > 0
+                                  ? 'Gerar novamente'
+                                  : 'Gerar thumbnails'}
+                              </>
+                            )}
+                          </button>
+                        </div>
                       </div>
+
+                      {thumbSourceInfo && !thumbError && (
+                        <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
+                          <span className="px-2 py-0.5 rounded bg-white/5 border border-white/10 text-slate-300">
+                            Fonte usada: {thumbSourceInfo.label}
+                          </span>
+                          {thumbCandidates.length > 0 && !selectedThumbnail && (
+                            <span className="text-amber-300/90">
+                              Clique em uma imagem abaixo para escolhê-la como capa (nenhuma é aplicada automaticamente).
+                            </span>
+                          )}
+                        </div>
+                      )}
+
+                      {thumbError && (
+                        <div
+                          role="status"
+                          className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 flex items-start gap-2"
+                        >
+                          <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                          <span>{thumbError}</span>
+                        </div>
+                      )}
+
+                      {thumbCandidates.length > 0 && (
+                        <div className="grid grid-cols-2 sm:grid-cols-3 gap-2.5">
+                          {thumbCandidates.map((cand, index) => {
+                            const isSelected = selectedThumbId === cand.id;
+                            return (
+                              <button
+                                key={cand.id}
+                                type="button"
+                                onClick={() => setSelectedThumbId(cand.id)}
+                                aria-pressed={isSelected}
+                                className={`group relative aspect-video rounded-lg overflow-hidden border text-left transition-all cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 ${
+                                  isSelected
+                                    ? 'border-rose-500 ring-2 ring-rose-500/80 shadow-lg shadow-rose-950/40'
+                                    : 'border-white/10 hover:border-white/30'
+                                }`}
+                              >
+                                <img
+                                  src={cand.previewUrl}
+                                  alt={`Opção de thumbnail ${index + 1} (${cand.timestampLabel})`}
+                                  className="w-full h-full object-cover"
+                                />
+                                <div className="absolute inset-x-0 bottom-0 px-2 py-1 bg-gradient-to-t from-black/85 via-black/45 to-transparent flex items-center justify-between text-[11px]">
+                                  <span className="font-mono text-slate-200">
+                                    {cand.timestampLabel}
+                                  </span>
+                                  {isSelected ? (
+                                    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-rose-600 text-white font-medium text-[10px]">
+                                      <Check className="w-3 h-3" />
+                                      Selecionada
+                                    </span>
+                                  ) : (
+                                    <span className="text-[10px] text-slate-300 opacity-0 group-hover:opacity-100 transition-opacity">
+                                      Escolher
+                                    </span>
+                                  )}
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Poster preview: shows explicitly chosen thumbnail or saved/typed poster_url */}
+                    {selectedThumbnail ? (
+                      <div className="space-y-1.5">
+                        <div className="aspect-video max-w-sm w-full rounded-lg overflow-hidden border border-rose-500/60 bg-[#090B10] relative">
+                          <img
+                            src={selectedThumbnail.previewUrl}
+                            alt="Prévia da thumbnail escolhida"
+                            className="w-full h-full object-cover"
+                          />
+                          <div className="absolute top-2 left-2 px-2 py-0.5 rounded bg-rose-600/95 text-[11px] font-medium text-white">
+                            Capa escolhida ({selectedThumbnail.timestampLabel})
+                          </div>
+                        </div>
+                        <p className="text-[11px] text-slate-400">
+                          Ao confirmar o salvamento, esta imagem será enviada e salva em <code className="text-slate-300">poster_url</code>.
+                        </p>
+                      </div>
+                    ) : (
+                      posterValidation?.valid &&
+                      posterValidation.normalizedUrl &&
+                      !posterPreviewError && (
+                        <div className="aspect-video max-w-sm w-full rounded-lg overflow-hidden border border-white/10 bg-[#090B10]">
+                          <img
+                            {...getOptimizedImageProps(posterValidation.normalizedUrl, 'capa')}
+                            alt="Prévia da imagem do episódio"
+                            referrerPolicy="no-referrer"
+                            onError={() => setPosterPreviewError(true)}
+                            className="w-full h-full object-cover"
+                          />
+                        </div>
+                      )
                     )}
                   </div>
 
