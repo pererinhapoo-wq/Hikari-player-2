@@ -63,6 +63,7 @@ import {
   buildIframePlayUrl,
   collectEpisodeSources,
   type ExplicitSourceKind,
+  isVercelBlobUrl,
 } from '@/lib/video-sources';
 
 export function resolveProxyPlayUrl(
@@ -155,9 +156,11 @@ export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
 
     const normalizedSources = collectEpisodeSources(episode);
     const sources: PlayableSource[] = normalizedSources.map((src) => {
+      const isMirrorSource = Boolean(src.isMirror || isVercelBlobUrl(src.resolvedUrl));
       const shouldProxy =
         src.kind !== 'iframe' &&
         !src.requiresServerResolve &&
+        !isMirrorSource &&
         forceProxyBySlot[src.slot] !== false &&
         src.needsProxy;
       const playUrl =
@@ -168,6 +171,7 @@ export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
             : src.resolvedUrl;
       return {
         ...src,
+        isMirror: isMirrorSource,
         needsProxy: shouldProxy,
         playUrl,
       };

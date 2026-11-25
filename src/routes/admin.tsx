@@ -7,6 +7,7 @@ import {
   ChevronRight,
   Copy,
   Database,
+  Download,
   ExternalLink,
   Eye,
   EyeOff,
@@ -77,6 +78,7 @@ import {
   type ExplicitSourceKind,
   getIframeReferrerPolicy,
   hasUrlHashParams,
+  isVercelBlobUrl,
   normalizeVideoSource,
   validateHttpUrl,
 } from '@/lib/video-sources';
@@ -128,6 +130,42 @@ function formatDatePtBr(iso: string): string {
   } catch {
     return iso;
   }
+}
+
+interface EpisodeSourceRow {
+  slot: 1 | 2 | 3 | 4 | 5;
+  url: string;
+  kind: ExplicitSourceKind;
+  isMirror: boolean;
+}
+
+function getEpisodeSourcesList(ep: EpisodeDto): EpisodeSourceRow[] {
+  const rawSlots: Array<{
+    slot: 1 | 2 | 3 | 4 | 5;
+    url: string | null | undefined;
+    explicitKind: ExplicitSourceKind | null | undefined;
+    isMirrorFlag: boolean | null | undefined;
+  }> = [
+    { slot: 1, url: ep.video_url, explicitKind: ep.source_kind, isMirrorFlag: ep.is_mirror },
+    { slot: 2, url: ep.video_url_2, explicitKind: ep.source_kind_2, isMirrorFlag: ep.is_mirror_2 },
+    { slot: 3, url: ep.video_url_3, explicitKind: ep.source_kind_3, isMirrorFlag: ep.is_mirror_3 },
+    { slot: 4, url: ep.video_url_4, explicitKind: ep.source_kind_4, isMirrorFlag: ep.is_mirror_4 },
+    { slot: 5, url: ep.video_url_5, explicitKind: ep.source_kind_5, isMirrorFlag: ep.is_mirror_5 },
+  ];
+
+  const list: EpisodeSourceRow[] = [];
+  for (const entry of rawSlots) {
+    const trimmed = entry.url?.trim();
+    if (!trimmed) continue;
+    const isMirror = Boolean(entry.isMirrorFlag || isVercelBlobUrl(trimmed));
+    list.push({
+      slot: entry.slot,
+      url: trimmed,
+      kind: isMirror ? 'mp4' : detectSourceKind(trimmed, entry.explicitKind),
+      isMirror,
+    });
+  }
+  return list;
 }
 
 function AnimeThumbnail({
@@ -215,6 +253,13 @@ function AdminPage() {
   const [episodeTests, setEpisodeTests] = useState<Record<string, SourceTestReport[]>>({});
   const [episodeTestingId, setEpisodeTestingId] = useState<string | null>(null);
   const [episodeTestErrors, setEpisodeTestErrors] = useState<Record<string, string>>({});
+
+  // Vercel Blob mirror state per episode
+  const [mirrorInputs, setMirrorInputs] = useState<Record<string, string>>({});
+  const [mirrorForceMap, setMirrorForceMap] = useState<Record<string, boolean>>({});
+  const [mirrorBusyId, setMirrorBusyId] = useState<string | null>(null);
+  const [mirrorErrorMap, setMirrorErrorMap] = useState<Record<string, string>>({});
+  const [mirrorSuccessMap, setMirrorSuccessMap] = useState<Record<string, string>>({});
 
   // Neon DB diagnostic state
   const [showDiagnostic, setShowDiagnostic] = useState(false);
@@ -617,6 +662,79 @@ function AdminPage() {
       }
     } finally {
       setDeleteBusyId(null);
+    }
+  };
+
+  const handleMirrorEpisode = async (ep: EpisodeDto, hasMirror: boolean) => {
+    const sourceUrl = (mirrorInputs[ep.id] ?? '').trim();
+    const force = Boolean(mirrorForceMap[ep.id]);
+
+    if (hasMirror && !force) {
+      setMirrorErrorMap((prev) => ({
+        ...prev,
+        [ep.id]: 'Este episódio já possui espelho. Marque "Forçar refazer" para substituir.',
+      }));
+      return;
+    }
+
+    if (!sourceUrl) {
+      setMirrorErrorMap((prev) => ({
+        ...prev,
+        [ep.id]: 'Informe a URL de origem (*.r2.cloudflarestorage.com ou CDN permitido).',
+      }));
+      return;
+    }
+
+    setMirrorBusyId(ep.id);
+    setMirrorErrorMap((prev) => {
+      const next = { ...prev };
+      delete next[ep.id];
+      return next;
+    });
+    setMirrorSuccessMap((prev) => {
+      const next = { ...prev };
+      delete next[ep.id];
+      return next;
+    });
+
+    try {
+      const response = await fetch('/api/mirror', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          episodeId: ep.id,
+          sourceUrl,
+          force,
+        }),
+      });
+      const payload = (await response.json().catch(() => null)) as
+        | { ok: true; slot: number }
+        | { ok: false; error?: string }
+        | null;
+
+      if (!response.ok || !payload || !payload.ok) {
+        const message =
+          payload && !payload.ok && payload.error
+            ? payload.error
+            : `Falha ao guardar cópia (HTTP ${response.status}).`;
+        setMirrorErrorMap((prev) => ({ ...prev, [ep.id]: message }));
+        return;
+      }
+
+      setMirrorInputs((prev) => ({ ...prev, [ep.id]: '' }));
+      setMirrorForceMap((prev) => ({ ...prev, [ep.id]: false }));
+      setMirrorSuccessMap((prev) => ({
+        ...prev,
+        [ep.id]: `Cópia salva no Vercel Blob (Fonte ${payload.slot}).`,
+      }));
+      await router.invalidate();
+    } catch (err) {
+      setMirrorErrorMap((prev) => ({
+        ...prev,
+        [ep.id]: err instanceof Error ? err.message : 'Erro de rede ao guardar cópia no Blob.',
+      }));
+    } finally {
+      setMirrorBusyId(null);
     }
   };
 
@@ -1894,13 +2012,17 @@ function AdminPage() {
                       const isTesting = episodeTestingId === ep.id;
                       const testReports = episodeTests[ep.id];
                       const testError = episodeTestErrors[ep.id];
-                      const hasHashSource = [
-                        ep.video_url,
-                        ep.video_url_2,
-                        ep.video_url_3,
-                        ep.video_url_4,
-                        ep.video_url_5,
-                      ].some((url) => Boolean(url && hasUrlHashParams(url)));
+                      const episodeSources = getEpisodeSourcesList(ep);
+                      const hasMirror = episodeSources.some((src) => src.isMirror);
+                      const forceRedo = Boolean(mirrorForceMap[ep.id]);
+                      const mirrorBlocked = hasMirror && !forceRedo;
+                      const isMirroring = mirrorBusyId === ep.id;
+                      const mirrorUrlValue = mirrorInputs[ep.id] ?? '';
+                      const mirrorError = mirrorErrorMap[ep.id];
+                      const mirrorSuccess = mirrorSuccessMap[ep.id];
+                      const hasHashSource = episodeSources.some((src) =>
+                        hasUrlHashParams(src.url)
+                      );
 
                       return (
                         <li
@@ -2087,6 +2209,107 @@ function AdminPage() {
                               </button>
                             </div>
                           )}
+
+                          {/* Sources list & Vercel Blob mirror controls */}
+                          <div className="rounded-lg bg-[#090B10] border border-white/10 p-3 space-y-2.5">
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
+                                Fontes do episódio
+                              </span>
+                              {hasMirror && (
+                                <span className="inline-flex items-center px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-medium text-emerald-300">
+                                  espelho ativo
+                                </span>
+                              )}
+                            </div>
+
+                            <ul className="space-y-1.5">
+                              {episodeSources.map((src) => (
+                                <li
+                                  key={`${ep.id}-slot-${src.slot}`}
+                                  className="flex items-center gap-2 text-[11px] min-w-0"
+                                >
+                                  <span className="font-mono text-slate-300 shrink-0">
+                                    {`Fonte ${src.slot}`}
+                                  </span>
+                                  <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 font-mono text-[10px] text-slate-300 shrink-0">
+                                    {src.kind}
+                                  </span>
+                                  {src.isMirror && (
+                                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-[10px] font-semibold text-emerald-300 shrink-0">
+                                      espelho
+                                    </span>
+                                  )}
+                                  <span
+                                    className="font-mono text-slate-400 truncate min-w-0 flex-1"
+                                    title={src.url}
+                                  >
+                                    {src.url}
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+
+                            <div className="pt-2 border-t border-white/10 space-y-2">
+                              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                                <input
+                                  type="url"
+                                  value={mirrorUrlValue}
+                                  disabled={isMirroring || mirrorBlocked}
+                                  onChange={(e) =>
+                                    setMirrorInputs((prev) => ({
+                                      ...prev,
+                                      [ep.id]: e.target.value,
+                                    }))
+                                  }
+                                  aria-label={`URL de origem para guardar cópia de ${epLabel}`}
+                                  placeholder="https://...r2.cloudflarestorage.com/... (link fresco)"
+                                  className="flex-1 min-w-0 h-9 px-3 rounded-lg bg-[#11151E] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 disabled:opacity-50"
+                                />
+                                <button
+                                  type="button"
+                                  disabled={isMirroring || mirrorBlocked}
+                                  onClick={() => void handleMirrorEpisode(ep, hasMirror)}
+                                  className="h-9 px-3 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed text-xs font-medium text-white inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                                >
+                                  <Download className="w-3.5 h-3.5" />
+                                  {isMirroring ? 'Guardando...' : 'Guardar cópia'}
+                                </button>
+                              </div>
+
+                              {hasMirror && (
+                                <label className="inline-flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer select-none">
+                                  <input
+                                    type="checkbox"
+                                    checked={forceRedo}
+                                    disabled={isMirroring}
+                                    onChange={(e) =>
+                                      setMirrorForceMap((prev) => ({
+                                        ...prev,
+                                        [ep.id]: e.target.checked,
+                                      }))
+                                    }
+                                    className="rounded border-white/20 bg-[#11151E] text-rose-500 focus:ring-rose-500"
+                                  />
+                                  <span>
+                                    Forçar refazer espelho (episódio já possui espelho; bloqueado até marcar)
+                                  </span>
+                                </label>
+                              )}
+
+                              {mirrorError && (
+                                <p className="text-xs text-rose-400" role="alert">
+                                  {mirrorError}
+                                </p>
+                              )}
+
+                              {mirrorSuccess && (
+                                <p className="text-xs text-emerald-300">
+                                  {mirrorSuccess}
+                                </p>
+                              )}
+                            </div>
+                          </div>
 
                           {testReports && testReports.length > 0 && (
                             <div className="space-y-1.5">

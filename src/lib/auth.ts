@@ -164,3 +164,54 @@ export function buildPublicEpisodeUrl(episodeId: string): string {
   const base = getPublicBaseUrl();
   return `${base}/e/${encodeURIComponent(episodeId)}`;
 }
+
+export function parseCookieValue(
+  cookieHeader: string | null | undefined,
+  name: string
+): string | null {
+  if (!cookieHeader || !name) return null;
+  const parts = cookieHeader.split(';');
+  for (const part of parts) {
+    const eqIndex = part.indexOf('=');
+    if (eqIndex <= 0) continue;
+    const key = part.slice(0, eqIndex).trim();
+    if (key !== name) continue;
+    const rawValue = part.slice(eqIndex + 1).trim();
+    if (!rawValue) return null;
+    try {
+      return decodeURIComponent(rawValue);
+    } catch {
+      return rawValue;
+    }
+  }
+  return null;
+}
+
+export function isSameOriginPostRequest(request: Request): boolean {
+  const originHeader = request.headers.get('origin');
+  if (!originHeader) {
+    return true;
+  }
+
+  try {
+    const originUrl = new URL(originHeader);
+    const forwardedHost = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim();
+    const hostHeader = request.headers.get('host')?.trim();
+    const requestUrlHost = new URL(request.url).host;
+    const expectedHost = forwardedHost || hostHeader || requestUrlHost;
+    return originUrl.host.toLowerCase() === expectedHost.toLowerCase();
+  } catch {
+    return false;
+  }
+}
+
+export function verifyAdminRequest(request: Request): {
+  authenticated: boolean;
+  sameOrigin: boolean;
+} {
+  const sameOrigin = isSameOriginPostRequest(request);
+  const token = parseCookieValue(request.headers.get('cookie'), ADMIN_SESSION_COOKIE_NAME);
+  const authenticated = Boolean(verifySessionToken(token));
+  return { authenticated, sameOrigin };
+}
+

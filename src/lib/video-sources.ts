@@ -21,6 +21,7 @@ export interface NormalizedVideoSource {
   needsProxy: boolean;
   requiresServerResolve: boolean;
   formatLabel: string;
+  isMirror?: boolean;
 }
 
 export interface UrlValidationResult {
@@ -192,6 +193,26 @@ export function validateHttpUrl(raw: string): UrlValidationResult {
 export function isMaximaimgHost(hostname: string): boolean {
   const lower = hostname.toLowerCase();
   return lower === 'maximaimg.online' || lower.endsWith('.maximaimg.online');
+}
+
+export function isVercelBlobHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase().replace(/\.+$/, '');
+  return (
+    lower.endsWith('.blob.vercel-storage.com') &&
+    lower.length > '.blob.vercel-storage.com'.length
+  );
+}
+
+export function isVercelBlobUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+    return isVercelBlobHost(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 export function parseMuxPlaybackUrl(url: URL): { playbackId: string; hlsUrl: string; embedUrl: string } | null {
@@ -419,6 +440,23 @@ export function normalizeVideoSource(
   const host = parsed.hostname.toLowerCase();
   const label = `Player ${slot}`;
   const forcedKind = normalizeExplicitSourceKind(explicitKind);
+  const blobMirror = isVercelBlobHost(host);
+
+  // 0a. Fontes espelho no Vercel Blob -> MP4 direto, sem proxy (/api/proxy/stream)
+  if (blobMirror && forcedKind !== 'iframe' && forcedKind !== 'hls') {
+    return {
+      slot,
+      label,
+      rawUrl: normalizedUrl,
+      resolvedUrl: normalizedUrl,
+      kind: 'mp4',
+      provider: 'direct',
+      needsProxy: false,
+      requiresServerResolve: false,
+      formatLabel: 'MP4 · Espelho',
+      isMirror: true,
+    };
+  }
 
   // 0. Override explícito ou página de player (playerricas.php / .php / .html) -> iframe direto (sem proxy)
   if (forcedKind === 'iframe' || (!forcedKind && isLikelyHtmlPage(parsed))) {
@@ -624,9 +662,15 @@ export interface EpisodeUrlsInput {
   source_kind_3?: ExplicitSourceKind | string | null;
   source_kind_4?: ExplicitSourceKind | string | null;
   source_kind_5?: ExplicitSourceKind | string | null;
+  is_mirror?: boolean | null;
+  is_mirror_2?: boolean | null;
+  is_mirror_3?: boolean | null;
+  is_mirror_4?: boolean | null;
+  is_mirror_5?: boolean | null;
 }
 
 function getSourcePriorityRank(src: NormalizedVideoSource): number {
+  if (src.isMirror || isVercelBlobUrl(src.resolvedUrl)) return -1;
   if (src.kind !== 'iframe') return 0;
   if (isPlayerricasSource(src.resolvedUrl) || classifyEmbedHost(src.resolvedUrl) === 'direct') {
     return 0;
@@ -642,12 +686,13 @@ export function collectEpisodeSources(episode: EpisodeUrlsInput): NormalizedVide
     slot: 1 | 2 | 3 | 4 | 5;
     url: string | null | undefined;
     kind: ExplicitSourceKind | string | null | undefined;
+    isMirror: boolean;
   }> = [
-    { slot: 1, url: episode.video_url, kind: episode.source_kind },
-    { slot: 2, url: episode.video_url_2, kind: episode.source_kind_2 },
-    { slot: 3, url: episode.video_url_3, kind: episode.source_kind_3 },
-    { slot: 4, url: episode.video_url_4, kind: episode.source_kind_4 },
-    { slot: 5, url: episode.video_url_5, kind: episode.source_kind_5 },
+    { slot: 1, url: episode.video_url, kind: episode.source_kind, isMirror: Boolean(episode.is_mirror) },
+    { slot: 2, url: episode.video_url_2, kind: episode.source_kind_2, isMirror: Boolean(episode.is_mirror_2) },
+    { slot: 3, url: episode.video_url_3, kind: episode.source_kind_3, isMirror: Boolean(episode.is_mirror_3) },
+    { slot: 4, url: episode.video_url_4, kind: episode.source_kind_4, isMirror: Boolean(episode.is_mirror_4) },
+    { slot: 5, url: episode.video_url_5, kind: episode.source_kind_5, isMirror: Boolean(episode.is_mirror_5) },
   ];
 
   const sources: NormalizedVideoSource[] = [];
@@ -655,7 +700,11 @@ export function collectEpisodeSources(episode: EpisodeUrlsInput): NormalizedVide
     if (!item.url || !item.url.trim()) continue;
     const normalized = normalizeVideoSource(item.url, item.slot, item.kind);
     if (normalized) {
-      sources.push(normalized);
+      const isMirror = Boolean(normalized.isMirror || item.isMirror);
+      sources.push({
+        ...normalized,
+        ...(isMirror ? { isMirror: true, needsProxy: false } : {}),
+      });
     }
   }
   return sources.sort((a, b) => getSourcePriorityRank(a) - getSourcePriorityRank(b));

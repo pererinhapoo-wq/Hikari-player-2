@@ -11,6 +11,8 @@
 import { Route as rootRouteImport } from './routes/__root'
 import { Route as IndexRouteImport } from './routes/index'
 import { Route as AdminRouteImport } from './routes/admin'
+import { Route as ApiEmbedRouteImport } from './routes/api/embed'
+import { Route as ApiMirrorRouteImport } from './routes/api/mirror'
 import { Route as ApiResolveBunnyRouteImport } from './routes/api/resolve-bunny'
 import { Route as EIdRouteImport } from './routes/e/$id'
 import { Route as ApiProxyStreamRouteImport } from './routes/api/proxy/stream'
@@ -23,6 +25,16 @@ const IndexRoute = IndexRouteImport.update({
 const AdminRoute = AdminRouteImport.update({
   id: '/admin',
   path: '/admin',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiEmbedRoute = ApiEmbedRouteImport.update({
+  id: '/api/embed',
+  path: '/api/embed',
+  getParentRoute: () => rootRouteImport,
+} as any)
+const ApiMirrorRoute = ApiMirrorRouteImport.update({
+  id: '/api/mirror',
+  path: '/api/mirror',
   getParentRoute: () => rootRouteImport,
 } as any)
 const ApiResolveBunnyRoute = ApiResolveBunnyRouteImport.update({
@@ -44,6 +56,8 @@ const ApiProxyStreamRoute = ApiProxyStreamRouteImport.update({
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
+  '/api/embed': typeof ApiEmbedRoute
+  '/api/mirror': typeof ApiMirrorRoute
   '/api/resolve-bunny': typeof ApiResolveBunnyRoute
   '/e/$id': typeof EIdRoute
   '/api/proxy/stream': typeof ApiProxyStreamRoute
@@ -51,6 +65,8 @@ export interface FileRoutesByFullPath {
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
+  '/api/embed': typeof ApiEmbedRoute
+  '/api/mirror': typeof ApiMirrorRoute
   '/api/resolve-bunny': typeof ApiResolveBunnyRoute
   '/e/$id': typeof EIdRoute
   '/api/proxy/stream': typeof ApiProxyStreamRoute
@@ -59,6 +75,8 @@ export interface FileRoutesById {
   __root__: typeof rootRouteImport
   '/': typeof IndexRoute
   '/admin': typeof AdminRoute
+  '/api/embed': typeof ApiEmbedRoute
+  '/api/mirror': typeof ApiMirrorRoute
   '/api/resolve-bunny': typeof ApiResolveBunnyRoute
   '/e/$id': typeof EIdRoute
   '/api/proxy/stream': typeof ApiProxyStreamRoute
@@ -66,13 +84,28 @@ export interface FileRoutesById {
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
   fullPaths:
-    '/' | '/admin' | '/api/resolve-bunny' | '/e/$id' | '/api/proxy/stream'
+    | '/'
+    | '/admin'
+    | '/api/embed'
+    | '/api/mirror'
+    | '/api/resolve-bunny'
+    | '/e/$id'
+    | '/api/proxy/stream'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/admin' | '/api/resolve-bunny' | '/e/$id' | '/api/proxy/stream'
+  to:
+    | '/'
+    | '/admin'
+    | '/api/embed'
+    | '/api/mirror'
+    | '/api/resolve-bunny'
+    | '/e/$id'
+    | '/api/proxy/stream'
   id:
     | '__root__'
     | '/'
     | '/admin'
+    | '/api/embed'
+    | '/api/mirror'
     | '/api/resolve-bunny'
     | '/e/$id'
     | '/api/proxy/stream'
@@ -81,6 +114,8 @@ export interface FileRouteTypes {
 export interface RootRouteChildren {
   IndexRoute: typeof IndexRoute
   AdminRoute: typeof AdminRoute
+  ApiEmbedRoute: typeof ApiEmbedRoute
+  ApiMirrorRoute: typeof ApiMirrorRoute
   ApiResolveBunnyRoute: typeof ApiResolveBunnyRoute
   EIdRoute: typeof EIdRoute
   ApiProxyStreamRoute: typeof ApiProxyStreamRoute
@@ -100,6 +135,20 @@ declare module '@tanstack/react-router' {
       path: '/admin'
       fullPath: '/admin'
       preLoaderRoute: typeof AdminRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/embed': {
+      id: '/api/embed'
+      path: '/api/embed'
+      fullPath: '/api/embed'
+      preLoaderRoute: typeof ApiEmbedRouteImport
+      parentRoute: typeof rootRouteImport
+    }
+    '/api/mirror': {
+      id: '/api/mirror'
+      path: '/api/mirror'
+      fullPath: '/api/mirror'
+      preLoaderRoute: typeof ApiMirrorRouteImport
       parentRoute: typeof rootRouteImport
     }
     '/api/resolve-bunny': {
@@ -129,6 +178,8 @@ declare module '@tanstack/react-router' {
 const rootRouteChildren: RootRouteChildren = {
   IndexRoute: IndexRoute,
   AdminRoute: AdminRoute,
+  ApiEmbedRoute: ApiEmbedRoute,
+  ApiMirrorRoute: ApiMirrorRoute,
   ApiResolveBunnyRoute: ApiResolveBunnyRoute,
   EIdRoute: EIdRoute,
   ApiProxyStreamRoute: ApiProxyStreamRoute,

@@ -10,7 +10,12 @@ import type {
   SanitizedDbError,
 } from '@/lib/types';
 import { planEpisodeSlotInsertion } from '@/lib/batch-import';
-import { type ExplicitSourceKind, normalizeExplicitSourceKind, validateHttpUrl } from '@/lib/video-sources';
+import {
+  type ExplicitSourceKind,
+  isVercelBlobUrl,
+  normalizeExplicitSourceKind,
+  validateHttpUrl,
+} from '@/lib/video-sources';
 import { resolveVideoInputUrl } from '@/lib/r2-resolver';
 
 export interface PlayerEpisode {
@@ -36,6 +41,11 @@ export interface PlayerEpisode {
   force_proxy_3: boolean | null;
   force_proxy_4: boolean | null;
   force_proxy_5: boolean | null;
+  is_mirror: boolean | null;
+  is_mirror_2: boolean | null;
+  is_mirror_3: boolean | null;
+  is_mirror_4: boolean | null;
+  is_mirror_5: boolean | null;
   created_at: string;
   updated_at: string;
 }
@@ -242,6 +252,11 @@ function mapEpisodeRow(row: Record<string, unknown>): PlayerEpisode {
     force_proxy_3: row.force_proxy_3 === false ? false : true,
     force_proxy_4: row.force_proxy_4 === false ? false : true,
     force_proxy_5: row.force_proxy_5 === false ? false : true,
+    is_mirror: Boolean(row.is_mirror),
+    is_mirror_2: Boolean(row.is_mirror_2),
+    is_mirror_3: Boolean(row.is_mirror_3),
+    is_mirror_4: Boolean(row.is_mirror_4),
+    is_mirror_5: Boolean(row.is_mirror_5),
     created_at: new Date(String(row.created_at)).toISOString(),
     updated_at: new Date(String(row.updated_at)).toISOString(),
   };
@@ -260,6 +275,11 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
              COALESCE(force_proxy_3, true) AS force_proxy_3,
              COALESCE(force_proxy_4, true) AS force_proxy_4,
              COALESCE(force_proxy_5, true) AS force_proxy_5,
+             COALESCE(is_mirror, false) AS is_mirror,
+             COALESCE(is_mirror_2, false) AS is_mirror_2,
+             COALESCE(is_mirror_3, false) AS is_mirror_3,
+             COALESCE(is_mirror_4, false) AS is_mirror_4,
+             COALESCE(is_mirror_5, false) AS is_mirror_5,
              created_at, updated_at
       FROM public.player_episodes
       ORDER BY created_at DESC
@@ -298,6 +318,11 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
           force_proxy_3: data.force_proxy_3 === false ? false : true,
           force_proxy_4: data.force_proxy_4 === false ? false : true,
           force_proxy_5: data.force_proxy_5 === false ? false : true,
+          is_mirror: Boolean(data.is_mirror),
+          is_mirror_2: Boolean(data.is_mirror_2),
+          is_mirror_3: Boolean(data.is_mirror_3),
+          is_mirror_4: Boolean(data.is_mirror_4),
+          is_mirror_5: Boolean(data.is_mirror_5),
         });
       });
     }
@@ -305,13 +330,16 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
   }
 }
 
-export async function getEpisodeById(id: string): Promise<PlayerEpisode | null> {
+export async function getEpisodeById(
+  id: string,
+  sqlOverride?: DiagnosticSqlTag
+): Promise<PlayerEpisode | null> {
   const cleanId = id.trim();
   if (!cleanId || cleanId.length > 64 || !/^[A-Za-z0-9_-]+$/.test(cleanId)) {
     return null;
   }
 
-  const sql = getSql();
+  const sql = sqlOverride ?? (getSql() as unknown as DiagnosticSqlTag);
   try {
     const rows = await sql`
       SELECT id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
@@ -323,6 +351,11 @@ export async function getEpisodeById(id: string): Promise<PlayerEpisode | null> 
              COALESCE(force_proxy_3, true) AS force_proxy_3,
              COALESCE(force_proxy_4, true) AS force_proxy_4,
              COALESCE(force_proxy_5, true) AS force_proxy_5,
+             COALESCE(is_mirror, false) AS is_mirror,
+             COALESCE(is_mirror_2, false) AS is_mirror_2,
+             COALESCE(is_mirror_3, false) AS is_mirror_3,
+             COALESCE(is_mirror_4, false) AS is_mirror_4,
+             COALESCE(is_mirror_5, false) AS is_mirror_5,
              created_at, updated_at
       FROM public.player_episodes
       WHERE id = ${cleanId}
@@ -359,6 +392,11 @@ export async function getEpisodeById(id: string): Promise<PlayerEpisode | null> 
         force_proxy_3: data.force_proxy_3 === false ? false : true,
         force_proxy_4: data.force_proxy_4 === false ? false : true,
         force_proxy_5: data.force_proxy_5 === false ? false : true,
+        is_mirror: Boolean(data.is_mirror),
+        is_mirror_2: Boolean(data.is_mirror_2),
+        is_mirror_3: Boolean(data.is_mirror_3),
+        is_mirror_4: Boolean(data.is_mirror_4),
+        is_mirror_5: Boolean(data.is_mirror_5),
       });
     }
     throw err;
@@ -910,6 +948,186 @@ export async function appendEpisodeIframeSource(
     saved: true,
     slot: plan.slot,
     reason: plan.reason,
+  };
+}
+
+export function findEpisodeMirrorSlot(episode: Pick<
+  PlayerEpisode,
+  | 'video_url'
+  | 'video_url_2'
+  | 'video_url_3'
+  | 'video_url_4'
+  | 'video_url_5'
+  | 'is_mirror'
+  | 'is_mirror_2'
+  | 'is_mirror_3'
+  | 'is_mirror_4'
+  | 'is_mirror_5'
+>): 1 | 2 | 3 | 4 | 5 | null {
+  const slots: Array<{ slot: 1 | 2 | 3 | 4 | 5; url: string | null; flag: boolean | null | undefined }> = [
+    { slot: 1, url: episode.video_url, flag: episode.is_mirror },
+    { slot: 2, url: episode.video_url_2, flag: episode.is_mirror_2 },
+    { slot: 3, url: episode.video_url_3, flag: episode.is_mirror_3 },
+    { slot: 4, url: episode.video_url_4, flag: episode.is_mirror_4 },
+    { slot: 5, url: episode.video_url_5, flag: episode.is_mirror_5 },
+  ];
+
+  for (const item of slots) {
+    if (!item.url?.trim()) continue;
+    if (item.flag === true || isVercelBlobUrl(item.url)) {
+      return item.slot;
+    }
+  }
+  return null;
+}
+
+export function findNextFreeMirrorSlot(episode: Pick<
+  PlayerEpisode,
+  'video_url' | 'video_url_2' | 'video_url_3' | 'video_url_4' | 'video_url_5'
+>): 1 | 2 | 3 | 4 | 5 | null {
+  if (!episode.video_url?.trim()) return 1;
+  if (!episode.video_url_2?.trim()) return 2;
+  if (!episode.video_url_3?.trim()) return 3;
+  if (!episode.video_url_4?.trim()) return 4;
+  if (!episode.video_url_5?.trim()) return 5;
+  return null;
+}
+
+export async function saveEpisodeMirrorSource(
+  episodeId: string,
+  blobUrl: string,
+  options: { force?: boolean; sqlOverride?: DiagnosticSqlTag } = {}
+): Promise<{
+  episode: PlayerEpisode;
+  slot: 1 | 2 | 3 | 4 | 5;
+}> {
+  const urlCheck = validateHttpUrl(blobUrl);
+  if (!urlCheck.valid || !urlCheck.normalizedUrl) {
+    throw new Error(`URL do espelho inválida: ${urlCheck.error ?? 'URL malformada'}`);
+  }
+  const normalizedBlobUrl = urlCheck.normalizedUrl;
+  const sql = options.sqlOverride ?? (getSql() as unknown as DiagnosticSqlTag);
+  const episode = await getEpisodeById(episodeId, options.sqlOverride);
+
+  if (!episode) {
+    throw new Error('Episódio não encontrado.');
+  }
+
+  const existingMirrorSlot = findEpisodeMirrorSlot(episode);
+  if (existingMirrorSlot && !options.force) {
+    throw new Error('Este episódio já possui um espelho salvo. Marque "forçar refazer" para substituir.');
+  }
+
+  const targetSlot = existingMirrorSlot ?? findNextFreeMirrorSlot(episode);
+  if (!targetSlot) {
+    throw new Error('Todos os 5 slots de fontes deste episódio já estão preenchidos.');
+  }
+
+  const runSlotUpdate = async (withMirrorColumn: boolean): Promise<Record<string, unknown> | undefined> => {
+    if (targetSlot === 1) {
+      const rows = withMirrorColumn
+        ? await sql`
+            UPDATE public.player_episodes
+            SET video_url = ${normalizedBlobUrl}, source_kind = 'mp4', force_proxy = false, is_mirror = true, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `
+        : await sql`
+            UPDATE public.player_episodes
+            SET video_url = ${normalizedBlobUrl}, source_kind = 'mp4', force_proxy = false, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `;
+      return (rows as Array<Record<string, unknown>>)[0];
+    }
+    if (targetSlot === 2) {
+      const rows = withMirrorColumn
+        ? await sql`
+            UPDATE public.player_episodes
+            SET video_url_2 = ${normalizedBlobUrl}, source_kind_2 = 'mp4', force_proxy_2 = false, is_mirror_2 = true, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `
+        : await sql`
+            UPDATE public.player_episodes
+            SET video_url_2 = ${normalizedBlobUrl}, source_kind_2 = 'mp4', force_proxy_2 = false, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `;
+      return (rows as Array<Record<string, unknown>>)[0];
+    }
+    if (targetSlot === 3) {
+      const rows = withMirrorColumn
+        ? await sql`
+            UPDATE public.player_episodes
+            SET video_url_3 = ${normalizedBlobUrl}, source_kind_3 = 'mp4', force_proxy_3 = false, is_mirror_3 = true, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `
+        : await sql`
+            UPDATE public.player_episodes
+            SET video_url_3 = ${normalizedBlobUrl}, source_kind_3 = 'mp4', force_proxy_3 = false, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `;
+      return (rows as Array<Record<string, unknown>>)[0];
+    }
+    if (targetSlot === 4) {
+      const rows = withMirrorColumn
+        ? await sql`
+            UPDATE public.player_episodes
+            SET video_url_4 = ${normalizedBlobUrl}, source_kind_4 = 'mp4', force_proxy_4 = false, is_mirror_4 = true, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `
+        : await sql`
+            UPDATE public.player_episodes
+            SET video_url_4 = ${normalizedBlobUrl}, source_kind_4 = 'mp4', force_proxy_4 = false, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `;
+      return (rows as Array<Record<string, unknown>>)[0];
+    }
+    const rows = withMirrorColumn
+      ? await sql`
+          UPDATE public.player_episodes
+          SET video_url_5 = ${normalizedBlobUrl}, source_kind_5 = 'mp4', force_proxy_5 = false, is_mirror_5 = true, updated_at = NOW()
+          WHERE id = ${episode.id}
+          RETURNING *
+        `
+      : await sql`
+          UPDATE public.player_episodes
+          SET video_url_5 = ${normalizedBlobUrl}, source_kind_5 = 'mp4', force_proxy_5 = false, updated_at = NOW()
+          WHERE id = ${episode.id}
+          RETURNING *
+        `;
+    return (rows as Array<Record<string, unknown>>)[0];
+  };
+
+  let row: Record<string, unknown> | undefined;
+  try {
+    row = await runSlotUpdate(true);
+  } catch (err) {
+    if (!isUndefinedColumnError(err)) {
+      throw err;
+    }
+    row = await runSlotUpdate(false);
+  }
+
+  if (!row) {
+    throw new Error('Episódio não encontrado ao gravar espelho.');
+  }
+
+  const mapped = mapEpisodeRow(row);
+  if (targetSlot === 1) mapped.is_mirror = true;
+  if (targetSlot === 2) mapped.is_mirror_2 = true;
+  if (targetSlot === 3) mapped.is_mirror_3 = true;
+  if (targetSlot === 4) mapped.is_mirror_4 = true;
+  if (targetSlot === 5) mapped.is_mirror_5 = true;
+
+  return {
+    episode: mapped,
+    slot: targetSlot,
   };
 }
 

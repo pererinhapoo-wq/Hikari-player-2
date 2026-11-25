@@ -17,6 +17,13 @@ export default defineConfig(({ command }) => {
       nitro({
         compatibilityDate: '2025-07-15',
         inlineDynamicImports: true,
+        vercel: {
+          functionRules: {
+            '/api/mirror': {
+              maxDuration: 'max',
+            },
+          },
+        },
       }),
       react(),
     ],

@@ -22,10 +22,33 @@ export interface EpisodeDto {
   source_kind_3: ExplicitSourceKind | null;
   source_kind_4: ExplicitSourceKind | null;
   source_kind_5: ExplicitSourceKind | null;
+  force_proxy?: boolean | null;
+  force_proxy_2?: boolean | null;
+  force_proxy_3?: boolean | null;
+  force_proxy_4?: boolean | null;
+  force_proxy_5?: boolean | null;
+  is_mirror?: boolean | null;
+  is_mirror_2?: boolean | null;
+  is_mirror_3?: boolean | null;
+  is_mirror_4?: boolean | null;
+  is_mirror_5?: boolean | null;
   public_url: string;
   created_at: string;
   updated_at: string;
 }
+
+export type MirrorEpisodeResult =
+  | {
+      ok: true;
+      episode: EpisodeDto;
+      blobUrl: string;
+      pathname: string;
+      slot: 1 | 2 | 3 | 4 | 5;
+    }
+  | {
+      ok: false;
+      error: string;
+    };
 
 export interface EpisodeFormPayload {
   anime_name?: string | null;
