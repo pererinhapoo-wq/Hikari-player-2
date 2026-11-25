@@ -1,10 +1,14 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlayerEpisode } from '@/lib/db';
+import { buildSignedProxyPath } from '@/lib/proxy-signing';
+import { handleProxyStreamRequest } from '@/lib/stream-proxy';
 import {
   buildThumbnailTimestamps,
+  classifyHlsThumbnailError,
   formatThumbnailTimeLabel,
   MAX_THUMBNAIL_UPLOAD_BYTES,
   pickBestThumbnailCandidate,
+  pickPreferredHlsLevelIndex,
 } from '@/lib/thumbnail-utils';
 import {
   buildThumbnailBlobPathname,
@@ -310,3 +314,195 @@ describe('handleThumbnailUploadRequest', () => {
     expect(putBlob).toHaveBeenCalledTimes(1);
   });
 });
+
+describe('M3U8 / HLS thumbnail resolution, proxy handling & error classification', () => {
+  beforeEach(() => {
+    process.env.PLAYER_SESSION_SECRET = '0123456789abcdef0123456789abcdef';
+  });
+
+  it('classifies the reported mywallpaper-4k-image.net M3U8 URL as HLS even if source_kind was mislabeled mp4', async () => {
+    const reportedM3u8 =
+      'https://cdn-s01.mywallpaper-4k-image.net/stream/sv/t/tsuihou-sareta-tensei-juu-kishi-wa-game-chishiki-de-musou-suru/21v2.mp4/index.m3u8';
+
+    const autoPlan = await resolveThumbnailSourceForAdmin(
+      { videoUrl: reportedM3u8, sourceKind: '' },
+      { signProxyUrl: (u) => buildSignedProxyPath(u) }
+    );
+    expect(autoPlan.ok).toBe(true);
+    expect(autoPlan.mode).toBe('hls');
+    expect(autoPlan.sourceKind).toBe('hls');
+    expect(autoPlan.proxyUrl).toContain('/api/proxy/stream?');
+
+    const mislabeledPlan = await resolveThumbnailSourceForAdmin(
+      { videoUrl: reportedM3u8, sourceKind: 'mp4' },
+      { signProxyUrl: (u) => buildSignedProxyPath(u) }
+    );
+    expect(mislabeledPlan.ok).toBe(true);
+    expect(mislabeledPlan.mode).toBe('hls');
+    expect(mislabeledPlan.sourceKind).toBe('hls');
+  });
+
+  it('preserves Vercel Blob MP4 highest priority over external M3U8 links', async () => {
+    const blobMp4 =
+      'https://q70piqtcusyiwtbz.public.blob.vercel-storage.com/mirrors/sem-anime/video-blob.mp4';
+    const externalM3u8 =
+      'https://cdn-s01.mywallpaper-4k-image.net/stream/sv/t/anime/21v2.mp4/index.m3u8';
+    const ep = makeEpisode({
+      video_url: externalM3u8,
+      source_kind: 'hls',
+      video_url_2: blobMp4,
+      source_kind_2: 'mp4',
+      is_mirror_2: true,
+    });
+
+    const plan = await resolveThumbnailSourceForAdmin(
+      { episodeId: ep.id, videoUrl: externalM3u8, sourceKind: 'hls' },
+      {
+        isDbConfigured: () => true,
+        getEpisodeById: async () => ep,
+        signProxyUrl: (u) => buildSignedProxyPath(u),
+      }
+    );
+
+    expect(plan.ok).toBe(true);
+    expect(plan.mode).toBe('direct');
+    expect(plan.blobPreferred).toBe(true);
+    expect(plan.directUrl).toBe(blobMp4);
+  });
+
+  it('selects optimal compatible variant from master M3U8 levels (smallest >= 360p H.264)', () => {
+    expect(
+      pickPreferredHlsLevelIndex([
+        { height: 1080, bitrate: 5_000_000, videoCodec: 'avc1.640028' },
+        { height: 480, bitrate: 1_200_000, videoCodec: 'avc1.4d401f' },
+        { height: 720, bitrate: 2_500_000, videoCodec: 'avc1.4d401f' },
+      ])
+    ).toBe(1);
+
+    expect(
+      pickPreferredHlsLevelIndex([
+        { height: 1080, bitrate: 3_000_000, videoCodec: 'hev1.1.6.L120.90' },
+        { height: 720, bitrate: 2_200_000, videoCodec: 'avc1.4d401f' },
+      ])
+    ).toBe(1);
+  });
+
+  it('rewrites master and media M3U8 playlists resolving relative URLs against redirected finalUrl', async () => {
+    const masterUrl = 'https://cdn-s01.mywallpaper-4k-image.net/redirect/master.m3u8';
+    const redirectedMasterUrl = 'https://edge02.mywallpaper-4k-image.net/hls/ep21/master.m3u8';
+    const masterBody = [
+      '#EXTM3U',
+      '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="JP",URI="audio/index.m3u8"',
+      '#EXT-X-STREAM-INF:BANDWIDTH=1200000,RESOLUTION=854x480',
+      '480p/index.m3u8',
+      '#EXT-X-STREAM-INF:BANDWIDTH=3500000,RESOLUTION=1920x1080',
+      '1080p/index.m3u8',
+    ].join('\n');
+
+    const signedMasterPath = buildSignedProxyPath(masterUrl);
+    const masterRes = await handleProxyStreamRequest(
+      new Request(`http://localhost:3000${signedMasterPath}`),
+      {
+        fetchWithRedirects: async () => ({
+          finalUrl: redirectedMasterUrl,
+          response: new Response(masterBody, {
+            status: 200,
+            headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+          }),
+        }),
+      }
+    );
+
+    expect(masterRes.status).toBe(200);
+    expect(masterRes.headers.get('access-control-allow-origin')).toBe('*');
+    const rewrittenMaster = await masterRes.text();
+    expect(rewrittenMaster).toContain(
+      encodeURIComponent('https://edge02.mywallpaper-4k-image.net/hls/ep21/audio/index.m3u8')
+    );
+    expect(rewrittenMaster).toContain(
+      encodeURIComponent('https://edge02.mywallpaper-4k-image.net/hls/ep21/480p/index.m3u8')
+    );
+
+    // Relative segments inside variant playlist + .webp MPEG-TS segment pass-through
+    const variantUrl = 'https://edge02.mywallpaper-4k-image.net/hls/ep21/480p/index.m3u8';
+    const variantBody = [
+      '#EXTM3U',
+      '#EXT-X-VERSION:3',
+      '#EXT-X-TARGETDURATION:10',
+      '#EXTINF:10.0,',
+      'seg-1-v1-a1.webp',
+      '#EXT-X-ENDLIST',
+    ].join('\n');
+
+    const variantRes = await handleProxyStreamRequest(
+      new Request(`http://localhost:3000${buildSignedProxyPath(variantUrl)}`),
+      {
+        fetchWithRedirects: async () => ({
+          finalUrl: variantUrl,
+          response: new Response(variantBody, {
+            status: 200,
+            headers: { 'content-type': 'text/plain' },
+          }),
+        }),
+      }
+    );
+    expect(variantRes.status).toBe(200);
+    const rewrittenVariant = await variantRes.text();
+    expect(rewrittenVariant).toContain(
+      encodeURIComponent('https://edge02.mywallpaper-4k-image.net/hls/ep21/480p/seg-1-v1-a1.webp')
+    );
+  });
+
+  it('rejects HTML error pages disguised as HTTP 200 manifests and preserves HTTP error status with CORS', async () => {
+    const targetM3u8 = 'https://cdn-s01.mywallpaper-4k-image.net/stream/ep21/index.m3u8';
+
+    const htmlRes = await handleProxyStreamRequest(
+      new Request(`http://localhost:3000${buildSignedProxyPath(targetM3u8)}`),
+      {
+        fetchWithRedirects: async () => ({
+          finalUrl: targetM3u8,
+          response: new Response('<!DOCTYPE html><html><body>Access Denied</body></html>', {
+            status: 200,
+            headers: { 'content-type': 'text/html; charset=utf-8' },
+          }),
+        }),
+      }
+    );
+    expect(htmlRes.status).toBe(502);
+    expect(htmlRes.headers.get('access-control-allow-origin')).toBe('*');
+
+    const forbiddenRes = await handleProxyStreamRequest(
+      new Request(`http://localhost:3000${buildSignedProxyPath(targetM3u8)}`),
+      {
+        fetchWithRedirects: async () => ({
+          finalUrl: targetM3u8,
+          response: new Response('Forbidden', { status: 403 }),
+        }),
+      }
+    );
+    expect(forbiddenRes.status).toBe(403);
+    expect(forbiddenRes.headers.get('access-control-allow-origin')).toBe('*');
+  });
+
+  it('classifies HLS.js manifest, segment, codec, and network errors into clear messages', () => {
+    expect(
+      classifyHlsThumbnailError({ type: 'networkError', details: 'manifestLoadError', httpCode: 403 })
+    ).toContain('HTTP 403');
+    expect(
+      classifyHlsThumbnailError({ type: 'networkError', details: 'manifestParsingError' })
+    ).toContain('página de erro HTML');
+    expect(
+      classifyHlsThumbnailError({ type: 'networkError', details: 'fragLoadError', httpCode: 502 })
+    ).toContain('segmentos');
+    expect(
+      classifyHlsThumbnailError({ type: 'mediaError', details: 'bufferAddCodecError' })
+    ).toContain('incompatível');
+    expect(
+      classifyHlsThumbnailError({ type: 'networkError', details: 'fragLoadTimeOut' })
+    ).toContain('Tempo limite');
+    // Unavailable/invalid durations yield no timestamps
+    expect(buildThumbnailTimestamps(Number.POSITIVE_INFINITY)).toEqual([]);
+    expect(buildThumbnailTimestamps(-5)).toEqual([]);
+  });
+});
+

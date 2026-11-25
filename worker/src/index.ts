@@ -546,6 +546,41 @@ function getDefaultEdgeCache(): Cache | null {
   }
 }
 
+function isInvalidHtmlManifestResponse(
+  bytes: Uint8Array,
+  contentType: string,
+  targetUrl: URL
+): boolean {
+  const lowerCt = contentType.toLowerCase();
+  const lowerPath = targetUrl.pathname.toLowerCase();
+  const isManifestTarget =
+    lowerPath.endsWith('.m3u8') ||
+    lowerPath.endsWith('.m3u') ||
+    lowerCt.includes('mpegurl') ||
+    lowerCt.includes('m3u8');
+
+  if (lowerCt.includes('text/html') || lowerCt.includes('application/xhtml')) {
+    return true;
+  }
+
+  if (!isManifestTarget) {
+    return false;
+  }
+
+  const headText = new TextDecoder('utf-8', { fatal: false })
+    .decode(bytes.slice(0, 256))
+    .trimStart()
+    .toLowerCase();
+
+  return (
+    headText.startsWith('<!doctype') ||
+    headText.startsWith('<html') ||
+    headText.startsWith('<head') ||
+    headText.startsWith('<body') ||
+    headText.startsWith('<?xml')
+  );
+}
+
 export async function handleWorkerProxyRequest(
   request: Request,
   env: WorkerEnv,
@@ -698,6 +733,12 @@ export async function handleWorkerProxyRequest(
             })
           );
         }
+        if (isInvalidHtmlManifestResponse(rawBytes, contentType, finalParsed)) {
+          return new Response('Origem retornou página HTML em vez de manifesto HLS válido.', {
+            status: 502,
+            headers: getCorsHeaders(),
+          });
+        }
         return cacheIfEligible(
           new Response(rawBytes, {
             status: upstream.status,
@@ -744,6 +785,18 @@ export async function handleWorkerProxyRequest(
             headers: buildManifestResponseHeaders(upstream),
           })
         );
+      }
+
+      if (isInvalidHtmlManifestResponse(initialBytes, contentType, finalParsed)) {
+        try {
+          await reader.cancel();
+        } catch {
+          // Ignorar erro ao cancelar leitura HTML inválida
+        }
+        return new Response('Origem retornou página HTML em vez de manifesto HLS válido.', {
+          status: 502,
+          headers: getCorsHeaders(),
+        });
       }
 
       const outHeaders = buildBinaryResponseHeaders(upstream, contentType, finalParsed);

@@ -239,6 +239,52 @@ function buildManifestResponseHeaders(): Headers {
   return outHeaders;
 }
 
+function buildProxyErrorResponse(message: string, status: number): Response {
+  return new Response(message, {
+    status,
+    headers: {
+      'Content-Type': 'text/plain; charset=utf-8',
+      'Cache-Control': 'no-store',
+      'Access-Control-Allow-Origin': '*',
+    },
+  });
+}
+
+function isInvalidHtmlManifestResponse(
+  bytes: Uint8Array,
+  contentType: string,
+  targetUrl: URL
+): boolean {
+  const lowerCt = contentType.toLowerCase();
+  const lowerPath = targetUrl.pathname.toLowerCase();
+  const isManifestTarget =
+    lowerPath.endsWith('.m3u8') ||
+    lowerPath.endsWith('.m3u') ||
+    lowerCt.includes('mpegurl') ||
+    lowerCt.includes('m3u8');
+
+  if (lowerCt.includes('text/html') || lowerCt.includes('application/xhtml')) {
+    return true;
+  }
+
+  if (!isManifestTarget) {
+    return false;
+  }
+
+  const headText = new TextDecoder('utf-8', { fatal: false })
+    .decode(bytes.slice(0, 256))
+    .trimStart()
+    .toLowerCase();
+
+  return (
+    headText.startsWith('<!doctype') ||
+    headText.startsWith('<html') ||
+    headText.startsWith('<head') ||
+    headText.startsWith('<body') ||
+    headText.startsWith('<?xml')
+  );
+}
+
 async function handleInspectedUpstreamResponse(
   upstream: Response,
   finalUrl: string,
@@ -257,6 +303,13 @@ async function handleInspectedUpstreamResponse(
         status: 200,
         headers: buildManifestResponseHeaders(),
       });
+    }
+
+    if (isInvalidHtmlManifestResponse(rawBytes, contentType, finalParsed)) {
+      return buildProxyErrorResponse(
+        'Origem retornou página HTML em vez de manifesto HLS válido.',
+        502
+      );
     }
 
     const outHeaders = buildBinaryResponseHeaders(upstream, contentType, finalParsed);
@@ -307,6 +360,18 @@ async function handleInspectedUpstreamResponse(
       status: 200,
       headers: buildManifestResponseHeaders(),
     });
+  }
+
+  if (isInvalidHtmlManifestResponse(initialBytes, contentType, finalParsed)) {
+    try {
+      await reader.cancel();
+    } catch {
+      // Ignorar erro ao cancelar leitura HTML inválida
+    }
+    return buildProxyErrorResponse(
+      'Origem retornou página HTML em vez de manifesto HLS válido.',
+      502
+    );
   }
 
   // Não é manifesto #EXTM3U (ex.: segmento binário ou chave servido com Content-Type: text/plain):
@@ -366,34 +431,35 @@ export async function handleProxyStreamRequest(
 
   const urlCheck = validateHttpUrl(rawTarget);
   if (!urlCheck.valid || !urlCheck.normalizedUrl) {
-    return new Response('Parâmetro de URL inválido.', { status: 400 });
+    return buildProxyErrorResponse('Parâmetro de URL inválido.', 400);
   }
 
   if (!verifyProxySignature(urlCheck.normalizedUrl, exp, sig)) {
-    return new Response('Assinatura de proxy inválida ou expirada.', { status: 403 });
+    return buildProxyErrorResponse('Assinatura de proxy inválida ou expirada.', 403);
   }
 
   try {
     const targetUrl = new URL(urlCheck.normalizedUrl);
     if (!isDirectMediaHost(targetUrl.hostname) && !isAllowedProxyMediaUrl(targetUrl)) {
-      return new Response('Extensão de destino não permitida no proxy.', { status: 403 });
+      return buildProxyErrorResponse('Extensão de destino não permitida no proxy.', 403);
     }
     const upstreamHeaders = getUpstreamHeaders(targetUrl, request);
     const { response: upstream, finalUrl } = await fetchWithRedirects(
       targetUrl.toString(),
-      { headers: upstreamHeaders, timeoutMs: 20000 }
+      { headers: upstreamHeaders, timeoutMs: 30000 }
     );
 
     if (!upstream.ok && upstream.status !== 206) {
-      return new Response(`Origem retornou erro HTTP ${upstream.status}.`, {
-        status: upstream.status >= 400 && upstream.status < 600 ? upstream.status : 502,
-      });
+      return buildProxyErrorResponse(
+        `Origem retornou erro HTTP ${upstream.status}.`,
+        upstream.status >= 400 && upstream.status < 600 ? upstream.status : 502
+      );
     }
 
     const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
     const finalParsed = new URL(finalUrl);
     if (!isDirectMediaHost(finalParsed.hostname) && !isAllowedProxyMediaUrl(finalParsed)) {
-      return new Response('Extensão de destino não permitida no proxy.', { status: 403 });
+      return buildProxyErrorResponse('Extensão de destino não permitida no proxy.', 403);
     }
 
     if (upstream.status !== 206 && shouldInspectForHlsManifest(contentType, finalParsed)) {
@@ -408,6 +474,6 @@ export async function handleProxyStreamRequest(
   } catch (err) {
     const message =
       err instanceof Error ? err.message : 'Falha ao processar stream via proxy.';
-    return new Response(message, { status: 502 });
+    return buildProxyErrorResponse(message, 502);
   }
 }

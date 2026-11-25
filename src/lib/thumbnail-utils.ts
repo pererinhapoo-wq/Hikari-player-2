@@ -108,6 +108,15 @@ export interface PickedThumbnailCandidate {
   embedMode: 'direct' | 'proxied' | 'other';
 }
 
+function isExplicitHlsPlaylistUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl);
+    return /\.(m3u8|m3u)$/i.test(parsed.pathname);
+  } catch {
+    return /\.(m3u8|m3u)(?:[?#]|$)/i.test(rawUrl);
+  }
+}
+
 export function pickBestThumbnailCandidate(
   sources: ThumbnailSourceInput[]
 ): PickedThumbnailCandidate | null {
@@ -132,7 +141,13 @@ export function pickBestThumbnailCandidate(
     if (!normalized) return;
 
     const isBlob = isVercelBlobUrl(normalized.resolvedUrl) || isVercelBlobUrl(normalized.rawUrl);
-    const score = getCandidatePriorityScore(isBlob, normalized.kind, normalized.requiresServerResolve);
+    const effectiveKind: SourceKind =
+      !isBlob && isExplicitHlsPlaylistUrl(normalized.resolvedUrl) ? 'hls' : normalized.kind;
+    const score = getCandidatePriorityScore(
+      isBlob,
+      effectiveKind,
+      normalized.requiresServerResolve
+    );
 
     candidates.push({
       score,
@@ -141,8 +156,12 @@ export function pickBestThumbnailCandidate(
         slot,
         rawUrl: normalized.rawUrl,
         resolvedUrl: normalized.resolvedUrl,
-        kind: normalized.kind,
-        formatLabel: isBlob ? `${normalized.kind.toUpperCase()} · Vercel Blob` : normalized.formatLabel,
+        kind: effectiveKind,
+        formatLabel: isBlob
+          ? `${effectiveKind.toUpperCase()} · Vercel Blob`
+          : effectiveKind === 'hls' && normalized.kind !== 'hls'
+            ? 'HLS'
+            : normalized.formatLabel,
         isBlob,
         requiresServerResolve: normalized.requiresServerResolve,
         embedMode: classifyEmbedHost(normalized.resolvedUrl),
@@ -156,6 +175,112 @@ export function pickBestThumbnailCandidate(
 
   candidates.sort((a, b) => a.score - b.score || a.order - b.order);
   return candidates[0].data;
+}
+
+export interface HlsLevelSummary {
+  height?: number;
+  width?: number;
+  bitrate?: number;
+  videoCodec?: string;
+}
+
+export function pickPreferredHlsLevelIndex(levels: ReadonlyArray<HlsLevelSummary>): number {
+  if (!levels || levels.length <= 1) return levels.length === 1 ? 0 : -1;
+
+  const annotated = levels.map((lvl, index) => ({
+    index,
+    height: typeof lvl.height === 'number' && lvl.height > 0 ? lvl.height : 0,
+    bitrate: typeof lvl.bitrate === 'number' && lvl.bitrate > 0 ? lvl.bitrate : Number.MAX_SAFE_INTEGER,
+    codec: (lvl.videoCodec ?? '').toLowerCase(),
+  }));
+
+  // Prefer H.264/AVC variants when available for widest browser canvas/MSE compatibility
+  const avcLevels = annotated.filter((l) => !l.codec || l.codec.includes('avc1'));
+  const pool = avcLevels.length > 0 ? avcLevels : annotated;
+
+  // Ideal for 640px thumbnail capture: smallest variant >= 360p (fast download, crisp frame)
+  const sdOrHd = pool
+    .filter((l) => l.height >= 360)
+    .sort((a, b) => a.height - b.height || a.bitrate - b.bitrate);
+
+  if (sdOrHd.length > 0) {
+    return sdOrHd[0].index;
+  }
+
+  // Fallback to highest available if all are < 360p or lack height metadata
+  const byBitrate = [...pool].sort((a, b) => a.bitrate - b.bitrate);
+  return byBitrate[0]?.index ?? 0;
+}
+
+export interface HlsThumbnailErrorInput {
+  type?: string;
+  details?: string;
+  httpCode?: number;
+}
+
+export function classifyHlsThumbnailError(input: HlsThumbnailErrorInput): string {
+  const type = (input.type ?? '').toLowerCase();
+  const details = (input.details ?? '').toLowerCase();
+  const httpCode =
+    typeof input.httpCode === 'number' && Number.isFinite(input.httpCode) && input.httpCode > 0
+      ? input.httpCode
+      : null;
+
+  if (details.includes('manifestload') || details.includes('levelload') || details.includes('audiotrackload')) {
+    if (httpCode === 401 || httpCode === 403 || httpCode === 451) {
+      return `Playlist M3U8 bloqueada ou com acesso negado pelo servidor externo (HTTP ${httpCode}).`;
+    }
+    if (httpCode === 404 || httpCode === 410) {
+      return `Playlist M3U8 não encontrada no servidor externo (HTTP ${httpCode}).`;
+    }
+    if (httpCode !== null && httpCode >= 500) {
+      return `Erro no servidor externo ou proxy ao carregar a playlist M3U8 (HTTP ${httpCode}).`;
+    }
+    if (details.includes('timeout')) {
+      return 'Tempo limite esgotado ao carregar a playlist M3U8.';
+    }
+    return 'Playlist M3U8 inacessível ou bloqueada pelo servidor externo.';
+  }
+
+  if (details.includes('manifestparsing') || details.includes('levelparsing')) {
+    return 'A URL não retornou uma playlist M3U8 válida (conteúdo inválido ou página de erro HTML).';
+  }
+
+  if (
+    details.includes('fragload') ||
+    details.includes('keyload') ||
+    details.includes('internalexception')
+  ) {
+    if (httpCode === 401 || httpCode === 403 || httpCode === 451) {
+      return `Servidor externo bloqueou o carregamento dos segmentos de vídeo (HTTP ${httpCode}).`;
+    }
+    if (httpCode === 404 || httpCode === 410) {
+      return `Segmentos de vídeo da playlist M3U8 não encontrados (HTTP ${httpCode}).`;
+    }
+    if (httpCode !== null && httpCode >= 500) {
+      return `Falha ao carregar segmentos de vídeo da playlist M3U8 (HTTP ${httpCode}).`;
+    }
+    if (details.includes('timeout')) {
+      return 'Tempo limite esgotado ao baixar os segmentos de vídeo da playlist M3U8.';
+    }
+    return 'Falha ao carregar os segmentos de vídeo da playlist M3U8.';
+  }
+
+  if (
+    type === 'mediaerror' ||
+    details.includes('bufferaddcodec') ||
+    details.includes('incompatiblecodecs') ||
+    details.includes('fragparsing') ||
+    details.includes('bufferappend')
+  ) {
+    return 'Formato ou codec do stream M3U8 incompatível com a captura no navegador.';
+  }
+
+  if (type === 'networkerror') {
+    return 'Falha de rede ao carregar o stream M3U8.';
+  }
+
+  return 'Erro no motor HLS.js ao processar a playlist M3U8.';
 }
 
 export function buildIncompatibleEmbedMessage(urlOrHostHint?: string): string {
