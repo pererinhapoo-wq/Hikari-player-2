@@ -60,6 +60,7 @@ import {
   adminLoginFn,
   adminLogoutFn,
   adminProcessBatchItemFn,
+  adminTestEpisodeSourcesFn,
   adminTestSourceFn,
   adminUpdateEpisodeFn,
   getAdminDashboardFn,
@@ -522,6 +523,14 @@ function AdminPage() {
     if (!trimmed) return;
     setSlotTesting(true);
     setSlotTestError(null);
+    const editingEp = editingId
+      ? initialState.episodes.find((item) => item.id === editingId) ?? null
+      : null;
+    const siblingOriginal = editingEp
+      ? getEpisodeSourcesList(editingEp).find(
+          (src) => src.slot !== 1 && !src.isMirror && src.kind !== 'iframe'
+        )
+      : undefined;
     try {
       const res = await adminTestSourceFn({
         data: {
@@ -529,6 +538,8 @@ function AdminPage() {
           label: 'Player 1',
           url: trimmed,
           kind: form.source_kind,
+          isMirror: isVercelBlobUrl(trimmed),
+          originalUrl: siblingOriginal?.url ?? null,
         },
       });
       if (!res.ok) {
@@ -546,7 +557,10 @@ function AdminPage() {
   };
 
   const handleTestEpisodeSources = async (ep: EpisodeDto) => {
-    if (!ep.video_url?.trim()) return;
+    const episodeSources = getEpisodeSourcesList(ep);
+    if (episodeSources.length === 0) return;
+
+    const typedOriginalUrl = (mirrorInputs[ep.id] ?? '').trim();
 
     setOpenMenuId(null);
     setEpisodeTestingId(ep.id);
@@ -556,18 +570,22 @@ function AdminPage() {
       return next;
     });
     try {
-      const res = await adminTestSourceFn({
+      const res = await adminTestEpisodeSourcesFn({
         data: {
-          slot: 1,
-          label: 'Player 1',
-          url: ep.video_url,
-          kind: (ep.source_kind ?? '') as ExplicitSourceKind | '',
+          sources: episodeSources.map((src) => ({
+            slot: src.slot,
+            label: `Player ${src.slot}${src.isMirror ? ' (espelho)' : ''}`,
+            url: src.url,
+            kind: src.kind,
+            isMirror: src.isMirror,
+            originalUrl: src.isMirror && typedOriginalUrl ? typedOriginalUrl : null,
+          })),
         },
       });
       if (!res.ok) {
         setEpisodeTestErrors((prev) => ({ ...prev, [ep.id]: res.error }));
       } else {
-        setEpisodeTests((prev) => ({ ...prev, [ep.id]: [res.report] }));
+        setEpisodeTests((prev) => ({ ...prev, [ep.id]: res.reports }));
       }
     } catch (err) {
       setEpisodeTestErrors((prev) => ({
@@ -2523,11 +2541,20 @@ function SourceDiagnosticTable({ reports }: { reports: SourceTestReport[] }) {
           {reports.map((report) => {
             const firstLine =
               report.withHeaders.firstLine ?? report.noHeaders.firstLine ?? '—';
+            const sizeBytes =
+              report.withHeaders.contentLength ?? report.noHeaders.contentLength ?? null;
+            const sizeMbLabel =
+              typeof sizeBytes === 'number' && sizeBytes > 0
+                ? `${(sizeBytes / (1024 * 1024)).toFixed(1)} MB`
+                : null;
             return (
               <tr key={`${report.slot}-${report.url}`} className="align-top text-slate-200">
                 <td className="px-2.5 py-2 whitespace-nowrap">
                   <div className="font-semibold text-white">{report.label}</div>
-                  <div className="text-[10px] text-slate-400">{report.detectedKind}</div>
+                  <div className="text-[10px] text-slate-400">
+                    {report.detectedKind}
+                    {sizeMbLabel ? ` · ${sizeMbLabel}` : ''}
+                  </div>
                 </td>
                 <td className="px-2.5 py-2 whitespace-nowrap">
                   <div>
@@ -2552,9 +2579,9 @@ function SourceDiagnosticTable({ reports }: { reports: SourceTestReport[] }) {
                     Ref: {report.withHeaders.sentReferer ?? 'vazio'}
                   </div>
                 </td>
-                <td className="px-2.5 py-2 whitespace-nowrap">
+                <td className="px-2.5 py-2">
                   <span
-                    className={`font-semibold ${
+                    className={`font-semibold whitespace-nowrap ${
                       report.verdict === 'direto_ok'
                         ? 'text-emerald-400'
                         : report.verdict === 'proxy_necessario'
@@ -2564,6 +2591,11 @@ function SourceDiagnosticTable({ reports }: { reports: SourceTestReport[] }) {
                   >
                     {report.verdictLabel}
                   </span>
+                  {report.verdictReason && (
+                    <div className="text-[10px] font-sans text-slate-300 mt-0.5 max-w-[260px] leading-snug">
+                      {report.verdictReason}
+                    </div>
+                  )}
                   {report.embedDiagnostic && (
                     <div className="text-[10px] text-slate-300 mt-0.5 space-y-0.5">
                       <div>{report.embedDiagnostic.hostLabel}</div>

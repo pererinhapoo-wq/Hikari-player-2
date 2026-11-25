@@ -13,10 +13,14 @@ import {
   deriveMirrorSourceKind,
   EXPIRED_MIRROR_LINK_MESSAGE,
   handleMirrorRequest,
+  INCOMPLETE_MIRROR_MESSAGE,
   isAllowedMirrorSourceHost,
   isExpiredUpstreamResponse,
+  MAX_MIRROR_BYTES,
+  MIRROR_CHUNK_BYTES,
   mirrorEpisodeSource,
   safeFetchMirrorStream,
+  TOO_LARGE_MIRROR_MESSAGE,
 } from '@/lib/mirror';
 import { isAllowedProxyMediaUrl } from '@/lib/ssrf';
 import {
@@ -93,18 +97,19 @@ describe('Espelhamento no Vercel Blob (/api/mirror)', () => {
     );
   });
 
-  it('3. faz streaming do download direto para put(pathname, body) com allowOverwrite e multipart sem carregar tudo em memória', async () => {
+  it('3. faz streaming em partes com allowOverwrite, contentType video/mp4 e multipart sem carregar tudo em memória', async () => {
     const episode = makePlayerEpisode();
+    const payloadBytes = new Uint8Array([0, 0, 0, 24]);
     const sourceStream = new ReadableStream<Uint8Array>({
       start(controller) {
-        controller.enqueue(new Uint8Array([0, 0, 0, 24]));
+        controller.enqueue(payloadBytes);
         controller.close();
       },
     });
 
     const capturedPuts: Array<{
       pathname: string;
-      body: ReadableStream<Uint8Array>;
+      receivedBytes: number;
       options: Record<string, unknown>;
     }> = [];
     let savedArgs: { episodeId: string; blobUrl: string; force?: boolean } | null = null;
@@ -123,11 +128,15 @@ describe('Espelhamento no Vercel Blob (/api/mirror)', () => {
           finalUrl: url,
           response: new Response(sourceStream, {
             status: 200,
-            headers: { 'Content-Type': 'video/mp4' },
+            headers: {
+              'Content-Type': 'video/mp4',
+              'Content-Length': String(payloadBytes.byteLength),
+            },
           }),
         }),
         putBlob: async (pathname, body, options) => {
-          capturedPuts.push({ pathname, body, options });
+          const buf = await new Response(body).arrayBuffer();
+          capturedPuts.push({ pathname, receivedBytes: buf.byteLength, options });
           return {
             url: 'https://abcstore.public.blob.vercel-storage.com/mirrors/frieren-alem-da-jornada/ep_mirror_test_01.mp4',
             pathname,
@@ -153,7 +162,7 @@ describe('Espelhamento no Vercel Blob (/api/mirror)', () => {
     expect(outcome.status).toBe(200);
     expect(outcome.body.ok).toBe(true);
     expect(capturedPut?.pathname).toBe('mirrors/frieren-alem-da-jornada/ep_mirror_test_01.mp4');
-    expect(capturedPut?.body).toBe(sourceStream);
+    expect(capturedPut?.receivedBytes).toBe(payloadBytes.byteLength);
     expect(capturedPut?.options).toMatchObject({
       access: 'public',
       allowOverwrite: true,
@@ -419,13 +428,19 @@ describe('Espelhamento no Vercel Blob (/api/mirror)', () => {
           finalUrl: url,
           response: new Response(new Uint8Array([0, 0, 0, 24]), {
             status: 200,
-            headers: { 'Content-Type': 'video/mp4' },
+            headers: {
+              'Content-Type': 'video/mp4',
+              'Content-Length': '4',
+            },
           }),
         }),
-        putBlob: async (pathname) => ({
-          url: `https://q70piqtcusyiwtbz.public.blob.vercel-storage.com/${pathname}`,
-          pathname,
-        }),
+        putBlob: async (pathname, body) => {
+          await new Response(body).arrayBuffer();
+          return {
+            url: `https://q70piqtcusyiwtbz.public.blob.vercel-storage.com/${pathname}`,
+            pathname,
+          };
+        },
         saveMirrorSource: async (_epId, blobUrl, opts) => {
           capturedSaveOpts = { ...opts };
           return {
@@ -490,5 +505,258 @@ describe('Espelhamento no Vercel Blob (/api/mirror)', () => {
 
     const statements = splitSqlStatements(migrationSql);
     expect(statements).toHaveLength(1);
+  });
+
+  it('14. recusa arquivos acima de 400 MB antes de enviar com "arquivo grande demais para cópia"', async () => {
+    const episode = makePlayerEpisode();
+    let putCalled = false;
+    let saveCalled = false;
+    let canceled = false;
+
+    const oversizedBody = new ReadableStream<Uint8Array>({
+      cancel() {
+        canceled = true;
+      },
+    });
+
+    const outcome = await mirrorEpisodeSource(
+      {
+        episodeId: episode.id,
+        sourceUrl: 'https://bucket123.r2.cloudflarestorage.com/anime/huge.mp4',
+      },
+      {
+        isDbConfigured: () => true,
+        blobToken: 'vercel_blob_rw_test_token',
+        getEpisode: async () => episode,
+        fetchStream: async (url) => ({
+          finalUrl: url,
+          response: new Response(oversizedBody, {
+            status: 206,
+            headers: {
+              'Content-Type': 'video/mp4',
+              'Content-Length': String(MIRROR_CHUNK_BYTES),
+              'Content-Range': `bytes 0-${MIRROR_CHUNK_BYTES - 1}/${MAX_MIRROR_BYTES + 1}`,
+            },
+          }),
+        }),
+        putBlob: async () => {
+          putCalled = true;
+          return { url: 'https://abc.public.blob.vercel-storage.com/x.mp4', pathname: 'x.mp4' };
+        },
+        saveMirrorSource: async () => {
+          saveCalled = true;
+          return { slot: 2, episode };
+        },
+      }
+    );
+
+    expect(outcome.status).toBe(413);
+    expect(outcome.body).toEqual({
+      ok: false,
+      error: TOO_LARGE_MIRROR_MESSAGE,
+    });
+    expect(canceled).toBe(true);
+    expect(putCalled).toBe(false);
+    expect(saveCalled).toBe(false);
+  });
+
+  it('15. baixa e envia em partes de 8 MB usando Range na origem e put com multipart: true e contentType video/mp4', async () => {
+    const episode = makePlayerEpisode();
+    const totalBytes = MIRROR_CHUNK_BYTES * 2 + 12345; // ~16.01 MB -> 3 partes (8MB, 8MB, 12345B)
+    const fullBuffer = new Uint8Array(totalBytes);
+    for (let i = 0; i < totalBytes; i++) {
+      fullBuffer[i] = i % 251;
+    }
+
+    const requestedRanges: Array<string | undefined> = [];
+    let uploadedBuffer: Uint8Array = new Uint8Array(0);
+    let capturedOptions: Record<string, unknown> | null = null;
+
+    const outcome = await mirrorEpisodeSource(
+      {
+        episodeId: episode.id,
+        sourceUrl: 'https://bucket123.r2.cloudflarestorage.com/anime/ep02.mp4',
+      },
+      {
+        isDbConfigured: () => true,
+        blobToken: 'vercel_blob_rw_test_token',
+        getEpisode: async () => episode,
+        fetchStream: async (url, opts) => {
+          requestedRanges.push(opts?.range);
+          const match = /^bytes=(\d+)-(\d+)$/.exec(opts?.range ?? '');
+          expect(match).not.toBeNull();
+          const start = Number(match![1]);
+          const end = Math.min(Number(match![2]), totalBytes - 1);
+          const slice = fullBuffer.subarray(start, end + 1);
+          return {
+            finalUrl: url,
+            response: new Response(slice, {
+              status: 206,
+              headers: {
+                'Content-Type': 'video/mp4',
+                'Content-Length': String(slice.byteLength),
+                'Content-Range': `bytes ${start}-${end}/${totalBytes}`,
+              },
+            }),
+          };
+        },
+        putBlob: async (pathname, body, opts) => {
+          capturedOptions = opts;
+          uploadedBuffer = new Uint8Array(await new Response(body).arrayBuffer());
+          return {
+            url: `https://abc.public.blob.vercel-storage.com/${pathname}`,
+            pathname,
+          };
+        },
+        saveMirrorSource: async (_epId, blobUrl, opts) => ({
+          slot: 2,
+          episode: {
+            ...episode,
+            video_url_2: blobUrl,
+            source_kind_2: opts.kind ?? 'mp4',
+            force_proxy_2: Boolean(opts.forceProxy),
+            is_mirror_2: true,
+          },
+        }),
+      }
+    );
+
+    expect(outcome.status).toBe(200);
+    expect(outcome.body.ok).toBe(true);
+    expect(requestedRanges).toEqual([
+      `bytes=0-${MIRROR_CHUNK_BYTES - 1}`,
+      `bytes=${MIRROR_CHUNK_BYTES}-${MIRROR_CHUNK_BYTES * 2 - 1}`,
+      `bytes=${MIRROR_CHUNK_BYTES * 2}-${totalBytes - 1}`,
+    ]);
+    expect(capturedOptions).toMatchObject({
+      multipart: true,
+      contentType: 'video/mp4',
+    });
+    expect(uploadedBuffer.byteLength).toBe(totalBytes);
+    expect(uploadedBuffer[0]).toBe(fullBuffer[0]);
+    expect(uploadedBuffer[totalBytes - 1]).toBe(fullBuffer[totalBytes - 1]);
+  });
+
+  it('16. se bytes enviados divergirem do content-length, apaga o blob, nunca grava no banco e responde "cópia incompleta, tente de novo"', async () => {
+    const episode = makePlayerEpisode();
+    const deletedTargets: string[] = [];
+    let saveCalled = false;
+
+    const declaredLength = 1024;
+    const truncatedBytes = new Uint8Array(512);
+
+    const outcome = await mirrorEpisodeSource(
+      {
+        episodeId: episode.id,
+        sourceUrl: 'https://bucket123.r2.cloudflarestorage.com/anime/truncated.mp4',
+      },
+      {
+        isDbConfigured: () => true,
+        blobToken: 'vercel_blob_rw_test_token',
+        getEpisode: async () => episode,
+        fetchStream: async (url) => ({
+          finalUrl: url,
+          response: new Response(truncatedBytes, {
+            status: 200,
+            headers: {
+              'Content-Type': 'video/mp4',
+              'Content-Length': String(declaredLength),
+            },
+          }),
+        }),
+        putBlob: async (pathname, body) => {
+          await new Response(body).arrayBuffer();
+          return {
+            url: `https://abc.public.blob.vercel-storage.com/${pathname}`,
+            pathname,
+          };
+        },
+        delBlob: async (target) => {
+          deletedTargets.push(...(Array.isArray(target) ? target : [target]));
+        },
+        saveMirrorSource: async () => {
+          saveCalled = true;
+          return { slot: 2, episode };
+        },
+      }
+    );
+
+    expect(outcome.status).toBe(502);
+    expect(outcome.body).toEqual({
+      ok: false,
+      error: INCOMPLETE_MIRROR_MESSAGE,
+    });
+    expect(deletedTargets).toContain(
+      'https://abc.public.blob.vercel-storage.com/mirrors/frieren-alem-da-jornada/ep_mirror_test_01.mp4'
+    );
+    expect(saveCalled).toBe(false);
+  });
+
+  it('17. se o tempo acabar antes do fim, aborta upload, apaga o blob parcial e não grava no banco', async () => {
+    const episode = makePlayerEpisode();
+    const deletedTargets: string[] = [];
+    let saveCalled = false;
+
+    const slowStream = new ReadableStream<Uint8Array>({
+      async pull(controller) {
+        await new Promise((resolve) => setTimeout(resolve, 60));
+        controller.enqueue(new Uint8Array(1024));
+      },
+    });
+
+    const outcome = await mirrorEpisodeSource(
+      {
+        episodeId: episode.id,
+        sourceUrl: 'https://bucket123.r2.cloudflarestorage.com/anime/slow.mp4',
+      },
+      {
+        isDbConfigured: () => true,
+        blobToken: 'vercel_blob_rw_test_token',
+        maxDurationMs: 25,
+        getEpisode: async () => episode,
+        fetchStream: async (url) => ({
+          finalUrl: url,
+          response: new Response(slowStream, {
+            status: 200,
+            headers: {
+              'Content-Type': 'video/mp4',
+              'Content-Length': String(10 * 1024 * 1024),
+            },
+          }),
+        }),
+        putBlob: async (pathname, body, opts) => {
+          await new Promise<void>((resolve, reject) => {
+            opts.abortSignal?.addEventListener('abort', () => {
+              reject(new Error('Aborted due to timeout'));
+            });
+            void new Response(body).arrayBuffer().then(() => resolve(), reject);
+          });
+          return {
+            url: `https://abc.public.blob.vercel-storage.com/${pathname}`,
+            pathname,
+          };
+        },
+        delBlob: async (target) => {
+          deletedTargets.push(...(Array.isArray(target) ? target : [target]));
+        },
+        saveMirrorSource: async () => {
+          saveCalled = true;
+          return { slot: 2, episode };
+        },
+      }
+    );
+
+    expect(outcome.status).toBe(504);
+    expect(outcome.body).toEqual({
+      ok: false,
+      error: INCOMPLETE_MIRROR_MESSAGE,
+    });
+    expect(deletedTargets).toContain('mirrors/frieren-alem-da-jornada/ep_mirror_test_01.mp4');
+    expect(saveCalled).toBe(false);
+  });
+
+  it('18. configura maxDuration no máximo do plano em vite.config.ts para /api/mirror', () => {
+    const viteConfig = fs.readFileSync(path.resolve(process.cwd(), 'vite.config.ts'), 'utf8');
+    expect(viteConfig).toMatch(/['"]\/api\/mirror['"]\s*:\s*\{[\s\S]*?maxDuration\s*:\s*['"]max['"]/);
   });
 });

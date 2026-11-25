@@ -165,6 +165,7 @@ export interface SourceAttemptDiagnostic {
   hasAcao: boolean;
   firstLine: string | null;
   contentType: string | null;
+  contentLength?: number | null;
   sentReferer: string | null;
   error: string | null;
 }

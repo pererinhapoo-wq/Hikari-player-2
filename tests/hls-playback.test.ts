@@ -591,4 +591,84 @@ describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () =
     expect(htmlFakeMp4Report.verdict).toBe('bloqueado');
     expect(htmlFakeMp4Report.verdictLabel).toBe('bloqueado');
   });
+
+  it('15. no "Testar fonte", reprova espelho cujo tamanho seja menor que 90% do content-length original e aprova >= 90%', async () => {
+    const originalSize = 200 * 1024 * 1024; // 200 MB
+    const truncatedMirrorSize = 48 * 1024 * 1024; // 48 MB (< 90%)
+    const validMirrorSize = 190 * 1024 * 1024; // 190 MB (>= 90%)
+
+    // 15a. Comparação automática entre fonte original e espelho via diagnoseEpisodeSources
+    const truncatedEpisodeReports = await diagnoseEpisodeSources(
+      [
+        {
+          slot: 1,
+          label: 'Player 1',
+          url: 'https://cdn-sv01.maximaimg.online/files/ep01.mp4',
+          kind: 'mp4',
+        },
+        {
+          slot: 2,
+          label: 'Player 2 (espelho)',
+          url: 'https://q70piqtcusyiwtbz.public.blob.vercel-storage.com/mirrors/anime/ep01.mp4',
+          kind: 'mp4',
+          isMirror: true,
+        },
+      ],
+      {
+        fetchWithRedirects: async (url) => {
+          if (url.includes('public.blob.vercel-storage.com')) {
+            return {
+              finalUrl: url,
+              response: new Response(new Uint8Array([0, 0, 0, 24]), {
+                status: 200,
+                headers: {
+                  'content-type': 'video/mp4',
+                  'content-length': String(truncatedMirrorSize),
+                },
+              }),
+            };
+          }
+          return {
+            finalUrl: url,
+            response: new Response(new Uint8Array([0, 0, 0, 24]), {
+              status: 200,
+              headers: {
+                'content-type': 'video/mp4',
+                'content-length': String(originalSize),
+              },
+            }),
+          };
+        },
+      }
+    );
+
+    expect(truncatedEpisodeReports[1].verdict).toBe('bloqueado');
+    expect(truncatedEpisodeReports[1].verdictLabel).toBe('bloqueado');
+    expect(truncatedEpisodeReports[1].verdictReason).toContain('abaixo de 90%');
+
+    // 15b. Espelho com >= 90% do tamanho original é aprovado como direto_ok
+    const validMirrorReport = await diagnoseVideoSource(
+      {
+        slot: 2,
+        url: 'https://q70piqtcusyiwtbz.public.blob.vercel-storage.com/mirrors/anime/ep01.mp4',
+        isMirror: true,
+        originalContentLength: originalSize,
+      },
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(new Uint8Array([0, 0, 0, 24]), {
+            status: 200,
+            headers: {
+              'content-type': 'video/mp4',
+              'content-length': String(validMirrorSize),
+            },
+          }),
+        }),
+      }
+    );
+
+    expect(validMirrorReport.verdict).toBe('direto_ok');
+    expect(validMirrorReport.verdictLabel).toBe('direto ok');
+  });
 });

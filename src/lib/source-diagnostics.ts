@@ -18,15 +18,21 @@ import {
   classifyEmbedHost,
   detectSourceKind,
   type ExplicitSourceKind,
+  isVercelBlobUrl,
   validateHttpUrl,
 } from '@/lib/video-sources';
 import { resolveVideoInputUrl } from '@/lib/r2-resolver';
+
+export const MIN_MIRROR_SIZE_RATIO = 0.9;
 
 export interface SourceTestInput {
   slot: 1 | 2 | 3 | 4 | 5;
   label?: string;
   url: string;
   kind?: ExplicitSourceKind | '' | null;
+  isMirror?: boolean;
+  originalContentLength?: number | null;
+  originalUrl?: string | null;
 }
 
 export interface SourceDiagnosticsDeps {
@@ -182,6 +188,27 @@ async function readTextSnippetSafely(
   }
 }
 
+function parseHeaderContentLength(response: Response): number | null {
+  const contentRange = response.headers.get('content-range');
+  if (contentRange) {
+    const match = /^bytes\s+\d+-\d+\/(\d+)$/i.exec(contentRange.trim());
+    if (match) {
+      const total = Number(match[1]);
+      if (Number.isFinite(total) && total >= 0) {
+        return total;
+      }
+    }
+  }
+  const rawLength = response.headers.get('content-length');
+  if (rawLength && /^\d+$/.test(rawLength.trim())) {
+    const parsed = Number(rawLength.trim());
+    if (Number.isFinite(parsed) && parsed >= 0) {
+      return parsed;
+    }
+  }
+  return null;
+}
+
 async function runSingleAttempt(
   url: string,
   headers: Record<string, string>,
@@ -195,6 +222,7 @@ async function runSingleAttempt(
     });
     const acao = response.headers.get('access-control-allow-origin');
     const contentType = response.headers.get('content-type');
+    const contentLength = parseHeaderContentLength(response);
     const cspHeader = response.headers.get('content-security-policy');
     const xFrameOptions = response.headers.get('x-frame-options');
     let firstLine: string | null = null;
@@ -216,6 +244,7 @@ async function runSingleAttempt(
         hasAcao: Boolean(acao && acao.trim().length > 0),
         firstLine,
         contentType,
+        contentLength,
         sentReferer,
         error: null,
       },
@@ -232,6 +261,7 @@ async function runSingleAttempt(
         hasAcao: false,
         firstLine: null,
         contentType: null,
+        contentLength: null,
         sentReferer,
         error: err instanceof Error ? err.message : 'Falha de rede ao consultar origem.',
       },
@@ -252,6 +282,108 @@ function isHtmlContentType(contentType: string | null | undefined): boolean {
   if (!contentType) return false;
   const mime = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
   return mime === 'text/html' || mime === 'application/xhtml+xml';
+}
+
+function formatMegabytes(bytes: number): string {
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function isMirrorSizeBelowThreshold(
+  mirrorContentLength: number | null | undefined,
+  originalContentLength: number | null | undefined
+): boolean {
+  if (
+    typeof originalContentLength !== 'number' ||
+    !Number.isFinite(originalContentLength) ||
+    originalContentLength <= 0
+  ) {
+    return false;
+  }
+  if (
+    typeof mirrorContentLength !== 'number' ||
+    !Number.isFinite(mirrorContentLength) ||
+    mirrorContentLength < 0
+  ) {
+    return true;
+  }
+  return mirrorContentLength < originalContentLength * MIN_MIRROR_SIZE_RATIO;
+}
+
+function applyMirrorIntegrityCheck(
+  report: SourceTestReport,
+  originalContentLength: number | null | undefined
+): SourceTestReport {
+  if (report.verdict === 'bloqueado') {
+    return report;
+  }
+  if (
+    typeof originalContentLength !== 'number' ||
+    !Number.isFinite(originalContentLength) ||
+    originalContentLength <= 0
+  ) {
+    return report;
+  }
+
+  const mirrorSize =
+    report.withHeaders.contentLength ?? report.noHeaders.contentLength ?? null;
+  if (!isMirrorSizeBelowThreshold(mirrorSize, originalContentLength)) {
+    return report;
+  }
+
+  const reason =
+    mirrorSize === null
+      ? `Espelho reprovado: não informou content-length para validar mínimo de 90% de ${formatMegabytes(originalContentLength)} originais.`
+      : `Espelho incompleto: ${formatMegabytes(mirrorSize)} vs ${formatMegabytes(originalContentLength)} originais (abaixo de 90%).`;
+
+  return {
+    ...report,
+    verdict: 'bloqueado',
+    verdictLabel: 'bloqueado',
+    verdictReason: reason,
+  };
+}
+
+async function probeOriginalContentLength(
+  rawUrl: string,
+  fetchWithRedirects: typeof safeFetchWithRedirects
+): Promise<number | null> {
+  let effective = rawUrl.trim();
+  if (!effective) return null;
+  try {
+    const resolved = await resolveVideoInputUrl(effective);
+    effective = resolved.finalUrl;
+  } catch {
+    // Segue com URL informada se resolução falhar
+  }
+  const urlCheck = validateHttpUrl(effective);
+  if (!urlCheck.valid || !urlCheck.normalizedUrl) {
+    return null;
+  }
+  try {
+    const parsed = new URL(urlCheck.normalizedUrl);
+    const headers: Record<string, string> = {
+      'User-Agent': BROWSER_UA,
+      Accept: '*/*',
+      Range: 'bytes=0-0',
+    };
+    const referer = resolveUpstreamReferer(parsed);
+    if (referer && !parsed.hostname.toLowerCase().endsWith('.r2.cloudflarestorage.com')) {
+      headers['Referer'] = referer;
+    }
+    const { response } = await fetchWithRedirects(parsed.toString(), {
+      headers,
+      timeoutMs: 12000,
+    });
+    const length = response.ok ? parseHeaderContentLength(response) : null;
+    try {
+      await response.body?.cancel();
+    } catch {
+      // Ignora erro ao descartar corpo da sonda
+    }
+    return length;
+  } catch {
+    return null;
+  }
 }
 
 export function classifySourceDiagnostic(
@@ -579,7 +711,7 @@ export async function diagnoseVideoSource(
     cloudflareServerBlocked
   );
 
-  return {
+  const report: SourceTestReport = {
     slot: input.slot,
     label,
     url: targetUrl.toString(),
@@ -589,6 +721,24 @@ export async function diagnoseVideoSource(
     ...classification,
     embedDiagnostic,
   };
+
+  const isMirror = Boolean(input.isMirror || isVercelBlobUrl(targetUrl.toString()));
+  if (!isMirror) {
+    return report;
+  }
+
+  let originalSize =
+    typeof input.originalContentLength === 'number' &&
+    Number.isFinite(input.originalContentLength) &&
+    input.originalContentLength > 0
+      ? input.originalContentLength
+      : null;
+
+  if (originalSize === null && input.originalUrl?.trim()) {
+    originalSize = await probeOriginalContentLength(input.originalUrl, fetchWithRedirects);
+  }
+
+  return applyMirrorIntegrityCheck(report, originalSize);
 }
 
 export async function diagnoseEpisodeSources(
@@ -596,5 +746,43 @@ export async function diagnoseEpisodeSources(
   deps: SourceDiagnosticsDeps = {}
 ): Promise<SourceTestReport[]> {
   const validInputs = sources.filter((item) => item.url && item.url.trim().length > 0);
-  return await Promise.all(validInputs.map((item) => diagnoseVideoSource(item, deps)));
+  const reports = await Promise.all(
+    validInputs.map((item) => diagnoseVideoSource(item, deps))
+  );
+
+  let siblingOriginalLength: number | null = null;
+  for (let i = 0; i < reports.length; i++) {
+    const input = validInputs[i];
+    const report = reports[i];
+    const isMirror = Boolean(input.isMirror || isVercelBlobUrl(report.url));
+    if (isMirror || report.detectedKind === 'iframe') continue;
+
+    const candidateCt = report.withHeaders.contentType ?? report.noHeaders.contentType;
+    const candidateLen = report.withHeaders.contentLength ?? report.noHeaders.contentLength;
+    const isVideoLike =
+      isVideoContentType(candidateCt) ||
+      candidateCt?.toLowerCase().startsWith('application/octet-stream') === true ||
+      report.detectedKind === 'mp4';
+
+    if (
+      isVideoLike &&
+      typeof candidateLen === 'number' &&
+      Number.isFinite(candidateLen) &&
+      candidateLen > 0
+    ) {
+      siblingOriginalLength = candidateLen;
+      break;
+    }
+  }
+
+  if (siblingOriginalLength === null) {
+    return reports;
+  }
+
+  return reports.map((report, idx) => {
+    const input = validInputs[idx];
+    const isMirror = Boolean(input.isMirror || isVercelBlobUrl(report.url));
+    if (!isMirror) return report;
+    return applyMirrorIntegrityCheck(report, siblingOriginalLength);
+  });
 }

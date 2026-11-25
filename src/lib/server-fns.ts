@@ -397,6 +397,9 @@ export const adminTestSourceFn = createServerFn({ method: 'POST' })
       label?: string;
       url: string;
       kind?: ExplicitSourceKind | '' | null;
+      isMirror?: boolean;
+      originalContentLength?: number | null;
+      originalUrl?: string | null;
     }) => ({
       slot: ([1, 2, 3, 4, 5].includes(Number(data?.slot)) ? Number(data?.slot) : 1) as
         | 1
@@ -407,6 +410,13 @@ export const adminTestSourceFn = createServerFn({ method: 'POST' })
       label: typeof data?.label === 'string' ? data.label : undefined,
       url: typeof data?.url === 'string' ? data.url : '',
       kind: data?.kind ?? null,
+      isMirror: typeof data?.isMirror === 'boolean' ? data.isMirror : undefined,
+      originalContentLength:
+        typeof data?.originalContentLength === 'number' &&
+        Number.isFinite(data.originalContentLength)
+          ? data.originalContentLength
+          : null,
+      originalUrl: typeof data?.originalUrl === 'string' ? data.originalUrl : null,
     })
   )
   .handler(
