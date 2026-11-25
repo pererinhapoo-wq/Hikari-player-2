@@ -25,6 +25,8 @@ import {
   buildIframeSrcWithFreshTime,
   getIframeElementProps,
   getNextFallbackSourceIndex,
+  isDirectMediaUrl,
+  isVercelBlobUrl,
 } from '@/lib/video-sources';
 
 interface EpisodePlayerProps {
@@ -314,6 +316,24 @@ export function EpisodePlayer({
     setIsPlaying(false);
 
     async function prepareActiveSource(source: PlayableSource) {
+      const isBlobDirect =
+        isDirectMediaUrl(source.resolvedUrl) ||
+        isDirectMediaUrl(source.rawUrl) ||
+        isVercelBlobUrl(source.resolvedUrl) ||
+        isVercelBlobUrl(source.rawUrl);
+      if (isBlobDirect) {
+        clearIframeLoadTimer();
+        if (!cancelled) {
+          setResolvedRuntime({
+            slot: source.slot,
+            mode: 'video',
+            url: source.resolvedUrl || source.rawUrl,
+            strategy: 'direct',
+          });
+        }
+        return;
+      }
+
       if (source.kind === 'iframe') {
         clearIframeLoadTimer();
         if (!cancelled) {
@@ -456,13 +476,14 @@ export function EpisodePlayer({
     };
 
     if (resolvedRuntime.mode === 'video') {
-      video.src = resolvedRuntime.url;
-      video.load();
+      if (video.getAttribute('src') !== resolvedRuntime.url) {
+        video.src = resolvedRuntime.url;
+        video.load();
+      }
       setIsLoadingSource(false);
       void startPlayback();
       return () => {
-        video.removeAttribute('src');
-        video.load();
+        video.pause();
       };
     }
 
@@ -1255,6 +1276,7 @@ export function EpisodePlayer({
           <>
             <video
               ref={videoRef}
+              src={resolvedRuntime.mode === 'video' ? resolvedRuntime.url : undefined}
               poster={posterError ? undefined : posterUrl}
               playsInline
               preload="metadata"

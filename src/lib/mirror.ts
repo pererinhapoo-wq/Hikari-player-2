@@ -11,7 +11,15 @@ import {
 import { assertSafeExternalUrl, isTrustedMediaHost } from '@/lib/ssrf';
 import { BROWSER_UA, resolveUpstreamReferer } from '@/lib/stream-proxy';
 import type { EpisodeDto, MirrorEpisodeResult } from '@/lib/types';
-import { validateHttpUrl } from '@/lib/video-sources';
+import {
+  deriveKindFromExtension,
+  type ExplicitSourceKind,
+  validateHttpUrl,
+} from '@/lib/video-sources';
+
+export function deriveMirrorSourceKind(fileUrlOrPath: string): ExplicitSourceKind {
+  return deriveKindFromExtension(fileUrlOrPath);
+}
 
 export const EXPIRED_MIRROR_LINK_MESSAGE = 'link vencido, pegue um novo no 1DM';
 
@@ -219,7 +227,7 @@ export interface MirrorEpisodeDeps {
   saveMirrorSource?: (
     episodeId: string,
     blobUrl: string,
-    options: { force?: boolean }
+    options: { force?: boolean; kind?: ExplicitSourceKind; forceProxy?: boolean }
   ) => Promise<{ episode: PlayerEpisode; slot: 1 | 2 | 3 | 4 | 5 }>;
   blobToken?: string;
   isDbConfigured?: () => boolean;
@@ -420,13 +428,23 @@ export async function mirrorEpisodeSource(
     };
   }
 
+  const mirrorKind = deriveMirrorSourceKind(
+    blobResult.url || blobResult.pathname || pathname
+  );
   const saveMirrorSource =
     deps.saveMirrorSource ??
-    ((epId: string, blobUrl: string, opts: { force?: boolean }) =>
-      saveEpisodeMirrorSource(epId, blobUrl, opts));
+    ((
+      epId: string,
+      blobUrl: string,
+      opts: { force?: boolean; kind?: ExplicitSourceKind; forceProxy?: boolean }
+    ) => saveEpisodeMirrorSource(epId, blobUrl, opts));
 
   try {
-    const saved = await saveMirrorSource(episode.id, blobResult.url, { force });
+    const saved = await saveMirrorSource(episode.id, blobResult.url, {
+      force,
+      kind: mirrorKind,
+      forceProxy: false,
+    });
     return {
       status: 200,
       body: {

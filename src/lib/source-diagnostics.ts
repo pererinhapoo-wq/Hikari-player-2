@@ -242,6 +242,18 @@ async function runSingleAttempt(
   }
 }
 
+function isVideoContentType(contentType: string | null | undefined): boolean {
+  if (!contentType) return false;
+  const mime = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
+  return mime.startsWith('video/');
+}
+
+function isHtmlContentType(contentType: string | null | undefined): boolean {
+  if (!contentType) return false;
+  const mime = contentType.split(';')[0]?.trim().toLowerCase() ?? '';
+  return mime === 'text/html' || mime === 'application/xhtml+xml';
+}
+
 export function classifySourceDiagnostic(
   detectedKind: ExplicitSourceKind,
   noHeaders: SourceAttemptDiagnostic,
@@ -322,16 +334,45 @@ export function classifySourceDiagnostic(
     };
   }
 
-  if (withHeaders.ok) {
-    const acaoAllowsBrowser =
-      withHeaders.hasAcao &&
-      (withHeaders.accessControlAllowOrigin?.trim() === '*' ||
-        withHeaders.accessControlAllowOrigin?.includes('vercel.app') === true);
+  const withHeadersIsHtml = withHeaders.status === 200 && isHtmlContentType(withHeaders.contentType);
+  const noHeadersIsHtml = noHeaders.status === 200 && isHtmlContentType(noHeaders.contentType);
+  if (withHeadersIsHtml || (!withHeaders.ok && noHeadersIsHtml)) {
+    return {
+      verdict: 'bloqueado',
+      verdictLabel: 'bloqueado',
+      verdictReason:
+        'Origem respondeu HTTP 200 com Content-Type text/html em vez de vídeo ou stream válido.',
+    };
+  }
 
+  if (noHeaders.status === 200 && isVideoContentType(noHeaders.contentType)) {
+    return {
+      verdict: 'direto_ok',
+      verdictLabel: 'direto ok',
+      verdictReason:
+        'Origem respondeu HTTP 200 com Content-Type de vídeo; reprodução direta compatível com <video>.',
+    };
+  }
+
+  if (withHeaders.ok) {
     const requiredProviderReferer =
       Boolean(withHeaders.sentReferer) &&
       !withHeaders.sentReferer!.startsWith(targetOrigin) &&
       !noHeaders.ok;
+
+    if (withHeaders.status === 200 && isVideoContentType(withHeaders.contentType) && !requiredProviderReferer) {
+      return {
+        verdict: 'direto_ok',
+        verdictLabel: 'direto ok',
+        verdictReason:
+          'Origem respondeu HTTP 200 com Content-Type de vídeo; reprodução direta compatível com <video>.',
+      };
+    }
+
+    const acaoAllowsBrowser =
+      withHeaders.hasAcao &&
+      (withHeaders.accessControlAllowOrigin?.trim() === '*' ||
+        withHeaders.accessControlAllowOrigin?.includes('vercel.app') === true);
 
     if (acaoAllowsBrowser && !requiredProviderReferer && (noHeaders.ok || !withHeaders.sentReferer)) {
       return {

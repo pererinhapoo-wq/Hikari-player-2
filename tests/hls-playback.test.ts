@@ -545,4 +545,50 @@ describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () =
     expect(iframeReport.detectedKind).toBe('iframe');
     expect(iframeReport.verdictLabel).toBe('proxy necessário');
   });
+
+  it('14. no "Testar fonte", aprova HTTP 200 com content-type de vídeo e reprova HTTP 200 com text/html', async () => {
+    const blobMp4Report = await diagnoseVideoSource(
+      {
+        slot: 1,
+        url: 'https://q70piqtcusyiwtbz.public.blob.vercel-storage.com/mirrors/sem-anime/PUsNxKDL5TunoQk-GZw74.mp4',
+      },
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(new Uint8Array([0, 0, 0, 24]), {
+            status: 200,
+            headers: {
+              'content-type': 'video/mp4',
+            },
+          }),
+        }),
+      }
+    );
+
+    expect(blobMp4Report.detectedKind).toBe('mp4');
+    expect(blobMp4Report.verdict).toBe('direto_ok');
+    expect(blobMp4Report.verdictLabel).toBe('direto ok');
+
+    const htmlFakeMp4Report = await diagnoseVideoSource(
+      {
+        slot: 2,
+        url: 'https://cdn.fake.example.com/episodio/01.mp4',
+      },
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response('<!doctype html><html><body>Access denied</body></html>', {
+            status: 200,
+            headers: {
+              'content-type': 'text/html; charset=utf-8',
+            },
+          }),
+        }),
+      }
+    );
+
+    expect(htmlFakeMp4Report.detectedKind).toBe('mp4');
+    expect(htmlFakeMp4Report.verdict).toBe('bloqueado');
+    expect(htmlFakeMp4Report.verdictLabel).toBe('bloqueado');
+  });
 });

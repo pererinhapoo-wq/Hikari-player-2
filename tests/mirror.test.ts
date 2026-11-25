@@ -5,10 +5,12 @@ import { ADMIN_SESSION_COOKIE_NAME, createSessionToken } from '@/lib/auth';
 import {
   type DiagnosticSqlTag,
   type PlayerEpisode,
+  sanitizeEpisodeInput,
   saveEpisodeMirrorSource,
 } from '@/lib/db';
 import {
   buildMirrorBlobPathname,
+  deriveMirrorSourceKind,
   EXPIRED_MIRROR_LINK_MESSAGE,
   handleMirrorRequest,
   isAllowedMirrorSourceHost,
@@ -16,11 +18,20 @@ import {
   mirrorEpisodeSource,
   safeFetchMirrorStream,
 } from '@/lib/mirror';
+import { isAllowedProxyMediaUrl } from '@/lib/ssrf';
+import {
+  DIRECT_MEDIA_HOSTS as PROXY_DIRECT_MEDIA_HOSTS,
+  isDirectMediaHost as isProxyDirectMediaHost,
+  resolveUpstreamReferer,
+} from '@/lib/stream-proxy';
 import {
   collectEpisodeSources,
+  DIRECT_MEDIA_HOSTS,
+  isDirectMediaHost,
   isVercelBlobUrl,
   normalizeVideoSource,
 } from '@/lib/video-sources';
+import { splitSqlStatements } from '../scripts/migrate';
 
 function makePlayerEpisode(overrides: Partial<PlayerEpisode> = {}): PlayerEpisode {
   return {
@@ -359,5 +370,125 @@ describe('Espelhamento no Vercel Blob (/api/mirror)', () => {
     expect(adminSource).toContain('Guardar cópia');
     expect(adminSource).toContain('espelho');
     expect(adminSource).toContain('Forçar refazer');
+  });
+
+  it('10. inclui public.blob.vercel-storage.com nas allowlists de mídia direta (player e stream-proxy) sem Referer artificial', () => {
+    const blobHost = 'q70piqtcusyiwtbz.public.blob.vercel-storage.com';
+    const blobUrl = `https://${blobHost}/mirrors/sem-anime/PUsNxKDL5TunoQk-GZw74.mp4`;
+
+    expect([...DIRECT_MEDIA_HOSTS]).toContain('public.blob.vercel-storage.com');
+    expect([...PROXY_DIRECT_MEDIA_HOSTS]).toContain('public.blob.vercel-storage.com');
+    expect(isDirectMediaHost(blobHost)).toBe(true);
+    expect(isProxyDirectMediaHost(blobHost)).toBe(true);
+    expect(isAllowedProxyMediaUrl(new URL(blobUrl))).toBe(true);
+    expect(resolveUpstreamReferer(new URL(blobUrl))).toBe('');
+
+    // Mesmo que explicitKind tenha sido gravado errado como 'hls' ou 'iframe', URL Blob força mp4 direto sem proxy
+    const fromStaleHls = normalizeVideoSource(blobUrl, 1, 'hls');
+    expect(fromStaleHls?.kind).toBe('mp4');
+    expect(fromStaleHls?.needsProxy).toBe(false);
+    expect(fromStaleHls?.resolvedUrl).toBe(blobUrl);
+
+    const fromStaleIframe = normalizeVideoSource(blobUrl, 1, 'iframe');
+    expect(fromStaleIframe?.kind).toBe('mp4');
+    expect(fromStaleIframe?.needsProxy).toBe(false);
+  });
+
+  it('11. /api/mirror deriva kind da extensão (nunca "auto") e grava source_kind="mp4" e force_proxy=false', async () => {
+    expect(
+      deriveMirrorSourceKind(
+        'https://q70piqtcusyiwtbz.public.blob.vercel-storage.com/mirrors/sem-anime/PUsNxKDL5TunoQk-GZw74.mp4'
+      )
+    ).toBe('mp4');
+    expect(deriveMirrorSourceKind('mirrors/sem-anime/ep.mp4')).toBe('mp4');
+
+    const episode = makePlayerEpisode({ id: 'PUsNxKDL5TunoQk-GZw74' });
+    let capturedSaveOpts: Record<string, unknown> | null = null;
+
+    const outcome = await mirrorEpisodeSource(
+      {
+        episodeId: episode.id,
+        sourceUrl: 'https://bucket123.r2.cloudflarestorage.com/anime/ep.mp4?X-Amz-Signature=ok',
+        force: false,
+      },
+      {
+        isDbConfigured: () => true,
+        blobToken: 'vercel_blob_rw_test_token',
+        getEpisode: async () => episode,
+        fetchStream: async (url) => ({
+          finalUrl: url,
+          response: new Response(new Uint8Array([0, 0, 0, 24]), {
+            status: 200,
+            headers: { 'Content-Type': 'video/mp4' },
+          }),
+        }),
+        putBlob: async (pathname) => ({
+          url: `https://q70piqtcusyiwtbz.public.blob.vercel-storage.com/${pathname}`,
+          pathname,
+        }),
+        saveMirrorSource: async (_epId, blobUrl, opts) => {
+          capturedSaveOpts = { ...opts };
+          return {
+            slot: 2,
+            episode: {
+              ...episode,
+              video_url_2: blobUrl,
+              source_kind_2: opts.kind ?? 'mp4',
+              force_proxy_2: Boolean(opts.forceProxy),
+              is_mirror_2: true,
+            },
+          };
+        },
+      }
+    );
+
+    expect(outcome.status).toBe(200);
+    expect(capturedSaveOpts).toEqual({
+      force: false,
+      kind: 'mp4',
+      forceProxy: false,
+    });
+
+    // sanitizeEpisodeInput também nunca deixa Blob com kind=null ("auto") nem force_proxy=true
+    const sanitized = sanitizeEpisodeInput({
+      anime_name: 'Teste',
+      episode_number: '01',
+      title: 'Ep 01',
+      poster_url: 'https://cdn.example.com/poster.jpg',
+      video_url:
+        'https://q70piqtcusyiwtbz.public.blob.vercel-storage.com/mirrors/sem-anime/PUsNxKDL5TunoQk-GZw74.mp4',
+      source_kind: '',
+      force_proxy: true,
+    });
+    expect(sanitized.source_kind).toBe('mp4');
+    expect(sanitized.force_proxy).toBe(false);
+  });
+
+  it('12. player renderiza <video> nativo com playsInline, preload="metadata" e src direto para Blob (sem hls.js e sem proxy)', () => {
+    const playerSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/components/EpisodePlayer.tsx'),
+      'utf8'
+    );
+
+    expect(playerSource).toContain("mode: 'video'");
+    expect(playerSource).toContain('isDirectMediaUrl(source.resolvedUrl)');
+    expect(playerSource).toContain('isVercelBlobUrl(source.resolvedUrl)');
+    expect(playerSource).toMatch(
+      /<video[\s\S]*?src=\{resolvedRuntime\.mode === 'video' \? resolvedRuntime\.url : undefined\}[\s\S]*?playsInline[\s\S]*?preload="metadata"/
+    );
+  });
+
+  it('13. migration 0007 corrige episódio PUsNxKDL5TunoQk-GZw74 para mp4 e force_proxy=false com SQL válido', () => {
+    const migrationSql = fs.readFileSync(
+      path.resolve(process.cwd(), 'migrations/0007_fix_blob_mirrors_mp4.sql'),
+      'utf8'
+    );
+    expect(migrationSql).toContain('PUsNxKDL5TunoQk-GZw74');
+    expect(migrationSql).toContain('public.blob.vercel-storage.com');
+    expect(migrationSql).toContain("THEN 'mp4'");
+    expect(migrationSql).toContain('THEN false');
+
+    const statements = splitSqlStatements(migrationSql);
+    expect(statements).toHaveLength(1);
   });
 });

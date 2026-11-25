@@ -4,7 +4,13 @@ import {
   verifyProxySignature,
 } from '@/lib/proxy-signing';
 import { isAllowedProxyMediaUrl, safeFetchWithRedirects } from '@/lib/ssrf';
-import { validateHttpUrl } from '@/lib/video-sources';
+import {
+  DIRECT_MEDIA_HOSTS,
+  isDirectMediaHost,
+  validateHttpUrl,
+} from '@/lib/video-sources';
+
+export { DIRECT_MEDIA_HOSTS, isDirectMediaHost };
 
 export const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
@@ -24,6 +30,7 @@ export function resolveUpstreamReferer(
   const rules = new Map<string, string>([
     ['maximaimg.online', maximaimgReferer?.trim() || DEFAULT_MAXIMAIMG_REFERER],
     ['mywallpaper-4k-image.net', ''],
+    ['public.blob.vercel-storage.com', ''],
     ['anitube22.vip', DEFAULT_COEMPREGOS_REFERER],
     ['anitube.biz', DEFAULT_COEMPREGOS_REFERER],
     ['anitube.zip', DEFAULT_COEMPREGOS_REFERER],
@@ -368,7 +375,7 @@ export async function handleProxyStreamRequest(
 
   try {
     const targetUrl = new URL(urlCheck.normalizedUrl);
-    if (!isAllowedProxyMediaUrl(targetUrl)) {
+    if (!isDirectMediaHost(targetUrl.hostname) && !isAllowedProxyMediaUrl(targetUrl)) {
       return new Response('Extensão de destino não permitida no proxy.', { status: 403 });
     }
     const upstreamHeaders = getUpstreamHeaders(targetUrl, request);
@@ -385,7 +392,7 @@ export async function handleProxyStreamRequest(
 
     const contentType = upstream.headers.get('content-type') || 'application/octet-stream';
     const finalParsed = new URL(finalUrl);
-    if (!isAllowedProxyMediaUrl(finalParsed)) {
+    if (!isDirectMediaHost(finalParsed.hostname) && !isAllowedProxyMediaUrl(finalParsed)) {
       return new Response('Extensão de destino não permitida no proxy.', { status: 403 });
     }
 

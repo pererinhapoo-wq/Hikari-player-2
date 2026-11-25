@@ -11,7 +11,9 @@ import type {
 } from '@/lib/types';
 import { planEpisodeSlotInsertion } from '@/lib/batch-import';
 import {
+  deriveKindFromExtension,
   type ExplicitSourceKind,
+  isDirectMediaUrl,
   isVercelBlobUrl,
   normalizeExplicitSourceKind,
   validateHttpUrl,
@@ -164,6 +166,30 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
     sanitizedOptional[key] = check.normalizedUrl;
   }
 
+  const resolveSlotKind = (
+    url: string | null | undefined,
+    rawKind: ExplicitSourceKind | '' | null | undefined
+  ): ExplicitSourceKind | null | undefined => {
+    if (url && (isDirectMediaUrl(url) || isVercelBlobUrl(url))) {
+      return deriveKindFromExtension(url);
+    }
+    return rawKind === undefined ? undefined : normalizeExplicitSourceKind(rawKind);
+  };
+
+  const resolveSlotForceProxy = (
+    url: string | null | undefined,
+    rawForceProxy: boolean | null | undefined
+  ): boolean | undefined => {
+    if (url && (isDirectMediaUrl(url) || isVercelBlobUrl(url))) {
+      return false;
+    }
+    return rawForceProxy === undefined
+      ? undefined
+      : typeof rawForceProxy === 'boolean'
+        ? rawForceProxy
+        : true;
+  };
+
   return {
     anime_name: animeName,
     episode_number: episodeNumber,
@@ -176,48 +202,16 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
     video_url_3: sanitizedOptional.video_url_3,
     video_url_4: sanitizedOptional.video_url_4,
     video_url_5: sanitizedOptional.video_url_5,
-    source_kind: normalizeExplicitSourceKind(input.source_kind),
-    source_kind_2:
-      input.source_kind_2 === undefined
-        ? undefined
-        : normalizeExplicitSourceKind(input.source_kind_2),
-    source_kind_3:
-      input.source_kind_3 === undefined
-        ? undefined
-        : normalizeExplicitSourceKind(input.source_kind_3),
-    source_kind_4:
-      input.source_kind_4 === undefined
-        ? undefined
-        : normalizeExplicitSourceKind(input.source_kind_4),
-    source_kind_5:
-      input.source_kind_5 === undefined
-        ? undefined
-        : normalizeExplicitSourceKind(input.source_kind_5),
-    force_proxy: typeof input.force_proxy === 'boolean' ? input.force_proxy : true,
-    force_proxy_2:
-      input.force_proxy_2 === undefined
-        ? undefined
-        : typeof input.force_proxy_2 === 'boolean'
-          ? input.force_proxy_2
-          : true,
-    force_proxy_3:
-      input.force_proxy_3 === undefined
-        ? undefined
-        : typeof input.force_proxy_3 === 'boolean'
-          ? input.force_proxy_3
-          : true,
-    force_proxy_4:
-      input.force_proxy_4 === undefined
-        ? undefined
-        : typeof input.force_proxy_4 === 'boolean'
-          ? input.force_proxy_4
-          : true,
-    force_proxy_5:
-      input.force_proxy_5 === undefined
-        ? undefined
-        : typeof input.force_proxy_5 === 'boolean'
-          ? input.force_proxy_5
-          : true,
+    source_kind: resolveSlotKind(primaryCheck.normalizedUrl, input.source_kind) ?? null,
+    source_kind_2: resolveSlotKind(sanitizedOptional.video_url_2, input.source_kind_2),
+    source_kind_3: resolveSlotKind(sanitizedOptional.video_url_3, input.source_kind_3),
+    source_kind_4: resolveSlotKind(sanitizedOptional.video_url_4, input.source_kind_4),
+    source_kind_5: resolveSlotKind(sanitizedOptional.video_url_5, input.source_kind_5),
+    force_proxy: resolveSlotForceProxy(primaryCheck.normalizedUrl, input.force_proxy ?? true) ?? true,
+    force_proxy_2: resolveSlotForceProxy(sanitizedOptional.video_url_2, input.force_proxy_2),
+    force_proxy_3: resolveSlotForceProxy(sanitizedOptional.video_url_3, input.force_proxy_3),
+    force_proxy_4: resolveSlotForceProxy(sanitizedOptional.video_url_4, input.force_proxy_4),
+    force_proxy_5: resolveSlotForceProxy(sanitizedOptional.video_url_5, input.force_proxy_5),
   };
 }
 
@@ -996,7 +990,12 @@ export function findNextFreeMirrorSlot(episode: Pick<
 export async function saveEpisodeMirrorSource(
   episodeId: string,
   blobUrl: string,
-  options: { force?: boolean; sqlOverride?: DiagnosticSqlTag } = {}
+  options: {
+    force?: boolean;
+    kind?: ExplicitSourceKind;
+    forceProxy?: boolean;
+    sqlOverride?: DiagnosticSqlTag;
+  } = {}
 ): Promise<{
   episode: PlayerEpisode;
   slot: 1 | 2 | 3 | 4 | 5;
@@ -1006,6 +1005,8 @@ export async function saveEpisodeMirrorSource(
     throw new Error(`URL do espelho inválida: ${urlCheck.error ?? 'URL malformada'}`);
   }
   const normalizedBlobUrl = urlCheck.normalizedUrl;
+  const derivedKind =
+    normalizeExplicitSourceKind(options.kind) ?? deriveKindFromExtension(normalizedBlobUrl);
   const sql = options.sqlOverride ?? (getSql() as unknown as DiagnosticSqlTag);
   const episode = await getEpisodeById(episodeId, options.sqlOverride);
 
@@ -1028,13 +1029,13 @@ export async function saveEpisodeMirrorSource(
       const rows = withMirrorColumn
         ? await sql`
             UPDATE public.player_episodes
-            SET video_url = ${normalizedBlobUrl}, source_kind = 'mp4', force_proxy = false, is_mirror = true, updated_at = NOW()
+            SET video_url = ${normalizedBlobUrl}, source_kind = ${derivedKind}, force_proxy = false, is_mirror = true, updated_at = NOW()
             WHERE id = ${episode.id}
             RETURNING *
           `
         : await sql`
             UPDATE public.player_episodes
-            SET video_url = ${normalizedBlobUrl}, source_kind = 'mp4', force_proxy = false, updated_at = NOW()
+            SET video_url = ${normalizedBlobUrl}, source_kind = ${derivedKind}, force_proxy = false, updated_at = NOW()
             WHERE id = ${episode.id}
             RETURNING *
           `;
@@ -1044,13 +1045,13 @@ export async function saveEpisodeMirrorSource(
       const rows = withMirrorColumn
         ? await sql`
             UPDATE public.player_episodes
-            SET video_url_2 = ${normalizedBlobUrl}, source_kind_2 = 'mp4', force_proxy_2 = false, is_mirror_2 = true, updated_at = NOW()
+            SET video_url_2 = ${normalizedBlobUrl}, source_kind_2 = ${derivedKind}, force_proxy_2 = false, is_mirror_2 = true, updated_at = NOW()
             WHERE id = ${episode.id}
             RETURNING *
           `
         : await sql`
             UPDATE public.player_episodes
-            SET video_url_2 = ${normalizedBlobUrl}, source_kind_2 = 'mp4', force_proxy_2 = false, updated_at = NOW()
+            SET video_url_2 = ${normalizedBlobUrl}, source_kind_2 = ${derivedKind}, force_proxy_2 = false, updated_at = NOW()
             WHERE id = ${episode.id}
             RETURNING *
           `;
@@ -1060,13 +1061,13 @@ export async function saveEpisodeMirrorSource(
       const rows = withMirrorColumn
         ? await sql`
             UPDATE public.player_episodes
-            SET video_url_3 = ${normalizedBlobUrl}, source_kind_3 = 'mp4', force_proxy_3 = false, is_mirror_3 = true, updated_at = NOW()
+            SET video_url_3 = ${normalizedBlobUrl}, source_kind_3 = ${derivedKind}, force_proxy_3 = false, is_mirror_3 = true, updated_at = NOW()
             WHERE id = ${episode.id}
             RETURNING *
           `
         : await sql`
             UPDATE public.player_episodes
-            SET video_url_3 = ${normalizedBlobUrl}, source_kind_3 = 'mp4', force_proxy_3 = false, updated_at = NOW()
+            SET video_url_3 = ${normalizedBlobUrl}, source_kind_3 = ${derivedKind}, force_proxy_3 = false, updated_at = NOW()
             WHERE id = ${episode.id}
             RETURNING *
           `;
@@ -1076,13 +1077,13 @@ export async function saveEpisodeMirrorSource(
       const rows = withMirrorColumn
         ? await sql`
             UPDATE public.player_episodes
-            SET video_url_4 = ${normalizedBlobUrl}, source_kind_4 = 'mp4', force_proxy_4 = false, is_mirror_4 = true, updated_at = NOW()
+            SET video_url_4 = ${normalizedBlobUrl}, source_kind_4 = ${derivedKind}, force_proxy_4 = false, is_mirror_4 = true, updated_at = NOW()
             WHERE id = ${episode.id}
             RETURNING *
           `
         : await sql`
             UPDATE public.player_episodes
-            SET video_url_4 = ${normalizedBlobUrl}, source_kind_4 = 'mp4', force_proxy_4 = false, updated_at = NOW()
+            SET video_url_4 = ${normalizedBlobUrl}, source_kind_4 = ${derivedKind}, force_proxy_4 = false, updated_at = NOW()
             WHERE id = ${episode.id}
             RETURNING *
           `;
@@ -1091,13 +1092,13 @@ export async function saveEpisodeMirrorSource(
     const rows = withMirrorColumn
       ? await sql`
           UPDATE public.player_episodes
-          SET video_url_5 = ${normalizedBlobUrl}, source_kind_5 = 'mp4', force_proxy_5 = false, is_mirror_5 = true, updated_at = NOW()
+          SET video_url_5 = ${normalizedBlobUrl}, source_kind_5 = ${derivedKind}, force_proxy_5 = false, is_mirror_5 = true, updated_at = NOW()
           WHERE id = ${episode.id}
           RETURNING *
         `
       : await sql`
           UPDATE public.player_episodes
-          SET video_url_5 = ${normalizedBlobUrl}, source_kind_5 = 'mp4', force_proxy_5 = false, updated_at = NOW()
+          SET video_url_5 = ${normalizedBlobUrl}, source_kind_5 = ${derivedKind}, force_proxy_5 = false, updated_at = NOW()
           WHERE id = ${episode.id}
           RETURNING *
         `;

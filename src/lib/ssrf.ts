@@ -54,6 +54,13 @@ export function isTrustedMediaHost(hostname: string): boolean {
 }
 
 export function isAllowedProxyMediaUrl(url: URL): boolean {
+  const host = url.hostname.toLowerCase().replace(/\.+$/, '');
+  if (
+    host === 'public.blob.vercel-storage.com' ||
+    host.endsWith('.public.blob.vercel-storage.com')
+  ) {
+    return true;
+  }
   const pathname = url.pathname.toLowerCase();
   for (const ext of ALLOWED_MEDIA_EXTENSIONS) {
     if (pathname.endsWith(ext)) {

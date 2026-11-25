@@ -57,6 +57,7 @@ export const EMBED_DIRECT_HOSTS = [
   'hinatasoul.com',
 ] as const;
 export const EMBED_NO_REFERRER_HOSTS = ['filevideo1.com'] as const;
+export const DIRECT_MEDIA_HOSTS = ['public.blob.vercel-storage.com'] as const;
 
 export const DIRECT_IFRAME_ALLOW = 'autoplay; fullscreen; encrypted-media';
 export const DIRECT_IFRAME_SANDBOX =
@@ -82,6 +83,22 @@ export function isEmbedDirectHost(hostname: string): boolean {
 
 export function isEmbedNoReferrerHost(hostname: string): boolean {
   return matchesHostList(hostname, EMBED_NO_REFERRER_HOSTS);
+}
+
+export function isDirectMediaHost(hostname: string): boolean {
+  return matchesHostList(hostname, DIRECT_MEDIA_HOSTS);
+}
+
+export function isDirectMediaUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+    return isDirectMediaHost(parsed.hostname);
+  } catch {
+    return false;
+  }
 }
 
 export function getIframeReferrerPolicy(
@@ -197,9 +214,11 @@ export function isMaximaimgHost(hostname: string): boolean {
 
 export function isVercelBlobHost(hostname: string): boolean {
   const lower = hostname.toLowerCase().replace(/\.+$/, '');
+  if (!lower) return false;
   return (
-    lower.endsWith('.blob.vercel-storage.com') &&
-    lower.length > '.blob.vercel-storage.com'.length
+    isDirectMediaHost(lower) ||
+    (lower.endsWith('.blob.vercel-storage.com') &&
+      lower.length > '.blob.vercel-storage.com'.length)
   );
 }
 
@@ -213,6 +232,32 @@ export function isVercelBlobUrl(rawUrl: string): boolean {
   } catch {
     return false;
   }
+}
+
+export function deriveKindFromExtension(rawUrl: string): ExplicitSourceKind {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return 'mp4';
+
+  try {
+    const parsed = new URL(trimmed, 'http://localhost');
+    const path = parsed.pathname.toLowerCase();
+    if (/\.(m3u8|m3u)$/i.test(path)) {
+      return 'hls';
+    }
+    if (/\.(mp4|m4v|webm)$/i.test(path)) {
+      return 'mp4';
+    }
+  } catch {
+    const lower = trimmed.toLowerCase();
+    if (/\.(m3u8|m3u)(?:[?#]|$)/i.test(lower)) {
+      return 'hls';
+    }
+    if (/\.(mp4|m4v|webm)(?:[?#]|$)/i.test(lower)) {
+      return 'mp4';
+    }
+  }
+
+  return 'mp4';
 }
 
 export function parseMuxPlaybackUrl(url: URL): { playbackId: string; hlsUrl: string; embedUrl: string } | null {
@@ -440,20 +485,21 @@ export function normalizeVideoSource(
   const host = parsed.hostname.toLowerCase();
   const label = `Player ${slot}`;
   const forcedKind = normalizeExplicitSourceKind(explicitKind);
-  const blobMirror = isVercelBlobHost(host);
+  const blobMirror = isDirectMediaHost(host) || isVercelBlobHost(host);
 
-  // 0a. Fontes espelho no Vercel Blob -> MP4 direto, sem proxy (/api/proxy/stream)
-  if (blobMirror && forcedKind !== 'iframe' && forcedKind !== 'hls') {
+  // 0a. Fontes espelho / mídia direta no Vercel Blob -> vídeo direto nativo, sem proxy (/api/proxy/stream) e sem hls.js
+  if (blobMirror) {
+    const directKind: SourceKind = /\.webm($|[?#])/i.test(parsed.pathname) ? 'webm' : 'mp4';
     return {
       slot,
       label,
       rawUrl: normalizedUrl,
       resolvedUrl: normalizedUrl,
-      kind: 'mp4',
+      kind: directKind,
       provider: 'direct',
       needsProxy: false,
       requiresServerResolve: false,
-      formatLabel: 'MP4 · Espelho',
+      formatLabel: directKind === 'webm' ? 'WebM · Espelho' : 'MP4 · Espelho',
       isMirror: true,
     };
   }
@@ -700,7 +746,12 @@ export function collectEpisodeSources(episode: EpisodeUrlsInput): NormalizedVide
     if (!item.url || !item.url.trim()) continue;
     const normalized = normalizeVideoSource(item.url, item.slot, item.kind);
     if (normalized) {
-      const isMirror = Boolean(normalized.isMirror || item.isMirror);
+      const isMirror = Boolean(
+        normalized.isMirror ||
+          item.isMirror ||
+          isDirectMediaUrl(normalized.resolvedUrl) ||
+          isVercelBlobUrl(normalized.resolvedUrl)
+      );
       sources.push({
         ...normalized,
         ...(isMirror ? { isMirror: true, needsProxy: false } : {}),
