@@ -37,7 +37,6 @@ import {
   listEpisodes,
   type PlayerEpisode,
   sanitizeDiagnosticError,
-  saveEpisodeImportedSource,
   updateEpisode,
 } from '@/lib/db';
 import { IMAGE_WIDTH_LIMITS, resizeImageUrlForWidth } from '@/lib/image-optimization';
@@ -53,7 +52,6 @@ import {
   type ControlledR2ResolutionDeps,
   type ControlledR2ResolutionResult,
 } from '@/lib/r2-resolver';
-import { importSourceFromEpisodePage, type SiteImportDeps } from '@/lib/site-import';
 import {
   diagnoseEpisodeSources,
   diagnoseVideoSource,
@@ -68,7 +66,6 @@ import type {
   EpisodeFormPayload,
   PlayableSource,
   PublicEpisodeResult,
-  SiteImportFromPageResult,
   SourceTestReport,
 } from '@/lib/types';
 import { resolveThumbnailSourceForAdmin } from '@/lib/thumbnails';
@@ -649,118 +646,6 @@ export const adminResolveThumbnailSourceFn = createServerFn({ method: 'POST' })
       }
     }
   );
-
-export async function processSiteImportServer(
-  input: {
-    pageUrl: string;
-    episodeId?: string | null;
-    targetSlot?: 1 | 2 | 3 | 4 | 5 | null;
-  },
-  deps: {
-    importDeps?: SiteImportDeps;
-    saveSource?: typeof saveEpisodeImportedSource;
-    isDbConfigured?: typeof isDatabaseConfigured;
-  } = {}
-): Promise<SiteImportFromPageResult> {
-  const importRes = await importSourceFromEpisodePage(input.pageUrl, deps.importDeps);
-  if (!importRes.ok) {
-    return {
-      ok: false,
-      error: importRes.error,
-      candidates: importRes.candidates,
-    };
-  }
-
-  let saved = false;
-  let savedEpisode: EpisodeDto | undefined;
-  let savedSlot: 1 | 2 | 3 | 4 | 5 | undefined;
-
-  if (input.episodeId?.trim()) {
-    const checkDb = deps.isDbConfigured ?? isDatabaseConfigured;
-    if (!checkDb()) {
-      return {
-        ok: false,
-        error: 'DATABASE_URL não configurada no servidor.',
-        candidates: importRes.candidates,
-      };
-    }
-
-    const saveSource = deps.saveSource ?? saveEpisodeImportedSource;
-    const savedResult = await saveSource(input.episodeId.trim(), {
-      videoUrl: importRes.selected.url,
-      sourceKind: importRes.selected.kind,
-      forceProxy: true,
-      sourceReferer: importRes.selected.hostReferer || null,
-      targetSlot: input.targetSlot ?? undefined,
-    });
-    saved = true;
-    savedEpisode = toEpisodeDto(savedResult.episode);
-    savedSlot = savedResult.slot;
-  }
-
-  const reportSlot = savedSlot ?? input.targetSlot ?? 1;
-  const testReport = await diagnoseVideoSource({
-    slot: reportSlot,
-    label: `Player ${reportSlot}`,
-    url: importRes.selected.url,
-    kind: importRes.selected.kind,
-    sourceReferer: importRes.selected.hostReferer || null,
-  });
-
-  const isExpirable = Boolean(importRes.selected.isExpirable || testReport.isExpirable);
-  const expirableReason =
-    importRes.selected.expirableReason ?? testReport.expirableReason ?? null;
-
-  return {
-    ok: true,
-    saved,
-    episode: savedEpisode,
-    slot: savedSlot,
-    selected: {
-      ...importRes.selected,
-      isExpirable,
-      expirableReason,
-    },
-    extractedTitle: importRes.extractedTitle,
-    extractedPoster: importRes.extractedPoster,
-    candidates: importRes.candidates,
-    testReport: {
-      ...testReport,
-      isExpirable,
-      expirableReason,
-    },
-  };
-}
-
-export const adminImportFromSiteFn = createServerFn({ method: 'POST' })
-  .validator(
-    (data: {
-      pageUrl: string;
-      episodeId?: string | null;
-      targetSlot?: number | null;
-    }) => ({
-      pageUrl: typeof data?.pageUrl === 'string' ? data.pageUrl : '',
-      episodeId: typeof data?.episodeId === 'string' ? data.episodeId : null,
-      targetSlot: [1, 2, 3, 4, 5].includes(Number(data?.targetSlot))
-        ? (Number(data?.targetSlot) as 1 | 2 | 3 | 4 | 5)
-        : null,
-    })
-  )
-  .handler(async ({ data }): Promise<SiteImportFromPageResult> => {
-    try {
-      requireAdminSession();
-      return await processSiteImportServer(data);
-    } catch (err) {
-      return {
-        ok: false,
-        error:
-          err instanceof Error
-            ? err.message
-            : 'Falha ao importar fonte da página no servidor.',
-        candidates: [],
-      };
-    }
-  });
 
 export async function processControlledR2ResolutionServer(
   input: { url: string },

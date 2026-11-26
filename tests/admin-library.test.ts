@@ -340,4 +340,30 @@ describe('Persistência, Player único e preservação de registros antigos', ()
     expect(adminSource).toContain('Biblioteca de episódios');
     expect(adminSource).toContain('Voltar para animes');
   });
+
+  it('9. remove avisos grandes R2 dos cards da listagem mantendo badges compactos e aviso no formulário, sem importação de site', () => {
+    const adminSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/routes/admin.tsx'),
+      'utf8'
+    );
+    const serverFnsSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/lib/server-fns.ts'),
+      'utf8'
+    );
+
+    // 1. Cards sem aviso grande de R2
+    expect(adminSource).not.toContain('r2EpisodeInspection');
+    // 2. Indicadores compactos R2 e expirável preservados nos cards + aviso completo mantido no formulário
+    expect(adminSource).toContain('src.r2Inspection.badgeLabel');
+    expect(adminSource).toContain('expirável');
+    expect(adminSource).toContain('primarySourceInfo?.r2Inspection.warningMessage');
+    // 3 e 4. Ausência da seção, botão e servidor de Importar do site
+    expect(adminSource).not.toContain('Importar do site');
+    expect(adminSource).not.toContain('URL da página do episódio');
+    expect(adminSource).not.toContain('adminImportFromSiteFn');
+    expect(serverFnsSource).not.toContain('adminImportFromSiteFn');
+    expect(serverFnsSource).not.toContain('processSiteImportServer');
+    expect(serverFnsSource).not.toContain('site-import');
+  });
 });
+

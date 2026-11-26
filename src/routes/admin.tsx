@@ -65,7 +65,6 @@ import {
   adminCreateEpisodeFn,
   adminDeleteEpisodeFn,
   adminDiagnoseDatabaseFn,
-  adminImportFromSiteFn,
   adminLoginFn,
   adminLogoutFn,
   adminProcessBatchItemFn,
@@ -80,7 +79,6 @@ import type { GeneratedThumbnailCandidate } from '@/lib/thumbnail-utils';
 import type {
   DatabaseDiagnosticResult,
   EpisodeDto,
-  SiteImportCandidateDiagnostic,
   SourceTestReport,
 } from '@/lib/types';
 import {
@@ -347,23 +345,6 @@ function AdminPage() {
   const [mirrorErrorMap, setMirrorErrorMap] = useState<Record<string, string>>({});
   const [mirrorSuccessMap, setMirrorSuccessMap] = useState<Record<string, string>>({});
 
-  // Site import state (form + episode list)
-  const [formSiteUrl, setFormSiteUrl] = useState('');
-  const [formSiteImportBusy, setFormSiteImportBusy] = useState(false);
-  const [formSiteImportError, setFormSiteImportError] = useState<string | null>(null);
-  const [formSiteImportCandidates, setFormSiteImportCandidates] = useState<
-    SiteImportCandidateDiagnostic[]
-  >([]);
-  const [formSiteImportNotice, setFormSiteImportNotice] = useState<string | null>(null);
-
-  const [siteImportInputs, setSiteImportInputs] = useState<Record<string, string>>({});
-  const [siteImportBusyId, setSiteImportBusyId] = useState<string | null>(null);
-  const [siteImportErrorMap, setSiteImportErrorMap] = useState<Record<string, string>>({});
-  const [siteImportCandidatesMap, setSiteImportCandidatesMap] = useState<
-    Record<string, SiteImportCandidateDiagnostic[]>
-  >({});
-  const [siteImportSuccessMap, setSiteImportSuccessMap] = useState<Record<string, string>>({});
-
   // Neon DB diagnostic state
   const [showDiagnostic, setShowDiagnostic] = useState(false);
   const [diagnostic, setDiagnostic] = useState<DatabaseDiagnosticResult | null>(null);
@@ -609,11 +590,6 @@ function AdminPage() {
     setR2ResolveResult(null);
     setR2ResolveError(null);
     setR2AppliedNotice(null);
-    setFormSiteUrl('');
-    setFormSiteImportBusy(false);
-    setFormSiteImportError(null);
-    setFormSiteImportCandidates([]);
-    setFormSiteImportNotice(null);
     resetThumbnailState();
   };
 
@@ -743,131 +719,6 @@ function AdminPage() {
     setR2ResolveResult(null);
     setR2ResolveError(null);
     setR2AppliedNotice(null);
-  };
-
-  const handleImportSiteIntoForm = async () => {
-    const pageUrl = formSiteUrl.trim();
-    if (!pageUrl) {
-      setFormSiteImportError('Informe a URL da página do episódio (anitube.biz, anitube22.vip ou allappinc.com).');
-      return;
-    }
-    setFormSiteImportBusy(true);
-    setFormSiteImportError(null);
-    setFormSiteImportCandidates([]);
-    setFormSiteImportNotice(null);
-    setSlotTestError(null);
-
-    try {
-      const res = await adminImportFromSiteFn({
-        data: {
-          pageUrl,
-          episodeId: editingId,
-          targetSlot: editingId ? 1 : null,
-        },
-      });
-
-      if (!res.ok) {
-        setFormSiteImportError(res.error);
-        setFormSiteImportCandidates(res.candidates);
-        return;
-      }
-
-      setForm((prev) => ({
-        ...prev,
-        title: prev.title.trim() ? prev.title : res.extractedTitle ?? prev.title,
-        poster_url: prev.poster_url.trim() ? prev.poster_url : res.extractedPoster ?? prev.poster_url,
-        video_url: res.selected.url,
-        source_kind: res.selected.kind,
-        source_referer: res.selected.hostReferer,
-        force_proxy: true,
-      }));
-      setFormSiteImportCandidates(res.candidates);
-      setSlotReport(res.testReport);
-
-      const expirableWarn = res.selected.isExpirable
-        ? ` Atenção: ${res.selected.expirableReason ?? 'fonte expirável detectada.'}`
-        : '';
-      setFormSiteImportNotice(
-        res.saved
-          ? `Fonte gravada no Player ${res.slot ?? 1} (${res.selected.kind}, proxy ativo, referer ${res.selected.hostReferer || 'vazio'}) e testada.${expirableWarn}`
-          : `Fonte importada para o formulário (${res.selected.kind}, proxy ativo, referer ${res.selected.hostReferer || 'vazio'}) e testada.${expirableWarn}`
-      );
-
-      if (res.saved) {
-        await router.invalidate();
-      }
-    } catch (err) {
-      setFormSiteImportError(
-        err instanceof Error ? err.message : 'Falha ao importar fonte da página.'
-      );
-    } finally {
-      setFormSiteImportBusy(false);
-    }
-  };
-
-  const handleImportSiteForEpisode = async (ep: EpisodeDto) => {
-    const pageUrl = (siteImportInputs[ep.id] ?? '').trim();
-    if (!pageUrl) {
-      setSiteImportErrorMap((prev) => ({
-        ...prev,
-        [ep.id]: 'Informe a URL da página do episódio (anitube.biz, anitube22.vip ou allappinc.com).',
-      }));
-      return;
-    }
-
-    setSiteImportBusyId(ep.id);
-    setSiteImportErrorMap((prev) => {
-      const next = { ...prev };
-      delete next[ep.id];
-      return next;
-    });
-    setSiteImportCandidatesMap((prev) => {
-      const next = { ...prev };
-      delete next[ep.id];
-      return next;
-    });
-    setSiteImportSuccessMap((prev) => {
-      const next = { ...prev };
-      delete next[ep.id];
-      return next;
-    });
-
-    try {
-      const res = await adminImportFromSiteFn({
-        data: {
-          pageUrl,
-          episodeId: ep.id,
-        },
-      });
-
-      if (!res.ok) {
-        setSiteImportErrorMap((prev) => ({ ...prev, [ep.id]: res.error }));
-        setSiteImportCandidatesMap((prev) => ({ ...prev, [ep.id]: res.candidates }));
-        return;
-      }
-
-      setSiteImportInputs((prev) => ({ ...prev, [ep.id]: '' }));
-      setSiteImportCandidatesMap((prev) => ({ ...prev, [ep.id]: res.candidates }));
-      const expirableWarn = res.selected.isExpirable
-        ? ` Atenção: ${res.selected.expirableReason ?? 'fonte expirável.'}`
-        : '';
-      setSiteImportSuccessMap((prev) => ({
-        ...prev,
-        [ep.id]: `Fonte ${res.slot ?? 1} gravada (${res.selected.kind}, force_proxy=true, referer ${res.selected.hostReferer || 'vazio'}).${expirableWarn}`,
-      }));
-      setEpisodeTests((prev) => ({
-        ...prev,
-        [ep.id]: [res.testReport],
-      }));
-      await router.invalidate();
-    } catch (err) {
-      setSiteImportErrorMap((prev) => ({
-        ...prev,
-        [ep.id]: err instanceof Error ? err.message : 'Falha ao importar fonte da página.',
-      }));
-    } finally {
-      setSiteImportBusyId(null);
-    }
   };
 
   const handleTestEpisodeSources = async (ep: EpisodeDto) => {
@@ -2120,73 +1971,6 @@ function AdminPage() {
                     </p>
                   </div>
 
-                  {/* Importar fonte a partir da página do episódio */}
-                  <div className="pt-2 border-t border-white/10 space-y-2.5">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
-                      <label
-                        htmlFor="ep-site-page-url"
-                        className="text-xs font-medium text-slate-200 inline-flex items-center gap-1.5"
-                      >
-                        <Globe className="w-3.5 h-3.5 text-rose-400" />
-                        URL da página do episódio (anitube.biz / anitube22.vip / allappinc.com)
-                      </label>
-                      <span className="text-[11px] text-slate-400">
-                        Extrai e valida playerricas.php → /index.m3u8 → .mp4
-                      </span>
-                    </div>
-
-                    <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                      <input
-                        id="ep-site-page-url"
-                        type="url"
-                        disabled={formSiteImportBusy}
-                        value={formSiteUrl}
-                        onChange={(e) => setFormSiteUrl(e.target.value)}
-                        placeholder="https://www.anitube.biz/episodio-01/ ou https://allappinc.com/?view=..."
-                        className="flex-1 min-w-0 h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 disabled:opacity-50"
-                      />
-                      <button
-                        type="button"
-                        disabled={formSiteImportBusy || !formSiteUrl.trim()}
-                        onClick={() => void handleImportSiteIntoForm()}
-                        className="h-11 px-4 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-40 text-xs font-medium text-white inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
-                      >
-                        {formSiteImportBusy ? (
-                          <>
-                            <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-400" />
-                            Importando...
-                          </>
-                        ) : (
-                          <>
-                            <Download className="w-3.5 h-3.5 text-rose-400" />
-                            Importar do site
-                          </>
-                        )}
-                      </button>
-                    </div>
-
-                    {formSiteImportError && (
-                      <div
-                        role="alert"
-                        className="rounded-lg border border-rose-500/35 bg-rose-950/30 px-3 py-2 text-xs text-rose-200 space-y-1.5"
-                      >
-                        <p className="font-medium text-rose-300">{formSiteImportError}</p>
-                        {formSiteImportCandidates.length > 0 && (
-                          <SiteImportCandidateList candidates={formSiteImportCandidates} />
-                        )}
-                      </div>
-                    )}
-
-                    {formSiteImportNotice && (
-                      <div className="rounded-lg border border-emerald-500/35 bg-emerald-950/25 px-3 py-2 text-xs text-emerald-200 space-y-1.5">
-                        <p>{formSiteImportNotice}</p>
-                        {formSiteImportCandidates.length > 0 && (
-                          <SiteImportCandidateList candidates={formSiteImportCandidates} />
-                        )}
-                      </div>
-                    )}
-                  </div>
-
                   {/* Single Video Source: Player 1 only */}
                   <div className="pt-2 border-t border-white/10 space-y-2.5">
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -2921,11 +2705,6 @@ function AdminPage() {
                       const hasExpirableSource =
                         episodeSources.some((src) => src.isExpirable) ||
                         Boolean(testReports?.some((report) => report.isExpirable && !isR2StorageUrl(report.url)));
-                      const r2EpisodeInspection =
-                        episodeSources.find((src) => src.r2Inspection.status === 'r2_unsigned')
-                          ?.r2Inspection ??
-                        episodeSources.find((src) => src.r2Inspection.isR2)?.r2Inspection ??
-                        null;
 
                       return (
                         <li
@@ -2962,13 +2741,6 @@ function AdminPage() {
                                 <p className="inline-flex items-center gap-1.5 text-[11px] text-amber-300">
                                   <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
                                   <span>link com hash, use sempre um link novo e não reaproveite</span>
-                                </p>
-                              )}
-
-                              {r2EpisodeInspection?.warningMessage && (
-                                <p className="inline-flex items-start gap-1.5 text-[11px] text-amber-300">
-                                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
-                                  <span>{r2EpisodeInspection.warningMessage}</span>
                                 </p>
                               )}
 
@@ -3241,60 +3013,6 @@ function AdminPage() {
                               {mirrorSuccess && (
                                 <p className="text-xs text-emerald-300">
                                   {mirrorSuccess}
-                                </p>
-                              )}
-                            </div>
-
-                            {/* Importar do site diretamente no episódio */}
-                            <div className="pt-2 border-t border-white/10 space-y-2">
-                              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                                <input
-                                  type="url"
-                                  value={siteImportInputs[ep.id] ?? ''}
-                                  disabled={siteImportBusyId === ep.id}
-                                  onChange={(e) =>
-                                    setSiteImportInputs((prev) => ({
-                                      ...prev,
-                                      [ep.id]: e.target.value,
-                                    }))
-                                  }
-                                  aria-label={`URL da página do episódio para importar em ${epLabel}`}
-                                  placeholder="https://www.anitube.biz/..., anitube22.vip/... ou allappinc.com/?view=..."
-                                  className="flex-1 min-w-0 h-9 px-3 rounded-lg bg-[#11151E] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 disabled:opacity-50"
-                                />
-                                <button
-                                  type="button"
-                                  disabled={
-                                    siteImportBusyId === ep.id ||
-                                    !(siteImportInputs[ep.id] ?? '').trim()
-                                  }
-                                  onClick={() => void handleImportSiteForEpisode(ep)}
-                                  className="h-9 px-3 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed text-xs font-medium text-white inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
-                                >
-                                  <Globe className="w-3.5 h-3.5 text-rose-400" />
-                                  {siteImportBusyId === ep.id
-                                    ? 'Importando...'
-                                    : 'Importar do site'}
-                                </button>
-                              </div>
-
-                              {siteImportErrorMap[ep.id] && (
-                                <div
-                                  role="alert"
-                                  className="rounded-lg border border-rose-500/35 bg-rose-950/30 px-3 py-2 text-xs text-rose-200 space-y-1.5"
-                                >
-                                  <p className="text-rose-300">{siteImportErrorMap[ep.id]}</p>
-                                  {(siteImportCandidatesMap[ep.id]?.length ?? 0) > 0 && (
-                                    <SiteImportCandidateList
-                                      candidates={siteImportCandidatesMap[ep.id]}
-                                    />
-                                  )}
-                                </div>
-                              )}
-
-                              {siteImportSuccessMap[ep.id] && (
-                                <p className="text-xs text-emerald-300">
-                                  {siteImportSuccessMap[ep.id]}
                                 </p>
                               )}
                             </div>
@@ -3633,57 +3351,4 @@ function SourceDiagnosticTable({ reports }: { reports: SourceTestReport[] }) {
   );
 }
 
-function SiteImportCandidateList({
-  candidates,
-}: {
-  candidates: SiteImportCandidateDiagnostic[];
-}) {
-  return (
-    <ul className="space-y-1.5 font-mono text-[10px] text-slate-300">
-      {candidates.map((cand, idx) => (
-        <li
-          key={`${cand.url}-${idx}`}
-          className="space-y-0.5 break-all"
-        >
-          <div className="flex flex-wrap items-center gap-1.5">
-            <span
-              className={`px-1.5 py-0.5 rounded border ${
-                cand.passed
-                  ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
-                  : 'border-rose-500/40 bg-rose-500/15 text-rose-300'
-              }`}
-            >
-              {cand.status !== null ? `HTTP ${cand.status}` : 'erro'}
-            </span>
-            <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-slate-300">
-              {cand.type}
-            </span>
-            {cand.contentType && (
-              <span className="text-slate-400">({cand.contentType})</span>
-            )}
-            <span className="text-slate-300 truncate max-w-full" title={cand.url}>
-              {cand.url}
-            </span>
-          </div>
-          {cand.attempts && cand.attempts.length > 0 && (
-            <div className="pl-2 text-slate-400">
-              Tentativas:{' '}
-              {cand.attempts
-                .map(
-                  (a) =>
-                    `${a.referer ?? 'sem Referer'} → ${
-                      a.status !== null ? `HTTP ${a.status}` : a.error ?? 'erro'
-                    }`
-                )
-                .join(' · ')}
-            </div>
-          )}
-          {!cand.passed && cand.reason && (
-            <div className="pl-2 text-rose-300/90">{cand.reason}</div>
-          )}
-        </li>
-      ))}
-    </ul>
-  );
-}
 
