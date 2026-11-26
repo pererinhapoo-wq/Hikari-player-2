@@ -14,6 +14,8 @@ import {
   hasExpirableHlsTokens,
   isDirectMediaHost,
   isMaximaimgHost,
+  isR2StorageHost,
+  isR2StorageUrl,
   validateHttpUrl,
 } from '@/lib/video-sources';
 
@@ -498,8 +500,12 @@ function buildBinaryResponseHeaders(
 ): Headers {
   const outHeaders = new Headers();
   outHeaders.set('Content-Type', resolveBinaryContentType(contentType, targetUrl));
+  const isR2Target =
+    isR2StorageUrl(sourceTargetUrl ?? '') ||
+    Boolean(targetUrl && isR2StorageHost(targetUrl.hostname));
   const isExpirable =
     inheritedExpirable ||
+    isR2Target ||
     Boolean(sourceTargetUrl && safeDetectExpirable(sourceTargetUrl, detectExpirable)) ||
     Boolean(targetUrl && safeDetectExpirable(targetUrl.toString(), detectExpirable));
   const origin = parseOriginCacheDirectives(upstream);
@@ -509,7 +515,12 @@ function buildBinaryResponseHeaders(
 
   if (isExpirable) {
     cdnCacheControl = 'no-store';
-    if (origin.hasNoStore || origin.hasNoCache || origin.effectiveMaxAge === 0) {
+    if (
+      origin.hasNoStore ||
+      origin.hasNoCache ||
+      origin.effectiveMaxAge === 0 ||
+      (origin.hasPrivate && origin.effectiveMaxAge === null)
+    ) {
       cacheControl = 'no-store';
     } else {
       const candidateRemaining =
@@ -684,6 +695,8 @@ async function handleInspectedUpstreamResponse(
   const rewriteManifestResponse = (text: string): Response => {
     const baseExpirable =
       inheritedExpirable ||
+      isR2StorageUrl(sourceTargetUrl) ||
+      isR2StorageUrl(finalUrl) ||
       safeDetectExpirable(sourceTargetUrl, detectExpirable) ||
       safeDetectExpirable(finalUrl, detectExpirable) ||
       safeDetectExpirable(text, detectExpirable);

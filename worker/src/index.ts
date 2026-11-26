@@ -240,6 +240,25 @@ function isMywallpaperHost(hostname: string): boolean {
   return lower === 'mywallpaper-4k-image.net' || lower.endsWith('.mywallpaper-4k-image.net');
 }
 
+function isR2StorageHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase().replace(/\.+$/, '');
+  if (!lower) return false;
+  return lower === 'r2.cloudflarestorage.com' || lower.endsWith('.r2.cloudflarestorage.com');
+}
+
+function isR2StorageUrl(rawUrl: string): boolean {
+  if (!rawUrl) return false;
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+    return isR2StorageHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
 function isCdnSubdomainHost(hostname: string): boolean {
   const lower = hostname.toLowerCase().replace(/\.+$/, '');
   const labels = lower.split('.').filter(Boolean);
@@ -1138,8 +1157,12 @@ function buildBinaryResponseHeaders(
 ): Headers {
   const outHeaders = new Headers(getCorsHeaders());
   outHeaders.set('Content-Type', resolveBinaryContentType(contentType, targetUrl));
+  const isR2Target =
+    isR2StorageUrl(sourceTargetUrl ?? '') ||
+    Boolean(targetUrl && isR2StorageHost(targetUrl.hostname));
   const isExpirable =
     inheritedExpirable ||
+    isR2Target ||
     Boolean(sourceTargetUrl && safeDetectExpirableWorker(sourceTargetUrl, detectExpirable)) ||
     Boolean(targetUrl && safeDetectExpirableWorker(targetUrl.toString(), detectExpirable));
   const origin = parseOriginCacheDirectivesWorker(upstream);
@@ -1149,7 +1172,12 @@ function buildBinaryResponseHeaders(
 
   if (isExpirable) {
     cdnCacheHeader = 'no-store';
-    if (origin.hasNoStore || origin.hasNoCache || origin.effectiveMaxAge === 0) {
+    if (
+      origin.hasNoStore ||
+      origin.hasNoCache ||
+      origin.effectiveMaxAge === 0 ||
+      (origin.hasPrivate && origin.effectiveMaxAge === null)
+    ) {
       cacheHeader = 'no-store';
     } else {
       const candidateRemaining =
@@ -1596,7 +1624,9 @@ export async function handleWorkerProxyRequest(
 
   const normalizedTargetUrl = urlCheck.normalizedUrl;
   const targetIsExpirable =
-    expirableCheck.expirable || safeDetectExpirableWorker(normalizedTargetUrl, detectExpirable);
+    expirableCheck.expirable ||
+    isR2StorageUrl(normalizedTargetUrl) ||
+    safeDetectExpirableWorker(normalizedTargetUrl, detectExpirable);
   const rangeHeader = request.headers.get('range');
   const edgeCache = deps.edgeCache !== undefined ? deps.edgeCache : getDefaultEdgeCache();
   const learnedStore =
@@ -1737,6 +1767,7 @@ export async function handleWorkerProxyRequest(
     const handleManifestBytes = async (text: string): Promise<Response> => {
       const baseExpirable =
         targetIsExpirable ||
+        isR2StorageUrl(finalUrl) ||
         safeDetectExpirableWorker(finalUrl, detectExpirable) ||
         safeDetectExpirableWorker(text, detectExpirable);
       let childTokenDetected = false;
@@ -1758,7 +1789,9 @@ export async function handleWorkerProxyRequest(
     };
 
     const binaryExpirable =
-      targetIsExpirable || safeDetectExpirableWorker(finalUrl, detectExpirable);
+      targetIsExpirable ||
+      isR2StorageUrl(finalUrl) ||
+      safeDetectExpirableWorker(finalUrl, detectExpirable);
 
     if (
       request.method === 'GET' &&

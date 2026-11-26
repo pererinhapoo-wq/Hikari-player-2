@@ -91,9 +91,12 @@ import {
   type ExplicitSourceKind,
   getIframeReferrerPolicy,
   hasUrlHashParams,
+  inspectR2SourceUrl,
   isExpirableHlsSourceUrl,
+  isR2StorageUrl,
   isVercelBlobUrl,
   normalizeVideoSource,
+  type R2SourceInspection,
   validateHttpUrl,
 } from '@/lib/video-sources';
 import { extractPrefixFromPlayerricasName, isR2SignedUrl } from '@/lib/r2-resolver';
@@ -156,6 +159,7 @@ interface EpisodeSourceRow {
   kind: ExplicitSourceKind;
   isMirror: boolean;
   isExpirable: boolean;
+  r2Inspection: R2SourceInspection;
   sourceReferer: string | null;
 }
 
@@ -215,6 +219,7 @@ function getEpisodeSourcesList(ep: EpisodeDto): EpisodeSourceRow[] {
       kind: isMirror ? 'mp4' : detectSourceKind(trimmed, entry.explicitKind),
       isMirror,
       isExpirable: !isMirror && isExpirableHlsSourceUrl(trimmed, entry.explicitKind),
+      r2Inspection: isMirror ? inspectR2SourceUrl('') : inspectR2SourceUrl(trimmed),
       sourceReferer: entry.sourceReferer?.trim() || null,
     });
   }
@@ -482,15 +487,10 @@ function AdminPage() {
     const hasHashParams = hasUrlHashParams(candidateUrl);
     const isExpirableUrl = isExpirableHlsSourceUrl(candidateUrl, form.source_kind || null);
     const referrerPolicy = getIframeReferrerPolicy(candidateUrl);
+    const r2Inspection = inspectR2SourceUrl(candidateUrl);
     const isR2 = isR2SignedUrl(trimmed);
-    const isCleanR2 = (() => {
-      try {
-        return new URL(trimmed).hostname.toLowerCase().includes('r2.cloudflarestorage.com');
-      } catch {
-        return false;
-      }
-    })();
-    const isUnconfirmed = trimmed.includes('unconfirmed=1') || isR2 || isCleanR2;
+    const isCleanR2 = r2Inspection.isR2 && !r2Inspection.hasAmzSignature;
+    const isUnconfirmed = trimmed.includes('unconfirmed=1') || isR2 || isCleanR2 || isR2StorageUrl(trimmed);
     let detectedPrefix: string | null = null;
     if (!isUnconfirmed && trimmed.toLowerCase().includes('playerricas.php')) {
       try {
@@ -509,6 +509,7 @@ function AdminPage() {
       referrerPolicy,
       detectedPrefix,
       isR2,
+      r2Inspection,
       isUnconfirmed,
     };
   }, [form.video_url, form.source_kind]);
@@ -2147,12 +2148,19 @@ function AdminPage() {
                             R2 Signed URL (tentativa automática)
                           </span>
                         )}
+                        {primarySourceInfo?.r2Inspection.status === 'r2_unsigned' && (
+                          <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-1.5 py-0.5 rounded border border-amber-500/30">
+                            {primarySourceInfo.r2Inspection.badgeLabel}
+                          </span>
+                        )}
                         {primarySourceInfo?.detectedKind && (
                           <span className="text-[11px] font-mono text-emerald-300">
                             {primarySourceInfo.detectedKind}
                           </span>
                         )}
-                        {(primarySourceInfo?.isExpirableUrl || slotReport?.isExpirable) && (
+                        {(primarySourceInfo?.isExpirableUrl ||
+                          primarySourceInfo?.r2Inspection.isR2 ||
+                          slotReport?.isExpirable) && (
                           <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-1.5 py-0.5 rounded border border-amber-500/30">
                             fonte expirável
                           </span>
@@ -2231,7 +2239,18 @@ function AdminPage() {
                       </div>
                     )}
 
-                    {(primarySourceInfo?.isExpirableUrl || slotReport?.isExpirable) && (
+                    {primarySourceInfo?.r2Inspection.warningMessage && (
+                      <div
+                        role="note"
+                        className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
+                      >
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                        <span>{primarySourceInfo.r2Inspection.warningMessage}</span>
+                      </div>
+                    )}
+
+                    {(primarySourceInfo?.isExpirableUrl ||
+                      (slotReport?.isExpirable && !primarySourceInfo?.r2Inspection.isR2)) && (
                       <div
                         role="note"
                         className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
@@ -2708,7 +2727,12 @@ function AdminPage() {
                       );
                       const hasExpirableSource =
                         episodeSources.some((src) => src.isExpirable) ||
-                        Boolean(testReports?.some((report) => report.isExpirable));
+                        Boolean(testReports?.some((report) => report.isExpirable && !isR2StorageUrl(report.url)));
+                      const r2EpisodeInspection =
+                        episodeSources.find((src) => src.r2Inspection.status === 'r2_unsigned')
+                          ?.r2Inspection ??
+                        episodeSources.find((src) => src.r2Inspection.isR2)?.r2Inspection ??
+                        null;
 
                       return (
                         <li
@@ -2745,6 +2769,13 @@ function AdminPage() {
                                 <p className="inline-flex items-center gap-1.5 text-[11px] text-amber-300">
                                   <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
                                   <span>link com hash, use sempre um link novo e não reaproveite</span>
+                                </p>
+                              )}
+
+                              {r2EpisodeInspection?.warningMessage && (
+                                <p className="inline-flex items-start gap-1.5 text-[11px] text-amber-300">
+                                  <AlertTriangle className="w-3.5 h-3.5 shrink-0 mt-0.5" />
+                                  <span>{r2EpisodeInspection.warningMessage}</span>
                                 </p>
                               )}
 
@@ -2940,7 +2971,12 @@ function AdminPage() {
                                         espelho
                                       </span>
                                     )}
-                                    {slotExpirable && (
+                                    {src.r2Inspection.badgeLabel && (
+                                      <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[10px] font-semibold text-amber-300 shrink-0">
+                                        {src.r2Inspection.badgeLabel}
+                                      </span>
+                                    )}
+                                    {(slotExpirable || src.r2Inspection.isR2) && (
                                       <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[10px] font-semibold text-amber-300 shrink-0">
                                         expirável
                                       </span>

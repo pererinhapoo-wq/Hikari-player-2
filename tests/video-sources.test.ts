@@ -1,12 +1,22 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { describe, expect, it } from 'vitest';
 import { extractBunnyHlsFromHtml } from '@/lib/bunny';
+import { buildSignedProxyPath } from '@/lib/proxy-signing';
+import { resolveProxyPlayUrl } from '@/lib/server-fns';
+import { diagnoseVideoSource } from '@/lib/source-diagnostics';
 import {
   buildIframeSrcWithFreshTime,
   collectEpisodeSources,
   detectSourceKind,
   getIframeReferrerPolicy,
   getNextFallbackSourceIndex,
+  hasR2SignedQueryParams,
   hasUrlHashParams,
+  inspectR2SourceUrl,
+  isExpirableHlsSourceUrl,
+  isR2StorageHost,
+  isR2StorageUrl,
   normalizeVideoSource,
   validateHttpUrl,
 } from '@/lib/video-sources';
@@ -219,5 +229,106 @@ describe('collectEpisodeSources e seleção/fallback de fontes', () => {
     const iframe = normalizeVideoSource('https://embeds.example.com/player.html', 3);
     expect(iframe?.kind).toBe('iframe');
     expect(iframe?.needsProxy).toBe(false);
+  });
+});
+
+describe('Classificação, assinatura e diagnóstico de links Cloudflare R2', () => {
+  const unsignedR2Url =
+    'https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/z333/229033.mp4';
+  const signedR2Url =
+    'https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/z333/229033.mp4?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Credential=cred%2F20261125%2Fauto%2Fs3%2Faws4_request&X-Amz-Date=20261125T180000Z&X-Amz-Expires=7200&X-Amz-SignedHeaders=host&X-Amz-Signature=deadbeef';
+  const customAuthR2Url =
+    'https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/z333/229033.mp4?token=abc123';
+  const publicMp4Url = 'https://cdn.example.com/anime/ep01.mp4';
+  const blobMp4Url = 'https://abc123.public.blob.vercel-storage.com/mirrors/anime/ep01.mp4';
+
+  it('classifica qualquer URL *.r2.cloudflarestorage.com como potencialmente temporária sem tornar MP4 comum ou Vercel Blob temporários', () => {
+    expect(isR2StorageHost('173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com')).toBe(true);
+    expect(isR2StorageHost('cdn.example.com')).toBe(false);
+    expect(isR2StorageHost('abc123.public.blob.vercel-storage.com')).toBe(false);
+
+    expect(isR2StorageUrl(unsignedR2Url)).toBe(true);
+    expect(isR2StorageUrl(signedR2Url)).toBe(true);
+    expect(isR2StorageUrl(customAuthR2Url)).toBe(true);
+    expect(isR2StorageUrl(publicMp4Url)).toBe(false);
+    expect(isR2StorageUrl(blobMp4Url)).toBe(false);
+
+    expect(hasR2SignedQueryParams(unsignedR2Url)).toBe(false);
+    expect(hasR2SignedQueryParams(signedR2Url)).toBe(true);
+
+    expect(normalizeVideoSource(unsignedR2Url, 1)?.isExpirable).toBe(true);
+    expect(normalizeVideoSource(signedR2Url, 1)?.isExpirable).toBe(true);
+    expect(normalizeVideoSource(customAuthR2Url, 1)?.isExpirable).toBe(true);
+    expect(normalizeVideoSource(unsignedR2Url, 1, 'mp4')?.isExpirable).toBe(true);
+
+    // MP4 público comum e Vercel Blob não são marcados como temporários
+    expect(normalizeVideoSource(publicMp4Url, 1)?.isExpirable).toBeUndefined();
+    expect(normalizeVideoSource(blobMp4Url, 1)?.isExpirable).toBeUndefined();
+    expect(normalizeVideoSource(blobMp4Url, 1)?.isMirror).toBe(true);
+    expect(normalizeVideoSource(blobMp4Url, 1)?.needsProxy).toBe(false);
+    expect(isExpirableHlsSourceUrl(publicMp4Url)).toBe(false);
+  });
+
+  it('diferencia corretamente R2 com assinatura X-Amz-* e R2 sem assinatura para avisos do Admin e diagnóstico', async () => {
+    const unsignedInfo = inspectR2SourceUrl(unsignedR2Url);
+    expect(unsignedInfo.isR2).toBe(true);
+    expect(unsignedInfo.hasAmzSignature).toBe(false);
+    expect(unsignedInfo.status).toBe('r2_unsigned');
+    expect(unsignedInfo.badgeLabel).toContain('sem assinatura');
+    expect(unsignedInfo.warningMessage).toContain('Cloudflare R2');
+    expect(unsignedInfo.warningMessage).toContain('sem parâmetros de assinatura');
+    expect(unsignedInfo.warningMessage).toContain('Guardar cópia');
+
+    const signedInfo = inspectR2SourceUrl(signedR2Url);
+    expect(signedInfo.isR2).toBe(true);
+    expect(signedInfo.hasAmzSignature).toBe(true);
+    expect(signedInfo.status).toBe('r2_signed');
+    expect(signedInfo.badgeLabel).toContain('assinatura temporária');
+    expect(signedInfo.warningMessage).toContain('assinatura X-Amz-*');
+    expect(signedInfo.warningMessage).toContain('Guardar cópia');
+
+    expect(inspectR2SourceUrl(publicMp4Url).status).toBe('none');
+    expect(inspectR2SourceUrl(blobMp4Url).status).toBe('none');
+
+    // Admin usa inspectR2SourceUrl e renderiza badge e aviso específicos
+    const adminSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/routes/admin.tsx'),
+      'utf8'
+    );
+    expect(adminSource).toContain('inspectR2SourceUrl');
+    expect(adminSource).toContain("status === 'r2_unsigned'");
+    expect(adminSource).toContain('primarySourceInfo?.r2Inspection.warningMessage');
+
+    // Diagnóstico de fonte marca R2 MP4 sem assinatura como expirável
+    const diag = await diagnoseVideoSource(
+      { slot: 1, url: unsignedR2Url },
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(null, { status: 403 }),
+        }),
+      }
+    );
+    expect(diag.isExpirable).toBe(true);
+    expect(diag.expirableReason).toContain('Cloudflare R2');
+    expect(diag.expirableReason).toContain('sem parâmetros de assinatura');
+  });
+
+  it('assina URLs R2 com ex=1&xsig no proxy-signing e resolveProxyPlayUrl sem afetar MP4 público', () => {
+    process.env.PLAYER_SESSION_SECRET = '0123456789abcdef0123456789abcdef';
+
+    const r2ProxyPath = new URL(`http://localhost${buildSignedProxyPath(unsignedR2Url)}`);
+    expect(r2ProxyPath.searchParams.get('ex')).toBe('1');
+    expect(r2ProxyPath.searchParams.get('xsig')).toBeTruthy();
+
+    const r2WorkerUrl = new URL(
+      resolveProxyPlayUrl(unsignedR2Url, 'https://proxy.example.workers.dev')
+    );
+    expect(r2WorkerUrl.searchParams.get('ex')).toBe('1');
+    expect(r2WorkerUrl.searchParams.get('xsig')).toBeTruthy();
+
+    const publicProxyPath = new URL(`http://localhost${buildSignedProxyPath(publicMp4Url)}`);
+    expect(publicProxyPath.searchParams.has('ex')).toBe(false);
+    expect(publicProxyPath.searchParams.has('xsig')).toBe(false);
   });
 });

@@ -14,6 +14,7 @@ import {
 } from '@/lib/proxy-signing';
 import { resolveProxyPlayUrl } from '@/lib/server-fns';
 import { handleProxyStreamRequest } from '@/lib/stream-proxy';
+import { normalizeVideoSource } from '@/lib/video-sources';
 import { Route as AdminRoute } from '@/routes/admin';
 import { Route as EpisodeRoute } from '@/routes/e/$id';
 import { Route as HomeRoute } from '@/routes/index';
@@ -105,6 +106,138 @@ describe('Assinatura estável (bucket de 6h) e cache do proxy', () => {
     );
     expect(streamRouteSource).toContain('OPTIONS:');
     expect(streamRouteSource).toContain("'Access-Control-Allow-Origin': '*'");
+  });
+
+  it('nunca aplica cache público imutável de 1 ano para URLs R2 (com ou sem X-Amz-*) no proxy Vercel e preserva MP4 comum, Vercel Blob e cabeçalhos restritivos', async () => {
+    const nowSec = Math.floor(Date.now() / 1000);
+    const toAmzDate = (unixSec: number) =>
+      new Date(unixSec * 1000).toISOString().replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z');
+    const unsignedR2 =
+      'https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/z333/229033.mp4';
+    const signedR2 =
+      `https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/z333/229033.mp4?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=${toAmzDate(nowSec - 60)}&X-Amz-Expires=7200&X-Amz-Signature=abc123`;
+    const expiredSignedR2 =
+      'https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/z333/229033.mp4?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20250101T000000Z&X-Amz-Expires=7200&X-Amz-Signature=abc123';
+    const publicMp4 = 'https://cdn.example.com/anime/ep01.mp4';
+    const blobMp4 = 'https://abc123.public.blob.vercel-storage.com/mirrors/anime/ep01.mp4';
+    const mp4Bytes = new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]);
+
+    // 1. R2 sem assinatura -> Cache-Control: no-store mesmo se a origem tentar publicar cache longo
+    const resUnsignedR2 = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(unsignedR2, undefined, nowSec)}`),
+      {
+        nowSeconds: () => nowSec,
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(mp4Bytes, {
+            status: 200,
+            headers: {
+              'content-type': 'video/mp4',
+              'cache-control': 'public, max-age=31536000',
+            },
+          }),
+        }),
+      }
+    );
+    expect(resUnsignedR2.status).toBe(200);
+    expect(resUnsignedR2.headers.get('cache-control')).toBe('no-store');
+    expect(resUnsignedR2.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(resUnsignedR2.headers.get('cache-control')).not.toContain('immutable');
+    expect(resUnsignedR2.headers.get('cache-control')).not.toContain('31536000');
+    expect(resUnsignedR2.headers.get('x-hikari-source-expirable')).toBe('1');
+
+    // 2. R2 com X-Amz-* válido -> nunca immutable nem public; respeita CDN no-store e TTL curto privado
+    const resSignedR2 = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(signedR2, undefined, nowSec)}`),
+      {
+        nowSeconds: () => nowSec,
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(mp4Bytes, {
+            status: 200,
+            headers: { 'content-type': 'video/mp4' },
+          }),
+        }),
+      }
+    );
+    expect(resSignedR2.status).toBe(200);
+    expect(resSignedR2.headers.get('cache-control')).toBe('private, max-age=30, must-revalidate');
+    expect(resSignedR2.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(resSignedR2.headers.get('cache-control')).not.toContain('immutable');
+    expect(resSignedR2.headers.get('x-hikari-source-expirable')).toBe('1');
+
+    // 3. R2 com X-Amz-* vencido ou cabeçalho restritivo da origem -> no-store
+    const resExpiredR2 = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(expiredSignedR2, undefined, nowSec)}`),
+      {
+        nowSeconds: () => nowSec,
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(mp4Bytes, {
+            status: 200,
+            headers: { 'content-type': 'video/mp4' },
+          }),
+        }),
+      }
+    );
+    expect(resExpiredR2.headers.get('cache-control')).toBe('no-store');
+    expect(resExpiredR2.headers.get('cdn-cache-control')).toBe('no-store');
+
+    const resRestrictiveR2 = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(signedR2, undefined, nowSec)}`),
+      {
+        nowSeconds: () => nowSec,
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(mp4Bytes, {
+            status: 200,
+            headers: {
+              'content-type': 'video/mp4',
+              'cache-control': 'private, no-cache',
+            },
+          }),
+        }),
+      }
+    );
+    expect(resRestrictiveR2.headers.get('cache-control')).toBe('no-store');
+    expect(resRestrictiveR2.headers.get('cdn-cache-control')).toBe('no-store');
+
+    // 4. MP4 público comum mantém cache existente
+    const resPublicMp4 = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(publicMp4, undefined, nowSec)}`),
+      {
+        nowSeconds: () => nowSec,
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(mp4Bytes, {
+            status: 200,
+            headers: { 'content-type': 'video/mp4' },
+          }),
+        }),
+      }
+    );
+    expect(resPublicMp4.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+    expect(resPublicMp4.headers.get('cdn-cache-control')).toBe('public, max-age=31536000, immutable');
+    expect(resPublicMp4.headers.get('x-hikari-source-expirable')).toBeNull();
+
+    // 5. MP4 permanente do Vercel Blob mantém reprodução direta e política de cache existente
+    expect(normalizeVideoSource(blobMp4, 1)?.needsProxy).toBe(false);
+    expect(normalizeVideoSource(blobMp4, 1)?.isExpirable).toBeUndefined();
+    const resBlobMp4 = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(blobMp4, undefined, nowSec)}`),
+      {
+        nowSeconds: () => nowSec,
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(mp4Bytes, {
+            status: 200,
+            headers: { 'content-type': 'video/mp4' },
+          }),
+        }),
+      }
+    );
+    expect(resBlobMp4.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+    expect(resBlobMp4.headers.get('cdn-cache-control')).toBe('public, max-age=31536000, immutable');
   });
 });
 

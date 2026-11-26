@@ -443,6 +443,92 @@ export function isVercelBlobUrl(rawUrl: string): boolean {
   }
 }
 
+export function isR2StorageHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase().replace(/\.+$/, '');
+  if (!lower) return false;
+  return lower === 'r2.cloudflarestorage.com' || lower.endsWith('.r2.cloudflarestorage.com');
+}
+
+export function isR2StorageUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+    return isR2StorageHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function hasR2SignedQueryParams(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return false;
+    }
+    if (!isR2StorageHost(parsed.hostname)) {
+      return false;
+    }
+    for (const key of parsed.searchParams.keys()) {
+      if (key.toLowerCase().startsWith('x-amz-')) {
+        return true;
+      }
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export interface R2SourceInspection {
+  isR2: boolean;
+  hasAmzSignature: boolean;
+  hasOtherAuthParams: boolean;
+  status: 'none' | 'r2_signed' | 'r2_unsigned';
+  badgeLabel: string | null;
+  warningMessage: string | null;
+}
+
+export function inspectR2SourceUrl(rawUrl: string): R2SourceInspection {
+  const trimmed = rawUrl.trim();
+  if (!trimmed || !isR2StorageUrl(trimmed)) {
+    return {
+      isR2: false,
+      hasAmzSignature: false,
+      hasOtherAuthParams: false,
+      status: 'none',
+      badgeLabel: null,
+      warningMessage: null,
+    };
+  }
+
+  const hasAmzSignature = hasR2SignedQueryParams(trimmed);
+  const hasOtherAuthParams = !hasAmzSignature && hasExpirableHlsTokens(trimmed);
+
+  if (hasAmzSignature) {
+    return {
+      isR2: true,
+      hasAmzSignature: true,
+      hasOtherAuthParams: false,
+      status: 'r2_signed',
+      badgeLabel: 'R2 · assinatura temporária',
+      warningMessage:
+        'URL do Cloudflare R2 com assinatura X-Amz-* potencialmente temporária: o link pode expirar após algumas horas. Recomenda-se salvar uma cópia ("Guardar cópia") enquanto o link ainda estiver válido.',
+    };
+  }
+
+  return {
+    isR2: true,
+    hasAmzSignature: false,
+    hasOtherAuthParams,
+    status: 'r2_unsigned',
+    badgeLabel: 'R2 · sem assinatura na URL',
+    warningMessage:
+      'Endereço de armazenamento Cloudflare R2 sem parâmetros de assinatura (X-Amz-*) identificados na URL. Isso não comprova que o link seja permanente ou que esteja acessível. Se foi obtido pelo 1DM e possui validade temporária, recomenda-se usar "Guardar cópia" enquanto o link ainda estiver válido.',
+  };
+}
+
 export function deriveKindFromExtension(rawUrl: string): ExplicitSourceKind {
   const trimmed = rawUrl.trim();
   if (!trimmed) return 'mp4';
@@ -741,7 +827,9 @@ export function normalizeVideoSource(
       needsProxy: true,
       requiresServerResolve: false,
       formatLabel: maxima ? 'Maximaimg · HLS' : 'HLS',
-      ...(hasExpirableHlsTokens(normalizedUrl) ? { isExpirable: true } : {}),
+      ...(hasExpirableHlsTokens(normalizedUrl) || isR2StorageHost(host)
+        ? { isExpirable: true }
+        : {}),
     };
   }
 
@@ -757,6 +845,7 @@ export function normalizeVideoSource(
       needsProxy: true,
       requiresServerResolve: false,
       formatLabel: maxima ? 'Maximaimg · MP4' : 'MP4',
+      ...(isR2StorageHost(host) ? { isExpirable: true } : {}),
     };
   }
 
@@ -852,6 +941,7 @@ export function normalizeVideoSource(
   // 4. Direct video (MP4 / WebM) & Streaming (HLS / M3U8 / M3U) -> proxy ativo por padrão
   if (!isLikelyHtmlPage(parsed)) {
     const mediaKind = detectDirectOrStreamKind(parsed);
+    const isR2 = isR2StorageHost(host);
     if (mediaKind === 'mp4') {
       return {
         slot,
@@ -863,6 +953,7 @@ export function normalizeVideoSource(
         needsProxy: true,
         requiresServerResolve: false,
         formatLabel: 'MP4',
+        ...(isR2 ? { isExpirable: true } : {}),
       };
     }
     if (mediaKind === 'webm') {
@@ -876,6 +967,7 @@ export function normalizeVideoSource(
         needsProxy: true,
         requiresServerResolve: false,
         formatLabel: 'WebM',
+        ...(isR2 ? { isExpirable: true } : {}),
       };
     }
     if (mediaKind === 'hls') {
@@ -889,7 +981,7 @@ export function normalizeVideoSource(
         needsProxy: true,
         requiresServerResolve: false,
         formatLabel: 'HLS',
-        ...(hasExpirableHlsTokens(normalizedUrl) ? { isExpirable: true } : {}),
+        ...(hasExpirableHlsTokens(normalizedUrl) || isR2 ? { isExpirable: true } : {}),
       };
     }
   }

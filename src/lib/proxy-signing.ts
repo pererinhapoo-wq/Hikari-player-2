@@ -1,4 +1,5 @@
 import crypto from 'node:crypto';
+import { isR2StorageUrl } from '@/lib/video-sources';
 
 let ephemeralDevSecret: string | null = null;
 
@@ -100,7 +101,8 @@ export function buildSignedProxyPath(
     params.set('ref', cleanRef);
     params.set('rsig', createProxyRefererSignature(targetUrl, exp, cleanRef));
   }
-  if (expirable) {
+  const effectiveExpirable = Boolean(expirable) || isR2StorageUrl(targetUrl);
+  if (effectiveExpirable) {
     params.set('ex', '1');
     params.set('xsig', createProxyExpirableSignature(targetUrl, exp));
   }

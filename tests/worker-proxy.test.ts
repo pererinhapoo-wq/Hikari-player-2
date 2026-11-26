@@ -1128,4 +1128,133 @@ describe('Cloudflare Worker Edge Proxy', () => {
     expect(failSafeRes.headers.get('cache-control')).toBe('no-store');
     expect(failSafeRes.headers.get('x-hikari-source-expirable')).toBe('1');
   });
+
+  it('protege URLs R2 (com ou sem X-Amz-*) contra cache imutável e edgeCache no Worker sem afetar MP4 público ou Vercel Blob', async () => {
+    const now = 1_795_000_000;
+    const exp = 2_000_000_000;
+    const edgeCache = createMemoryEdgeCache();
+    const pending: Promise<unknown>[] = [];
+    const ctx: WorkerExecutionContext = {
+      waitUntil(p) {
+        pending.push(p);
+      },
+    };
+    const mp4Bytes = new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]);
+
+    // 1. R2 sem assinatura -> no-store, cf.cacheEverything=false e nunca entra no edgeCache
+    const unsignedR2 =
+      'https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/z333/229033.mp4';
+    const unsignedSig = await createWorkerProxySignature(unsignedR2, exp, TEST_SECRET);
+    const unsignedReqUrl = `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(unsignedR2)}&exp=${exp}&sig=${unsignedSig}`;
+    const unsignedCfList: Array<CfRequestInit['cf']> = [];
+    const unsignedFetcher = vi.fn(async (_input: string, init?: CfRequestInit) => {
+      unsignedCfList.push(init?.cf);
+      return new Response(mp4Bytes, {
+        status: 200,
+        headers: {
+          'content-type': 'video/mp4',
+          'cache-control': 'public, max-age=31536000',
+        },
+      });
+    });
+
+    const rUnsigned1 = await handleWorkerProxyRequest(new Request(unsignedReqUrl), env, ctx, {
+      fetcher: unsignedFetcher,
+      edgeCache,
+      nowSeconds: () => now,
+    });
+    await Promise.all(pending.splice(0));
+    expect(rUnsigned1.status).toBe(200);
+    expect(rUnsigned1.headers.get('cache-control')).toBe('no-store');
+    expect(rUnsigned1.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(rUnsigned1.headers.get('cache-control')).not.toContain('immutable');
+    expect(rUnsigned1.headers.get('x-hikari-source-expirable')).toBe('1');
+    expect(unsignedCfList[0]).toEqual({ cacheEverything: false, cacheTtl: 0 });
+
+    await handleWorkerProxyRequest(new Request(unsignedReqUrl), env, ctx, {
+      fetcher: unsignedFetcher,
+      edgeCache,
+      nowSeconds: () => now + 2,
+    });
+    expect(unsignedFetcher).toHaveBeenCalledTimes(2);
+
+    // 2. R2 com X-Amz-* -> nunca immutable nem public, nunca entra no edgeCache e respeita cabeçalho restritivo
+    const signedR2 =
+      'https://173fe263eae04670ecfcebf237fd6480.r2.cloudflarestorage.com/z333/229033.mp4?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20261125T180000Z&X-Amz-Expires=7200&X-Amz-Signature=deadbeef';
+    const signedSig = await createWorkerProxySignature(signedR2, exp, TEST_SECRET);
+    const signedReqUrl = `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(signedR2)}&exp=${exp}&sig=${signedSig}`;
+    const signedCfList: Array<CfRequestInit['cf']> = [];
+    const signedFetcher = vi.fn(async (_input: string, init?: CfRequestInit) => {
+      signedCfList.push(init?.cf);
+      return new Response(mp4Bytes, {
+        status: 200,
+        headers: { 'content-type': 'video/mp4' },
+      });
+    });
+
+    const rSigned = await handleWorkerProxyRequest(new Request(signedReqUrl), env, ctx, {
+      fetcher: signedFetcher,
+      edgeCache,
+      nowSeconds: () => now,
+    });
+    await Promise.all(pending.splice(0));
+    expect(rSigned.status).toBe(200);
+    expect(rSigned.headers.get('cache-control')).toBe('private, max-age=30, must-revalidate');
+    expect(rSigned.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(rSigned.headers.get('cache-control')).not.toContain('immutable');
+    expect(rSigned.headers.get('x-hikari-source-expirable')).toBe('1');
+    expect(signedCfList[0]).toEqual({ cacheEverything: false, cacheTtl: 0 });
+
+    const rSignedRestrictive = await handleWorkerProxyRequest(new Request(signedReqUrl), env, ctx, {
+      fetcher: async () =>
+        new Response(mp4Bytes, {
+          status: 200,
+          headers: {
+            'content-type': 'video/mp4',
+            'cache-control': 'private',
+          },
+        }),
+      edgeCache,
+      nowSeconds: () => now,
+    });
+    expect(rSignedRestrictive.headers.get('cache-control')).toBe('no-store');
+    expect(rSignedRestrictive.headers.get('cdn-cache-control')).toBe('no-store');
+
+    // 3. MP4 público comum e MP4 permanente do Vercel Blob mantêm cache imutável existente no Worker
+    for (const permanentMp4 of [
+      'https://cdn.example.com/anime/ep01.mp4',
+      'https://abc123.public.blob.vercel-storage.com/mirrors/anime/ep01.mp4',
+    ]) {
+      const permSig = await createWorkerProxySignature(permanentMp4, exp, TEST_SECRET);
+      const permReqUrl = `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(permanentMp4)}&exp=${exp}&sig=${permSig}`;
+      const permCfList: Array<CfRequestInit['cf']> = [];
+      const permFetcher = vi.fn(async (_input: string, init?: CfRequestInit) => {
+        permCfList.push(init?.cf);
+        return new Response(mp4Bytes, {
+          status: 200,
+          headers: { 'content-type': 'video/mp4' },
+        });
+      });
+
+      const rPerm1 = await handleWorkerProxyRequest(new Request(permReqUrl), env, ctx, {
+        fetcher: permFetcher,
+        edgeCache,
+        nowSeconds: () => now,
+      });
+      await Promise.all(pending.splice(0));
+      expect(rPerm1.status).toBe(200);
+      expect(rPerm1.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+      expect(rPerm1.headers.get('cdn-cache-control')).toBe('public, max-age=31536000, immutable');
+      expect(rPerm1.headers.get('x-hikari-source-expirable')).toBeNull();
+      expect(permCfList[0]).toEqual({ cacheEverything: true, cacheTtl: 31536000 });
+
+      const rPerm2 = await handleWorkerProxyRequest(new Request(permReqUrl), env, ctx, {
+        fetcher: permFetcher,
+        edgeCache,
+        nowSeconds: () => now + 5,
+      });
+      expect(rPerm2.headers.get('cf-cache-status')).toBe('HIT');
+      expect(permFetcher).toHaveBeenCalledTimes(1);
+    }
+  });
 });

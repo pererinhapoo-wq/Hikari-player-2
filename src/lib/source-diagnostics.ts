@@ -25,6 +25,8 @@ import {
   detectSourceKind,
   type ExplicitSourceKind,
   hasExpirableHlsTokens,
+  inspectR2SourceUrl,
+  isR2StorageUrl,
   isVercelBlobUrl,
   validateHttpUrl,
 } from '@/lib/video-sources';
@@ -587,6 +589,19 @@ async function detectExpirableHlsSource(params: {
   noHeadersRes: InternalAttemptResult;
   fetchWithRedirects: typeof safeFetchWithRedirects;
 }): Promise<{ isExpirable: boolean; expirableReason: string | null }> {
+  const r2Candidate =
+    (isR2StorageUrl(params.withHeadersRes.finalUrl ?? '') ? params.withHeadersRes.finalUrl : null) ??
+    (isR2StorageUrl(params.noHeadersRes.finalUrl ?? '') ? params.noHeadersRes.finalUrl : null) ??
+    (isR2StorageUrl(params.targetUrl) ? params.targetUrl : null);
+
+  if (r2Candidate) {
+    const r2Info = inspectR2SourceUrl(r2Candidate);
+    return {
+      isExpirable: true,
+      expirableReason: r2Info.warningMessage,
+    };
+  }
+
   const manifestText = params.withHeadersRes.manifestText ?? params.noHeadersRes.manifestText;
   const manifestBaseUrl =
     (params.withHeadersRes.manifestText ? params.withHeadersRes.finalUrl : params.noHeadersRes.finalUrl) ??

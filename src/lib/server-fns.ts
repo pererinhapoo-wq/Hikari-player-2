@@ -43,6 +43,7 @@ import {
 import { IMAGE_WIDTH_LIMITS, resizeImageUrlForWidth } from '@/lib/image-optimization';
 import {
   buildSignedProxyPath,
+  createProxyExpirableSignature,
   createProxyRefererSignature,
   createProxySignature,
   getStableProxyExpiry,
@@ -71,6 +72,7 @@ import {
   collectEpisodeSources,
   type ExplicitSourceKind,
   isDirectMediaUrl,
+  isR2StorageUrl,
   isVercelBlobUrl,
 } from '@/lib/video-sources';
 
@@ -100,6 +102,10 @@ export function resolveProxyPlayUrl(
         if (cleanRef) {
           params.set('ref', cleanRef);
           params.set('rsig', createProxyRefererSignature(targetUrl, stableExp, cleanRef));
+        }
+        if (isR2StorageUrl(targetUrl)) {
+          params.set('ex', '1');
+          params.set('xsig', createProxyExpirableSignature(targetUrl, stableExp));
         }
         return `${normalizedBase}/api/proxy/stream?${params.toString()}`;
       }
