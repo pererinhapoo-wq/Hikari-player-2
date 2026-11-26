@@ -8,6 +8,7 @@ import {
 } from '@/lib/hls-playback';
 import {
   buildSignedProxyPath,
+  createProxyRefererSignature,
   MAX_HLS_REWRITE_DEPTH,
   rewriteM3u8Playlist,
 } from '@/lib/proxy-signing';
@@ -1110,5 +1111,220 @@ describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () =
     expect(
       resolveUpstreamReferer(new URL('https://cdn-09.sub.custom.org/ep1.m3u8'), suffixMap)
     ).toBe('https://www.coempregos.com.br/');
+  });
+
+  it('22. propaga o Referer vencedor após fallback 403 para playlists aninhadas, segmentos, EXT-X-KEY e EXT-X-MAP (incluindo relativas pós-redirect e absolutas)', async () => {
+    const masterUrl = 'https://cdn-s01.mywallpaper-4k-image.net/redirect/master.m3u8';
+    const redirectedMasterUrl = 'https://edge02.mywallpaper-4k-image.net/hls/ep21/master.m3u8';
+    const variantUrl = 'https://edge02.mywallpaper-4k-image.net/hls/ep21/720p/index.m3u8';
+    const keyUrl = 'https://edge02.mywallpaper-4k-image.net/hls/ep21/720p/keys/enc.key';
+    const mapUrl = 'https://edge02.mywallpaper-4k-image.net/hls/ep21/720p/init.mp4';
+    const relSegUrl = 'https://edge02.mywallpaper-4k-image.net/hls/ep21/720p/seg-001.webp';
+    const absSegUrl = 'https://cdn-backup.outrohost.net/chunks/seg-002.ts?tok=xyz';
+
+    const seenReferersByUrl = new Map<string, Array<string | undefined>>();
+    const mockFetchWithRedirects = async (url: string, opts?: { headers?: Record<string, string> }) => {
+      const ref = opts?.headers?.['Referer'];
+      const list = seenReferersByUrl.get(url) ?? [];
+      list.push(ref);
+      seenReferersByUrl.set(url, list);
+
+      // Todos os recursos deste provedor exigem https://api.anivideo.net/ (fallback #2 após 403 em anitube.biz)
+      if (ref !== 'https://api.anivideo.net/') {
+        return {
+          finalUrl: url,
+          response: new Response('Forbidden', { status: 403 }),
+        };
+      }
+
+      if (url === masterUrl) {
+        return {
+          finalUrl: redirectedMasterUrl,
+          response: new Response(
+            [
+              '#EXTM3U',
+              '#EXT-X-STREAM-INF:BANDWIDTH=2000000',
+              '720p/index.m3u8',
+            ].join('\n'),
+            {
+              status: 200,
+              headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+            }
+          ),
+        };
+      }
+
+      if (url === variantUrl) {
+        return {
+          finalUrl: variantUrl,
+          response: new Response(
+            [
+              '#EXTM3U',
+              '#EXT-X-VERSION:7',
+              '#EXT-X-KEY:METHOD=AES-128,URI="keys/enc.key"',
+              '#EXT-X-MAP:URI="init.mp4"',
+              '#EXTINF:6.0,',
+              'seg-001.webp',
+              '#EXTINF:6.0,',
+              absSegUrl,
+              '#EXT-X-ENDLIST',
+            ].join('\n'),
+            {
+              status: 200,
+              headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+            }
+          ),
+        };
+      }
+
+      if (url === keyUrl || url === mapUrl) {
+        return {
+          finalUrl: url,
+          response: new Response(new Uint8Array([0x00, 0x01, 0x02, 0x03]), {
+            status: 200,
+            headers: { 'content-type': 'application/octet-stream' },
+          }),
+        };
+      }
+
+      return {
+        finalUrl: url,
+        response: new Response(new Uint8Array([0x47, 0x40, 0x00, 0x10]), {
+          status: 200,
+          headers: { 'content-type': 'image/webp' },
+        }),
+      };
+    };
+
+    const masterRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(masterUrl)}`),
+      { fetchWithRedirects: mockFetchWithRedirects }
+    );
+    expect(masterRes.status).toBe(200);
+    // Master tentou padrão (anitube.biz -> 403) e venceu com fallback (api.anivideo.net -> 200)
+    expect(seenReferersByUrl.get(masterUrl)).toEqual([
+      'https://www.anitube.biz/',
+      'https://api.anivideo.net/',
+    ]);
+
+    const masterText = await masterRes.text();
+    const variantPath = masterText.split('\n').find((l) => l.includes(encodeURIComponent(variantUrl)))!.trim();
+    const variantParsed = new URL(`http://localhost${variantPath}`);
+    expect(variantParsed.searchParams.get('ref')).toBe('https://api.anivideo.net/');
+    expect(variantParsed.searchParams.get('rsig')).toBeTruthy();
+
+    // Variante já recebe o Referer vencedor na 1ª tentativa (sem 403 prévio) e propaga aos filhos
+    const variantRes = await handleProxyStreamRequest(new Request(variantParsed.toString()), {
+      fetchWithRedirects: mockFetchWithRedirects,
+    });
+    expect(variantRes.status).toBe(200);
+    expect(seenReferersByUrl.get(variantUrl)).toEqual(['https://api.anivideo.net/']);
+
+    const variantText = await variantRes.text();
+    const proxiedUrls = (variantText.match(/\/api\/proxy\/stream\?[^\s"']+/g) ?? []).map(
+      (p) => new URL(`http://localhost${p}`)
+    );
+
+    const findChild = (target: string) =>
+      proxiedUrls.find((u) => u.searchParams.get('url') === target);
+
+    for (const target of [keyUrl, mapUrl, relSegUrl, absSegUrl]) {
+      const childUrl = findChild(target);
+      expect(childUrl, `URL filha ausente: ${target}`).toBeDefined();
+      expect(childUrl!.searchParams.get('ref')).toBe('https://api.anivideo.net/');
+      expect(childUrl!.searchParams.get('rsig')).toBeTruthy();
+
+      const childRes = await handleProxyStreamRequest(new Request(childUrl!.toString()), {
+        fetchWithRedirects: mockFetchWithRedirects,
+      });
+      expect(childRes.status).toBe(200);
+      expect(seenReferersByUrl.get(target)).toEqual(['https://api.anivideo.net/']);
+    }
+  });
+
+  it('23. mantém comportamento padrão sem ref/rsig quando nenhum fallback é necessário e quando o fallback vencedor é sem Referer', async () => {
+    // 23a. Playlist carregada de primeira com Referer padrão -> filhos não recebem ref/rsig extras
+    const defaultMasterUrl = 'https://cdn-sv01.maximaimg.online/stream/b/bakemonogatari/01.mp4/index.m3u8';
+    const defaultRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(defaultMasterUrl)}`),
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response('#EXTM3U\n#EXTINF:6.0,\nseg-001.ts\n#EXT-X-ENDLIST', {
+            status: 200,
+            headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+          }),
+        }),
+      }
+    );
+    expect(defaultRes.status).toBe(200);
+    const defaultBody = await defaultRes.text();
+    const defaultChildPath = defaultBody.split('\n').find((l) => l.includes('seg-001.ts'))!.trim();
+    const defaultChildUrl = new URL(`http://localhost${defaultChildPath}`);
+    expect(defaultChildUrl.searchParams.has('ref')).toBe(false);
+    expect(defaultChildUrl.searchParams.has('rsig')).toBe(false);
+
+    // 23b. Playlist que vence apenas sem Referer ('') após 403 não falha nem emite ref inválido
+    const noRefMasterUrl = 'https://cdn.semreferer.example.com/hls/master.m3u8';
+    const noRefRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(noRefMasterUrl)}`),
+      {
+        fetchWithRedirects: async (url, opts) => {
+          if (opts?.headers?.['Referer']) {
+            return { finalUrl: url, response: new Response('Forbidden', { status: 403 }) };
+          }
+          return {
+            finalUrl: url,
+            response: new Response('#EXTM3U\n#EXTINF:6.0,\nseg-001.ts\n#EXT-X-ENDLIST', {
+              status: 200,
+              headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+            }),
+          };
+        },
+      }
+    );
+    expect(noRefRes.status).toBe(200);
+    const noRefBody = await noRefRes.text();
+    const noRefChildPath = noRefBody.split('\n').find((l) => l.includes('seg-001.ts'))!.trim();
+    const noRefChildUrl = new URL(`http://localhost${noRefChildPath}`);
+    expect(noRefChildUrl.searchParams.has('ref')).toBe(false);
+    expect(noRefChildUrl.searchParams.has('rsig')).toBe(false);
+  });
+
+  it('24. rejeita no proxy (HTTP 403 sem chamada upstream) parâmetro ref arbitrário, adulterado ou sem rsig válida', async () => {
+    const target = 'https://cdn-s01.mywallpaper-4k-image.net/stream/ep21/seg-001.webp';
+    const signedWithRef = buildSignedProxyPath(target, undefined, undefined, 1, 'https://api.anivideo.net/');
+    const validUrl = new URL(`http://localhost${signedWithRef}`);
+    const upstreamMock = vi.fn();
+
+    // Sem rsig
+    const missingRsig = new URL(validUrl.toString());
+    missingRsig.searchParams.delete('rsig');
+    const r1 = await handleProxyStreamRequest(new Request(missingRsig.toString()), {
+      fetchWithRedirects: upstreamMock,
+    });
+    expect(r1.status).toBe(403);
+
+    // ref adulterado mantendo rsig antiga
+    const tamperedRef = new URL(validUrl.toString());
+    tamperedRef.searchParams.set('ref', 'https://attacker.example.com/');
+    const r2 = await handleProxyStreamRequest(new Request(tamperedRef.toString()), {
+      fetchWithRedirects: upstreamMock,
+    });
+    expect(r2.status).toBe(403);
+
+    // ref arbitrário adicionado a URL assinada sem ref
+    const baseSigned = new URL(`http://localhost${buildSignedProxyPath(target)}`);
+    baseSigned.searchParams.set('ref', 'https://arbitrary.example.com/');
+    baseSigned.searchParams.set(
+      'rsig',
+      createProxyRefererSignature('https://other.example.com/x.ts', Number(baseSigned.searchParams.get('exp')), 'https://arbitrary.example.com/')
+    );
+    const r3 = await handleProxyStreamRequest(new Request(baseSigned.toString()), {
+      fetchWithRedirects: upstreamMock,
+    });
+    expect(r3.status).toBe(403);
+
+    expect(upstreamMock).not.toHaveBeenCalled();
   });
 });

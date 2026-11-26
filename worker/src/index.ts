@@ -337,7 +337,8 @@ export async function verifyWorkerProxyReferer(
   expParam: string | null,
   refParam: string | null,
   refSigParam: string | null,
-  secret: string
+  secret: string,
+  nowSeconds = Math.floor(Date.now() / 1000)
 ): Promise<{ valid: boolean; referer: string | null }> {
   if (refParam === null) {
     return { valid: true, referer: null };
@@ -346,7 +347,20 @@ export async function verifyWorkerProxyReferer(
     return { valid: false, referer: null };
   }
   const exp = Number(expParam);
-  if (!Number.isInteger(exp)) {
+  if (!Number.isInteger(exp) || exp < nowSeconds) {
+    return { valid: false, referer: null };
+  }
+  let parsedRef: URL;
+  try {
+    parsedRef = new URL(refParam);
+  } catch {
+    return { valid: false, referer: null };
+  }
+  if (
+    (parsedRef.protocol !== 'http:' && parsedRef.protocol !== 'https:') ||
+    parsedRef.username ||
+    parsedRef.password
+  ) {
     return { valid: false, referer: null };
   }
   const sigBytes = base64UrlToBytes(refSigParam);
@@ -796,7 +810,12 @@ async function fetchWith403RefererFallbackWorker(
   cf: CloudflareCfProperties,
   fetcher: (input: string, init?: CfRequestInit) => Promise<Response>,
   customReferer?: string | null
-): Promise<{ response: Response; finalUrl: string }> {
+): Promise<{
+  response: Response;
+  finalUrl: string;
+  winningReferer: string;
+  usedFallback: boolean;
+}> {
   const baseHeaders = getUpstreamHeaders(targetUrl, incomingRequest, env, customReferer);
   const refererCandidates = resolveUpstreamRefererCandidates(targetUrl, env, customReferer);
 
@@ -826,11 +845,19 @@ async function fetchWith403RefererFallbackWorker(
     );
 
     if (lastResult.response.status !== 403) {
-      return lastResult;
+      return {
+        ...lastResult,
+        winningReferer: candidateRef,
+        usedFallback: i > 0,
+      };
     }
   }
 
-  return lastResult!;
+  return {
+    ...lastResult!,
+    winningReferer: refererCandidates[refererCandidates.length - 1] ?? '',
+    usedFallback: refererCandidates.length > 1,
+  };
 }
 
 function buildStableEdgeCacheRequest(targetUrl: string, depth = 0): Request {
@@ -981,7 +1008,8 @@ export async function handleWorkerProxyRequest(
     exp,
     refParam,
     refSigParam,
-    secret
+    secret,
+    nowSeconds
   );
   if (!refCheck.valid) {
     return new Response('Assinatura de Referer do proxy inválida.', {
@@ -1029,7 +1057,12 @@ export async function handleWorkerProxyRequest(
         ? EXPIRABLE_SEGMENT_CACHE_TTL_SECONDS
         : SEGMENT_CACHE_TTL_SECONDS;
 
-    const { response: upstream, finalUrl } = await fetchWith403RefererFallbackWorker(
+    const {
+      response: upstream,
+      finalUrl,
+      winningReferer,
+      usedFallback,
+    } = await fetchWith403RefererFallbackWorker(
       targetUrl,
       request,
       env,
@@ -1053,6 +1086,10 @@ export async function handleWorkerProxyRequest(
     const proxyPath = reqUrl.pathname || '/api/proxy/stream';
     const stableExp = getStableSegmentExpiry(nowSeconds);
     const nextDepth = depthCheck.depth + 1;
+    const propagatedReferer =
+      winningReferer && (usedFallback || Boolean(refCheck.referer))
+        ? winningReferer
+        : null;
 
     const signChildUrl = async (resolvedUrl: string): Promise<string> => {
       const childSig = await createWorkerProxySignature(resolvedUrl, stableExp, secret);
@@ -1064,6 +1101,16 @@ export async function handleWorkerProxyRequest(
         d: String(nextDepth),
         dsig: childDepthSig,
       });
+      if (propagatedReferer) {
+        const childRefSig = await createWorkerRefererSignature(
+          resolvedUrl,
+          stableExp,
+          propagatedReferer,
+          secret
+        );
+        params.set('ref', propagatedReferer);
+        params.set('rsig', childRefSig);
+      }
       return `${proxyPath}?${params.toString()}`;
     };
 

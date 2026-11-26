@@ -115,7 +115,8 @@ export function verifyProxyReferer(
   targetUrl: string,
   expParam: string | null,
   refParam: string | null,
-  refSigParam: string | null
+  refSigParam: string | null,
+  nowSeconds = Math.floor(Date.now() / 1000)
 ): { valid: boolean; referer: string | null } {
   if (refParam === null) {
     return { valid: true, referer: null };
@@ -124,7 +125,20 @@ export function verifyProxyReferer(
     return { valid: false, referer: null };
   }
   const exp = Number(expParam);
-  if (!Number.isInteger(exp)) {
+  if (!Number.isInteger(exp) || exp < nowSeconds) {
+    return { valid: false, referer: null };
+  }
+  let parsedRef: URL;
+  try {
+    parsedRef = new URL(refParam);
+  } catch {
+    return { valid: false, referer: null };
+  }
+  if (
+    (parsedRef.protocol !== 'http:' && parsedRef.protocol !== 'https:') ||
+    parsedRef.username ||
+    parsedRef.password
+  ) {
     return { valid: false, referer: null };
   }
   const expected = createProxyRefererSignature(targetUrl, exp, refParam);

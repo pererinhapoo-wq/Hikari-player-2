@@ -17,8 +17,10 @@ import {
 } from '@/lib/db';
 import {
   buildSignedProxyPath,
-  verifyProxySignature,
+  createProxyRefererSignature,
   rewriteM3u8Playlist,
+  verifyProxyReferer,
+  verifyProxySignature,
 } from '@/lib/proxy-signing';
 import {
   ALLOWED_MEDIA_EXTENSIONS,
@@ -124,6 +126,76 @@ describe('Segurança de Proxy, SSRF e Reescrita M3U8', () => {
         parsed.searchParams.get('sig')
       )
     ).toBe(false);
+  });
+
+  it('assina e valida ref/rsig e rejeita Referer adulterado, sem assinatura, expirado ou não-HTTP', () => {
+    const now = 1_795_000_000;
+    const target = 'https://cdn-s01.mywallpaper-4k-image.net/stream/ep01/seg-001.webp';
+    const referer = 'https://api.anivideo.net/';
+    const signedPath = buildSignedProxyPath(target, undefined, now, 1, referer);
+    const parsed = new URL(`http://localhost${signedPath}`);
+    const exp = parsed.searchParams.get('exp');
+    const ref = parsed.searchParams.get('ref');
+    const rsig = parsed.searchParams.get('rsig');
+
+    expect(ref).toBe(referer);
+    expect(rsig).toBe(createProxyRefererSignature(target, Number(exp), referer));
+
+    // Assinatura válida
+    expect(verifyProxyReferer(target, exp, ref, rsig, now)).toEqual({
+      valid: true,
+      referer,
+    });
+
+    // Ausência de ref continua válida (referer=null)
+    expect(verifyProxyReferer(target, exp, null, null, now)).toEqual({
+      valid: true,
+      referer: null,
+    });
+
+    // Referer adulterado
+    expect(verifyProxyReferer(target, exp, 'https://evil.example.com/', rsig, now)).toEqual({
+      valid: false,
+      referer: null,
+    });
+
+    // URL de destino trocada (tentativa de reaproveitar rsig)
+    expect(
+      verifyProxyReferer('https://cdn-s01.mywallpaper-4k-image.net/stream/ep01/seg-002.webp', exp, ref, rsig, now)
+    ).toEqual({
+      valid: false,
+      referer: null,
+    });
+
+    // rsig ausente ou adulterada
+    expect(verifyProxyReferer(target, exp, ref, null, now)).toEqual({
+      valid: false,
+      referer: null,
+    });
+    expect(verifyProxyReferer(target, exp, ref, 'assinatura-invalida', now)).toEqual({
+      valid: false,
+      referer: null,
+    });
+
+    // ref vazio
+    expect(verifyProxyReferer(target, exp, '   ', rsig, now)).toEqual({
+      valid: false,
+      referer: null,
+    });
+
+    // exp expirado
+    expect(verifyProxyReferer(target, exp, ref, rsig, Number(exp) + 1)).toEqual({
+      valid: false,
+      referer: null,
+    });
+
+    // Protocolo não-HTTP mesmo com assinatura gerada
+    const jsRef = 'javascript:alert(1)';
+    const jsRsig = createProxyRefererSignature(target, Number(exp), jsRef);
+    expect(verifyProxyReferer(target, exp, jsRef, jsRsig, now)).toEqual({
+      valid: false,
+      referer: null,
+    });
   });
 
   it('reescreve playlists M3U8 (segmentos relativos, absolutos, chaves e mapas)', () => {

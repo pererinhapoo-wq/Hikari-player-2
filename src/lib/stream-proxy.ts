@@ -435,7 +435,8 @@ async function handleInspectedUpstreamResponse(
   finalUrl: string,
   contentType: string,
   depth: number,
-  sourceTargetUrl: string
+  sourceTargetUrl: string,
+  propagatedReferer?: string | null
 ): Promise<Response> {
   const finalParsed = new URL(finalUrl);
   if (!upstream.body) {
@@ -455,7 +456,7 @@ async function handleInspectedUpstreamResponse(
       const nowSeconds = Math.floor(Date.now() / 1000);
       const nextDepth = depth + 1;
       const rewritten = rewriteM3u8Playlist(text, finalUrl, (resolved) =>
-        buildSignedProxyPath(resolved, undefined, nowSeconds, nextDepth)
+        buildSignedProxyPath(resolved, undefined, nowSeconds, nextDepth, propagatedReferer)
       );
       return new Response(rewritten, {
         status: 200,
@@ -528,7 +529,7 @@ async function handleInspectedUpstreamResponse(
     const nowSeconds = Math.floor(Date.now() / 1000);
     const nextDepth = depth + 1;
     const rewritten = rewriteM3u8Playlist(text, finalUrl, (resolved) =>
-      buildSignedProxyPath(resolved, undefined, nowSeconds, nextDepth)
+      buildSignedProxyPath(resolved, undefined, nowSeconds, nextDepth, propagatedReferer)
     );
     return new Response(rewritten, {
       status: 200,
@@ -607,7 +608,12 @@ async function fetchWith403RefererFallback(
   incomingRequest: Request,
   fetchWithRedirects: typeof safeFetchWithRedirects,
   customReferer?: string | null
-): Promise<{ response: Response; finalUrl: string }> {
+): Promise<{
+  response: Response;
+  finalUrl: string;
+  winningReferer: string;
+  usedFallback: boolean;
+}> {
   const baseHeaders = getUpstreamHeaders(targetUrl, incomingRequest, customReferer);
   const refererCandidates = resolveUpstreamRefererCandidates(
     targetUrl,
@@ -637,11 +643,19 @@ async function fetchWith403RefererFallback(
     });
 
     if (lastResult.response.status !== 403) {
-      return lastResult;
+      return {
+        ...lastResult,
+        winningReferer: candidateRef,
+        usedFallback: i > 0,
+      };
     }
   }
 
-  return lastResult!;
+  return {
+    ...lastResult!,
+    winningReferer: refererCandidates[refererCandidates.length - 1] ?? '',
+    usedFallback: refererCandidates.length > 1,
+  };
 }
 
 export async function handleProxyStreamRequest(
@@ -697,7 +711,12 @@ export async function handleProxyStreamRequest(
       return buildProxyErrorResponse('Extensão de destino não permitida no proxy.', 403);
     }
 
-    const { response: upstream, finalUrl } = await fetchWith403RefererFallback(
+    const {
+      response: upstream,
+      finalUrl,
+      winningReferer,
+      usedFallback,
+    } = await fetchWith403RefererFallback(
       targetUrl,
       request,
       fetchWithRedirects,
@@ -721,6 +740,11 @@ export async function handleProxyStreamRequest(
       return buildProxyErrorResponse('Extensão de destino não permitida no proxy.', 403);
     }
 
+    const propagatedReferer =
+      winningReferer && (usedFallback || Boolean(refCheck.referer))
+        ? winningReferer
+        : null;
+
     if (
       upstream.status !== 206 &&
       shouldInspectForHlsManifest(contentType, finalParsed, depthCheck.fromPlaylist)
@@ -730,7 +754,8 @@ export async function handleProxyStreamRequest(
         finalUrl,
         contentType,
         depthCheck.depth,
-        targetUrl.toString()
+        targetUrl.toString(),
+        propagatedReferer
       );
     }
 

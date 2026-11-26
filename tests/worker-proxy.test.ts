@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createProxyDepthSignature,
+  createProxyRefererSignature,
   createProxySignature,
   verifyProxySignature,
 } from '@/lib/proxy-signing';
@@ -9,10 +10,12 @@ import {
   type CfRequestInit,
   createWorkerDepthSignature,
   createWorkerProxySignature,
+  createWorkerRefererSignature,
   getStableSegmentExpiry,
   handleWorkerProxyRequest,
   resolveUpstreamReferer,
   resolveUpstreamRefererCandidates,
+  verifyWorkerProxyReferer,
   verifyWorkerProxySignature,
   type WorkerEnv,
   type WorkerExecutionContext,
@@ -473,5 +476,188 @@ describe('Cloudflare Worker Edge Proxy', () => {
       { fetcher, edgeCache: null, nowSeconds: () => 1_795_000_000 }
     );
     expect(resDeep.status).toBe(502);
+  });
+
+  it('mantém interoperabilidade de rsig entre Node e Worker e rejeita Referer adulterado ou sem assinatura', async () => {
+    const target = 'https://cdn-s01.mywallpaper-4k-image.net/stream/ep21/seg-001.webp';
+    const exp = 2_000_000_000;
+    const now = 1_795_000_000;
+    const referer = 'https://api.anivideo.net/';
+
+    const nodeRsig = createProxyRefererSignature(target, exp, referer);
+    const workerRsig = await createWorkerRefererSignature(target, exp, referer, TEST_SECRET);
+    expect(workerRsig).toBe(nodeRsig);
+
+    expect(
+      await verifyWorkerProxyReferer(target, String(exp), referer, nodeRsig, TEST_SECRET, now)
+    ).toEqual({ valid: true, referer });
+
+    // Adulterado / sem rsig / expirado / protocolo inválido
+    expect(
+      await verifyWorkerProxyReferer(target, String(exp), 'https://evil.example/', workerRsig, TEST_SECRET, now)
+    ).toEqual({ valid: false, referer: null });
+    expect(
+      await verifyWorkerProxyReferer(target, String(exp), referer, null, TEST_SECRET, now)
+    ).toEqual({ valid: false, referer: null });
+    expect(
+      await verifyWorkerProxyReferer(target, String(exp), referer, workerRsig, TEST_SECRET, exp + 10)
+    ).toEqual({ valid: false, referer: null });
+
+    const sig = await createWorkerProxySignature(target, exp, TEST_SECRET);
+    const fetcher = vi.fn();
+    const tamperedReq = new Request(
+      `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(target)}&exp=${exp}&sig=${sig}&ref=${encodeURIComponent('https://evil.example/')}&rsig=${encodeURIComponent(workerRsig)}`
+    );
+    const resTampered = await handleWorkerProxyRequest(tamperedReq, env, undefined, {
+      fetcher,
+      edgeCache: null,
+      nowSeconds: () => now,
+    });
+    expect(resTampered.status).toBe(403);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('propaga no Worker o Referer vencedor após fallback 403 para variante, segmentos, EXT-X-KEY e EXT-X-MAP e preserva comportamento padrão sem fallback', async () => {
+    const masterUrl = 'https://cdn-s01.mywallpaper-4k-image.net/redirect/master.m3u8';
+    const redirectedMasterUrl = 'https://edge02.mywallpaper-4k-image.net/hls/ep21/master.m3u8';
+    const variantUrl = 'https://edge02.mywallpaper-4k-image.net/hls/ep21/720p/index.m3u8';
+    const keyUrl = 'https://edge02.mywallpaper-4k-image.net/hls/ep21/720p/keys/enc.key';
+    const mapUrl = 'https://edge02.mywallpaper-4k-image.net/hls/ep21/720p/init.mp4';
+    const relSegUrl = 'https://edge02.mywallpaper-4k-image.net/hls/ep21/720p/seg-001.webp';
+    const absSegUrl = 'https://cdn-backup.outrohost.net/chunks/seg-002.ts?tok=xyz';
+
+    const workerEnv: WorkerEnv = {
+      PLAYER_SESSION_SECRET: TEST_SECRET,
+    };
+    const seenReferersByUrl = new Map<string, Array<string | null>>();
+
+    const fetcher = vi.fn(async (input: string, init?: CfRequestInit) => {
+      const ref = new Headers(init?.headers).get('referer');
+      const arr = seenReferersByUrl.get(input) ?? [];
+      arr.push(ref);
+      seenReferersByUrl.set(input, arr);
+
+      if (ref !== 'https://api.anivideo.net/') {
+        return new Response('Forbidden', { status: 403 });
+      }
+
+      if (input === masterUrl) {
+        return new Response('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000\n720p/index.m3u8', {
+          status: 302,
+          headers: { location: redirectedMasterUrl },
+        });
+      }
+      if (input === redirectedMasterUrl) {
+        return new Response('#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=2000000\n720p/index.m3u8', {
+          status: 200,
+          headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+        });
+      }
+      if (input === variantUrl) {
+        return new Response(
+          [
+            '#EXTM3U',
+            '#EXT-X-KEY:METHOD=AES-128,URI="keys/enc.key"',
+            '#EXT-X-MAP:URI="init.mp4"',
+            '#EXTINF:6.0,',
+            'seg-001.webp',
+            '#EXTINF:6.0,',
+            absSegUrl,
+            '#EXT-X-ENDLIST',
+          ].join('\n'),
+          {
+            status: 200,
+            headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+          }
+        );
+      }
+      if (input === keyUrl || input === mapUrl) {
+        return new Response(new Uint8Array([0x01, 0x02, 0x03]), {
+          status: 200,
+          headers: { 'content-type': 'application/octet-stream' },
+        });
+      }
+      return new Response(new Uint8Array([0x47, 0x40, 0x00, 0x10]), {
+        status: 200,
+        headers: { 'content-type': 'image/webp' },
+      });
+    });
+
+    const exp = 2_000_000_000;
+    const now = 1_795_000_000;
+    const masterSig = await createWorkerProxySignature(masterUrl, exp, TEST_SECRET);
+    const resMaster = await handleWorkerProxyRequest(
+      new Request(
+        `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(masterUrl)}&exp=${exp}&sig=${masterSig}`
+      ),
+      workerEnv,
+      undefined,
+      { fetcher, edgeCache: null, nowSeconds: () => now }
+    );
+
+    expect(resMaster.status).toBe(200);
+    expect(seenReferersByUrl.get(masterUrl)).toEqual([
+      'https://www.anitube.biz/',
+      'https://api.anivideo.net/',
+    ]);
+
+    const masterBody = await resMaster.text();
+    const variantPath = masterBody.split('\n').find((l) => l.includes(encodeURIComponent(variantUrl)))!.trim();
+    const variantParsed = new URL(`https://hikari-media-proxy.workers.dev${variantPath}`);
+    expect(variantParsed.searchParams.get('ref')).toBe('https://api.anivideo.net/');
+    expect(variantParsed.searchParams.get('rsig')).toBeTruthy();
+
+    const resVariant = await handleWorkerProxyRequest(new Request(variantParsed.toString()), workerEnv, undefined, {
+      fetcher,
+      edgeCache: null,
+      nowSeconds: () => now,
+    });
+    expect(resVariant.status).toBe(200);
+    expect(seenReferersByUrl.get(variantUrl)).toEqual(['https://api.anivideo.net/']);
+
+    const variantBody = await resVariant.text();
+    const childUrls = (variantBody.match(/\/api\/proxy\/stream\?[^\s"']+/g) ?? []).map(
+      (p) => new URL(`https://hikari-media-proxy.workers.dev${p}`)
+    );
+
+    for (const target of [keyUrl, mapUrl, relSegUrl, absSegUrl]) {
+      const child = childUrls.find((u) => u.searchParams.get('url') === target);
+      expect(child, `URL filha ausente no Worker: ${target}`).toBeDefined();
+      expect(child!.searchParams.get('ref')).toBe('https://api.anivideo.net/');
+      expect(child!.searchParams.get('rsig')).toBeTruthy();
+
+      const childRes = await handleWorkerProxyRequest(new Request(child!.toString()), workerEnv, undefined, {
+        fetcher,
+        edgeCache: null,
+        nowSeconds: () => now,
+      });
+      expect(childRes.status).toBe(200);
+      expect(seenReferersByUrl.get(target)).toEqual(['https://api.anivideo.net/']);
+    }
+
+    // Sem necessidade de fallback (200 de primeira): não adiciona ref/rsig
+    const stdUrl = 'https://cdn-sv01.maximaimg.online/stream/b/bakemonogatari/01.mp4/index.m3u8';
+    const stdSig = await createWorkerProxySignature(stdUrl, exp, TEST_SECRET);
+    const stdFetcher = vi.fn(async () =>
+      new Response('#EXTM3U\n#EXTINF:6.0,\nseg-001.ts\n#EXT-X-ENDLIST', {
+        status: 200,
+        headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+      })
+    );
+    const stdRes = await handleWorkerProxyRequest(
+      new Request(
+        `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(stdUrl)}&exp=${exp}&sig=${stdSig}`
+      ),
+      workerEnv,
+      undefined,
+      { fetcher: stdFetcher, edgeCache: null, nowSeconds: () => now }
+    );
+    expect(stdRes.status).toBe(200);
+    const stdBody = await stdRes.text();
+    const stdChild = new URL(
+      `https://hikari-media-proxy.workers.dev${stdBody.split('\n').find((l) => l.includes('seg-001.ts'))!.trim()}`
+    );
+    expect(stdChild.searchParams.has('ref')).toBe(false);
+    expect(stdChild.searchParams.has('rsig')).toBe(false);
   });
 });
