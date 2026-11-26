@@ -12,7 +12,12 @@ import {
   rewriteM3u8Playlist,
 } from '@/lib/proxy-signing';
 import { diagnoseEpisodeSources, diagnoseVideoSource } from '@/lib/source-diagnostics';
-import { getUpstreamHeaders, handleProxyStreamRequest } from '@/lib/stream-proxy';
+import {
+  getUpstreamHeaders,
+  handleProxyStreamRequest,
+  resolveUpstreamReferer,
+  resolveUpstreamRefererCandidates,
+} from '@/lib/stream-proxy';
 import type { PlayableSource } from '@/lib/types';
 import {
   collectEpisodeSources,
@@ -1082,5 +1087,28 @@ describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () =
     );
     expect(diag.isExpirable).toBe(true);
     expect(diag.expirableReason).toContain('token=');
+  });
+
+  it('21. casa referer por sufixo de domínio e qualquer subdomínio cdn-* com anitube.biz principal e antigos como fallback', () => {
+    const cdnUrl = new URL('https://cdn-s02.novo-provedor.net/stream/01/index.m3u8');
+    expect(resolveUpstreamReferer(cdnUrl)).toBe('https://www.anitube.biz/');
+    expect(resolveUpstreamRefererCandidates(cdnUrl)).toEqual([
+      'https://www.anitube.biz/',
+      'https://api.anivideo.net/',
+      'https://www.coempregos.com.br/',
+      'https://cdn-s02.novo-provedor.net/',
+      '',
+    ]);
+
+    const suffixMap = JSON.stringify({
+      'provedor-novo.net': 'https://www.anitube.biz/',
+      'cdn-*.custom.org': 'https://www.coempregos.com.br/',
+    });
+    expect(
+      resolveUpstreamReferer(new URL('https://edge01.provedor-novo.net/ep1.m3u8'), suffixMap)
+    ).toBe('https://www.anitube.biz/');
+    expect(
+      resolveUpstreamReferer(new URL('https://cdn-09.sub.custom.org/ep1.m3u8'), suffixMap)
+    ).toBe('https://www.coempregos.com.br/');
   });
 });

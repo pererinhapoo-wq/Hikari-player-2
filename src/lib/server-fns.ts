@@ -47,7 +47,7 @@ import {
   createProxySignature,
   getStableProxyExpiry,
 } from '@/lib/proxy-signing';
-import { importSourceFromEpisodePage } from '@/lib/site-import';
+import { importSourceFromEpisodePage, type SiteImportDeps } from '@/lib/site-import';
 import {
   diagnoseEpisodeSources,
   diagnoseVideoSource,
@@ -638,12 +638,19 @@ export const adminResolveThumbnailSourceFn = createServerFn({ method: 'POST' })
     }
   );
 
-export async function processSiteImportServer(input: {
-  pageUrl: string;
-  episodeId?: string | null;
-  targetSlot?: 1 | 2 | 3 | 4 | 5 | null;
-}): Promise<SiteImportFromPageResult> {
-  const importRes = await importSourceFromEpisodePage(input.pageUrl);
+export async function processSiteImportServer(
+  input: {
+    pageUrl: string;
+    episodeId?: string | null;
+    targetSlot?: 1 | 2 | 3 | 4 | 5 | null;
+  },
+  deps: {
+    importDeps?: SiteImportDeps;
+    saveSource?: typeof saveEpisodeImportedSource;
+    isDbConfigured?: typeof isDatabaseConfigured;
+  } = {}
+): Promise<SiteImportFromPageResult> {
+  const importRes = await importSourceFromEpisodePage(input.pageUrl, deps.importDeps);
   if (!importRes.ok) {
     return {
       ok: false,
@@ -657,7 +664,8 @@ export async function processSiteImportServer(input: {
   let savedSlot: 1 | 2 | 3 | 4 | 5 | undefined;
 
   if (input.episodeId?.trim()) {
-    if (!isDatabaseConfigured()) {
+    const checkDb = deps.isDbConfigured ?? isDatabaseConfigured;
+    if (!checkDb()) {
       return {
         ok: false,
         error: 'DATABASE_URL não configurada no servidor.',
@@ -665,7 +673,8 @@ export async function processSiteImportServer(input: {
       };
     }
 
-    const savedResult = await saveEpisodeImportedSource(input.episodeId.trim(), {
+    const saveSource = deps.saveSource ?? saveEpisodeImportedSource;
+    const savedResult = await saveSource(input.episodeId.trim(), {
       videoUrl: importRes.selected.url,
       sourceKind: importRes.selected.kind,
       forceProxy: true,

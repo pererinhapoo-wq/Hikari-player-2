@@ -222,6 +222,13 @@ export interface SourceTestReport {
 
 export type SiteImportCandidateType = 'playerricas' | 'm3u8' | 'mp4';
 
+export interface SiteImportAttemptDiagnostic {
+  referer: string | null;
+  status: number | null;
+  contentType: string | null;
+  error?: string | null;
+}
+
 export interface SiteImportCandidateDiagnostic {
   url: string;
   type: SiteImportCandidateType;
@@ -230,6 +237,7 @@ export interface SiteImportCandidateDiagnostic {
   refererUsed: string | null;
   passed: boolean;
   reason: string;
+  attempts?: SiteImportAttemptDiagnostic[];
 }
 
 export type SiteImportFromPageResult =

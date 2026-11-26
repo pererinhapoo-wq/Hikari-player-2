@@ -23,7 +23,7 @@ export const BROWSER_UA =
 
 export const DEFAULT_ANITUBE_BIZ_REFERER = 'https://www.anitube.biz/';
 export const LEGACY_MAXIMAIMG_REFERER = 'https://api.anivideo.net/';
-const DEFAULT_COEMPREGOS_REFERER = 'https://www.coempregos.com.br/';
+export const DEFAULT_COEMPREGOS_REFERER = 'https://www.coempregos.com.br/';
 const EXTM3U_BYTES = [0x23, 0x45, 0x58, 0x54, 0x4d, 0x33, 0x55] as const; // "#EXTM3U"
 const MAX_PEEK_BYTES = 512;
 
@@ -32,12 +32,37 @@ export function isMywallpaperHost(hostname: string): boolean {
   return lower === 'mywallpaper-4k-image.net' || lower.endsWith('.mywallpaper-4k-image.net');
 }
 
+export function isCdnSubdomainHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase().replace(/\.+$/, '');
+  const labels = lower.split('.').filter(Boolean);
+  if (labels.length < 2) return false;
+  return labels.slice(0, -1).some((label) => label.startsWith('cdn-'));
+}
+
+function matchesRefererPattern(hostname: string, pattern: string): number {
+  if (pattern.startsWith('cdn-*.')) {
+    const suffix = pattern.slice('cdn-*.'.length);
+    if (
+      suffix &&
+      isCdnSubdomainHost(hostname) &&
+      (hostname === suffix || hostname.endsWith(`.${suffix}`))
+    ) {
+      return pattern.length;
+    }
+    return -1;
+  }
+  if (hostname === pattern || hostname.endsWith(`.${pattern}`)) {
+    return pattern.length;
+  }
+  return -1;
+}
+
 export function resolveUpstreamReferer(
   targetUrl: URL,
   refererMapJson = process.env.PLAYER_REFERER_MAP,
   maximaimgReferer = process.env.PLAYER_MAXIMAIMG_REFERER
 ): string {
-  const hostname = targetUrl.hostname.toLowerCase();
+  const hostname = targetUrl.hostname.toLowerCase().replace(/\.+$/, '');
 
   const rules = new Map<string, string>([
     ['maximaimg.online', maximaimgReferer?.trim() || DEFAULT_ANITUBE_BIZ_REFERER],
@@ -78,16 +103,19 @@ export function resolveUpstreamReferer(
   let bestMatchLen = -1;
   let bestReferer: string | null = null;
   for (const [pattern, refValue] of rules.entries()) {
-    if (hostname === pattern || hostname.endsWith(`.${pattern}`)) {
-      if (pattern.length > bestMatchLen) {
-        bestMatchLen = pattern.length;
-        bestReferer = refValue;
-      }
+    const matchLen = matchesRefererPattern(hostname, pattern);
+    if (matchLen > bestMatchLen) {
+      bestMatchLen = matchLen;
+      bestReferer = refValue;
     }
   }
 
   if (bestReferer !== null) {
     return bestReferer;
+  }
+
+  if (isCdnSubdomainHost(hostname)) {
+    return DEFAULT_ANITUBE_BIZ_REFERER;
   }
 
   return `${targetUrl.origin}/`;
@@ -116,7 +144,7 @@ export function resolveUpstreamRefererCandidates(
   const primary = resolveUpstreamReferer(targetUrl, refererMapJson, maximaimgReferer);
   pushUnique(primary);
 
-  const hostname = targetUrl.hostname.toLowerCase();
+  const hostname = targetUrl.hostname.toLowerCase().replace(/\.+$/, '');
   const hostOrigin = `${targetUrl.origin}/`;
 
   if (isMaximaimgHost(hostname)) {
@@ -129,8 +157,18 @@ export function resolveUpstreamRefererCandidates(
 
   if (isMywallpaperHost(hostname)) {
     pushUnique(DEFAULT_ANITUBE_BIZ_REFERER);
+    pushUnique(LEGACY_MAXIMAIMG_REFERER);
     pushUnique('');
     pushUnique(hostOrigin);
+    return candidates;
+  }
+
+  if (isCdnSubdomainHost(hostname)) {
+    pushUnique(DEFAULT_ANITUBE_BIZ_REFERER);
+    pushUnique(LEGACY_MAXIMAIMG_REFERER);
+    pushUnique(DEFAULT_COEMPREGOS_REFERER);
+    pushUnique(hostOrigin);
+    pushUnique('');
     return candidates;
   }
 

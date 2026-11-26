@@ -683,7 +683,7 @@ function AdminPage() {
   const handleImportSiteIntoForm = async () => {
     const pageUrl = formSiteUrl.trim();
     if (!pageUrl) {
-      setFormSiteImportError('Informe a URL da página do episódio (anitube.biz ou anitube22.vip).');
+      setFormSiteImportError('Informe a URL da página do episódio (anitube.biz, anitube22.vip ou allappinc.com).');
       return;
     }
     setFormSiteImportBusy(true);
@@ -745,7 +745,7 @@ function AdminPage() {
     if (!pageUrl) {
       setSiteImportErrorMap((prev) => ({
         ...prev,
-        [ep.id]: 'Informe a URL da página do episódio (anitube.biz ou anitube22.vip).',
+        [ep.id]: 'Informe a URL da página do episódio (anitube.biz, anitube22.vip ou allappinc.com).',
       }));
       return;
     }
@@ -2063,7 +2063,7 @@ function AdminPage() {
                         className="text-xs font-medium text-slate-200 inline-flex items-center gap-1.5"
                       >
                         <Globe className="w-3.5 h-3.5 text-rose-400" />
-                        URL da página do episódio (anitube.biz / anitube22.vip)
+                        URL da página do episódio (anitube.biz / anitube22.vip / allappinc.com)
                       </label>
                       <span className="text-[11px] text-slate-400">
                         Extrai e valida playerricas.php → /index.m3u8 → .mp4
@@ -2077,7 +2077,7 @@ function AdminPage() {
                         disabled={formSiteImportBusy}
                         value={formSiteUrl}
                         onChange={(e) => setFormSiteUrl(e.target.value)}
-                        placeholder="https://www.anitube.biz/episodio-01/"
+                        placeholder="https://www.anitube.biz/episodio-01/ ou https://allappinc.com/?view=..."
                         className="flex-1 min-w-0 h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 disabled:opacity-50"
                       />
                       <button
@@ -3030,7 +3030,7 @@ function AdminPage() {
                                     }))
                                   }
                                   aria-label={`URL da página do episódio para importar em ${epLabel}`}
-                                  placeholder="https://www.anitube.biz/... ou https://anitube22.vip/..."
+                                  placeholder="https://www.anitube.biz/..., anitube22.vip/... ou allappinc.com/?view=..."
                                   className="flex-1 min-w-0 h-9 px-3 rounded-lg bg-[#11151E] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 disabled:opacity-50"
                                 />
                                 <button
@@ -3410,30 +3410,48 @@ function SiteImportCandidateList({
   candidates: SiteImportCandidateDiagnostic[];
 }) {
   return (
-    <ul className="space-y-1 font-mono text-[10px] text-slate-300">
+    <ul className="space-y-1.5 font-mono text-[10px] text-slate-300">
       {candidates.map((cand, idx) => (
         <li
           key={`${cand.url}-${idx}`}
-          className="flex flex-wrap items-center gap-1.5 break-all"
+          className="space-y-0.5 break-all"
         >
-          <span
-            className={`px-1.5 py-0.5 rounded border ${
-              cand.passed
-                ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
-                : 'border-rose-500/40 bg-rose-500/15 text-rose-300'
-            }`}
-          >
-            {cand.status !== null ? `HTTP ${cand.status}` : 'erro'}
-          </span>
-          <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-slate-300">
-            {cand.type}
-          </span>
-          {cand.contentType && (
-            <span className="text-slate-400">({cand.contentType})</span>
+          <div className="flex flex-wrap items-center gap-1.5">
+            <span
+              className={`px-1.5 py-0.5 rounded border ${
+                cand.passed
+                  ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                  : 'border-rose-500/40 bg-rose-500/15 text-rose-300'
+              }`}
+            >
+              {cand.status !== null ? `HTTP ${cand.status}` : 'erro'}
+            </span>
+            <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-slate-300">
+              {cand.type}
+            </span>
+            {cand.contentType && (
+              <span className="text-slate-400">({cand.contentType})</span>
+            )}
+            <span className="text-slate-300 truncate max-w-full" title={cand.url}>
+              {cand.url}
+            </span>
+          </div>
+          {cand.attempts && cand.attempts.length > 0 && (
+            <div className="pl-2 text-slate-400">
+              Tentativas:{' '}
+              {cand.attempts
+                .map(
+                  (a) =>
+                    `${a.referer ?? 'sem Referer'} → ${
+                      a.status !== null ? `HTTP ${a.status}` : a.error ?? 'erro'
+                    }`
+                )
+                .join(' · ')}
+            </div>
           )}
-          <span className="text-slate-300 truncate max-w-full" title={cand.url}>
-            {cand.url}
-          </span>
+          {!cand.passed && cand.reason && (
+            <div className="pl-2 text-rose-300/90">{cand.reason}</div>
+          )}
         </li>
       ))}
     </ul>

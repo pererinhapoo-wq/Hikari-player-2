@@ -12,6 +12,7 @@ import {
   getStableSegmentExpiry,
   handleWorkerProxyRequest,
   resolveUpstreamReferer,
+  resolveUpstreamRefererCandidates,
   verifyWorkerProxySignature,
   type WorkerEnv,
   type WorkerExecutionContext,
@@ -319,6 +320,17 @@ describe('Cloudflare Worker Edge Proxy', () => {
     expect(
       resolveUpstreamReferer(new URL('https://cdn.generico.com/video.mp4'), fallbackEnv)
     ).toBe('https://cdn.generico.com/');
+
+    // Subdomínio cdn-* qualquer usa https://www.anitube.biz/ como principal e antigos como fallback
+    const cdnGenericUrl = new URL('https://cdn-s04.outrohost.net/video/index.m3u8');
+    expect(resolveUpstreamReferer(cdnGenericUrl, fallbackEnv)).toBe('https://www.anitube.biz/');
+    expect(resolveUpstreamRefererCandidates(cdnGenericUrl, fallbackEnv)).toEqual([
+      'https://www.anitube.biz/',
+      'https://api.anivideo.net/',
+      'https://www.coempregos.com.br/',
+      'https://cdn-s04.outrohost.net/',
+      '',
+    ]);
   });
 
   it('envia Referer https://www.anitube.biz/ para mywallpaper-4k-image.net (e faz pass-through binário video/mp2t de segmentos .webp)', async () => {
