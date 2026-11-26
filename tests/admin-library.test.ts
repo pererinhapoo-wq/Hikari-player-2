@@ -326,7 +326,7 @@ describe('Persistência, Player único e preservação de registros antigos', ()
     expect(updated?.video_url_3).toBe('https://cdn.example.com/old-p3.php');
   });
 
-  it('8. confirma que o formulário administrativo expõe apenas Player 1 e não exibe Player 2–5', () => {
+  it('8. confirma que o formulário administrativo expõe apenas Player 1 e não exibe Player 2–5 e possui grupos expansíveis', () => {
     const adminSource = fs.readFileSync(
       path.resolve(process.cwd(), 'src/routes/admin.tsx'),
       'utf8'
@@ -338,7 +338,9 @@ describe('Persistência, Player único e preservação de registros antigos', ()
     expect(adminSource).not.toContain('Player 4');
     expect(adminSource).not.toContain('Player 5');
     expect(adminSource).toContain('Biblioteca de episódios');
-    expect(adminSource).toContain('Voltar para animes');
+    expect(adminSource).toContain('aria-expanded={expanded}');
+    expect(adminSource).toContain('Expandir todos');
+    expect(adminSource).toContain('Recolher todos');
   });
 
   it('9. remove avisos grandes R2 dos cards da listagem mantendo badges compactos e aviso no formulário, sem importação de site', () => {
@@ -364,6 +366,48 @@ describe('Persistência, Player único e preservação de registros antigos', ()
     expect(serverFnsSource).not.toContain('adminImportFromSiteFn');
     expect(serverFnsSource).not.toContain('processSiteImportServer');
     expect(serverFnsSource).not.toContain('site-import');
+  });
+
+  it('10. ordena numericamente variações como Ep 2/Ep 10/12.5, atualiza grupo ao editar anime e suporta busca e paginação', async () => {
+    const { searchAndSortAnimeGroups, paginateItems } = await import('@/lib/anime-library');
+
+    const mixedSorted = sortAnimeEpisodes([
+      makeEpisode({ id: 'ep10', episode_number: 'Ep 10' }),
+      makeEpisode({ id: 'ep2', episode_number: 'Ep 2' }),
+      makeEpisode({ id: 'n1', episode_number: '1' }),
+      makeEpisode({ id: 'ova', episode_number: 'OVA 1' }),
+      makeEpisode({ id: 'n12_5', episode_number: '12.5' }),
+    ]);
+    expect(mixedSorted.map((e) => e.id)).toEqual(['n1', 'ep2', 'ep10', 'n12_5', 'ova']);
+
+    const initialList: EpisodeDto[] = [
+      makeEpisode({ id: 'e1', anime_name: 'Anime A', episode_number: '1', title: 'Início' }),
+      makeEpisode({ id: 'e2', anime_name: 'Anime A', episode_number: '2', title: 'Batalha' }),
+    ];
+    expect(groupEpisodesByAnime(initialList)).toHaveLength(1);
+
+    // Simula edição alterando o anime de e2 para Anime B
+    const afterEdit: EpisodeDto[] = [
+      initialList[0],
+      { ...initialList[1], anime_name: 'Anime B' },
+    ];
+    const groupsAfterEdit = groupEpisodesByAnime(afterEdit);
+    expect(groupsAfterEdit.map((g) => `${g.name}:${g.episodeCount}`)).toEqual([
+      'Anime A:1',
+      'Anime B:1',
+    ]);
+
+    const searchedByEpTitle = searchAndSortAnimeGroups(groupsAfterEdit, 'Batalha', 'name');
+    expect(searchedByEpTitle).toHaveLength(1);
+    expect(searchedByEpTitle[0].name).toBe('Anime B');
+
+    const page1 = paginateItems([1, 2, 3, 4, 5], 1, 2);
+    expect(page1.items).toEqual([1, 2]);
+    expect(page1.totalPages).toBe(3);
+
+    const page3 = paginateItems([1, 2, 3, 4, 5], 99, 2);
+    expect(page3.page).toBe(3);
+    expect(page3.items).toEqual([5]);
   });
 });
 

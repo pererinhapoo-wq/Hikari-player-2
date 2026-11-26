@@ -5,7 +5,11 @@ import {
   ArrowLeft,
   Camera,
   Check,
+  ChevronDown,
+  ChevronLeft,
   ChevronRight,
+  ChevronsDownUp,
+  ChevronsUpDown,
   Copy,
   Database,
   Download,
@@ -31,14 +35,14 @@ import {
 } from 'lucide-react';
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
-  type AnimeGroup,
   type AnimeSortMode,
   countEpisodeSources,
-  filterAndSortAnimeGroups,
   formatEpisodeDisplayTitle,
   groupEpisodesByAnime,
   normalizeAnimeKey,
+  paginateItems,
   sanitizeAnimeName,
+  searchAndSortAnimeGroups,
   UNASSIGNED_ANIME_KEY,
 } from '@/lib/anime-library';
 import {
@@ -281,8 +285,12 @@ function AdminPage() {
   const [loginError, setLoginError] = useState<string | null>(null);
   const [loginBusy, setLoginBusy] = useState(false);
 
-  // Navigation & library filtering state
-  const [selectedAnimeKey, setSelectedAnimeKey] = useState<string | null>(null);
+  // Navigation, grouping & library filtering state
+  const [expandedGroups, setExpandedGroups] = useState<Record<string, boolean>>({});
+  const [pendingFocusGroupKey, setPendingFocusGroupKey] = useState<string | null>(null);
+  const [groupPage, setGroupPage] = useState(1);
+  const [episodePageMap, setEpisodePageMap] = useState<Record<string, number>>({});
+  const [openMirrorPanelIds, setOpenMirrorPanelIds] = useState<Record<string, boolean>>({});
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<AnimeSortMode>('recent');
 
@@ -400,20 +408,81 @@ function AdminPage() {
     };
   }, [openMenuId]);
 
+  const GROUPS_PER_PAGE = 15;
+  const EPISODES_PER_GROUP_PAGE = 25;
+
   const animeGroups = useMemo(
     () => groupEpisodesByAnime(initialState.episodes),
     [initialState.episodes]
   );
 
   const filteredGroups = useMemo(
-    () => filterAndSortAnimeGroups(animeGroups, searchQuery, sortBy),
+    () => searchAndSortAnimeGroups(animeGroups, searchQuery, sortBy),
     [animeGroups, searchQuery, sortBy]
   );
 
-  const selectedGroup: AnimeGroup | null = useMemo(() => {
-    if (!selectedAnimeKey) return null;
-    return animeGroups.find((g) => g.key === selectedAnimeKey) ?? null;
-  }, [animeGroups, selectedAnimeKey]);
+  const pagedGroups = useMemo(
+    () => paginateItems(filteredGroups, groupPage, GROUPS_PER_PAGE),
+    [filteredGroups, groupPage]
+  );
+
+  const isGroupExpanded = useCallback(
+    (groupKey: string) => {
+      if (expandedGroups[groupKey] !== undefined) {
+        return expandedGroups[groupKey];
+      }
+      if (searchQuery.trim().length > 0 && filteredGroups.length <= 3) {
+        return true;
+      }
+      return filteredGroups.length === 1;
+    },
+    [expandedGroups, searchQuery, filteredGroups.length]
+  );
+
+  const allVisibleExpanded = useMemo(
+    () =>
+      pagedGroups.items.length > 0 &&
+      pagedGroups.items.every((group) => isGroupExpanded(group.key)),
+    [pagedGroups.items, isGroupExpanded]
+  );
+
+  const toggleGroup = (groupKey: string) => {
+    const currentlyExpanded = isGroupExpanded(groupKey);
+    setExpandedGroups((prev) => ({
+      ...prev,
+      [groupKey]: !currentlyExpanded,
+    }));
+    setOpenMenuId(null);
+    setConfirmDeleteId(null);
+  };
+
+  const handleToggleAllGroups = () => {
+    const nextValue = !allVisibleExpanded;
+    setExpandedGroups((prev) => {
+      const next = { ...prev };
+      for (const group of filteredGroups) {
+        next[group.key] = nextValue;
+      }
+      return next;
+    });
+    setOpenMenuId(null);
+  };
+
+  // Focus & expand target group automatically after creating/editing an episode
+  useEffect(() => {
+    if (!pendingFocusGroupKey) return;
+    const idx = filteredGroups.findIndex((g) => g.key === pendingFocusGroupKey);
+    if (idx >= 0) {
+      const targetPage = Math.floor(idx / GROUPS_PER_PAGE) + 1;
+      setGroupPage(targetPage);
+      setExpandedGroups((prev) => ({ ...prev, [pendingFocusGroupKey]: true }));
+      setPendingFocusGroupKey(null);
+    } else if (searchQuery.trim()) {
+      setSearchQuery('');
+    } else {
+      setPendingFocusGroupKey(null);
+    }
+  }, [pendingFocusGroupKey, filteredGroups, searchQuery]);
 
   const identifiedAnimeCount = useMemo(
     () => animeGroups.filter((g) => !g.isUnassigned).length,
@@ -428,13 +497,6 @@ function AdminPage() {
         .sort((a, b) => a.localeCompare(b, 'pt-BR', { sensitivity: 'base' })),
     [animeGroups]
   );
-
-  // If the selected anime becomes empty (e.g., last episode deleted/moved), return cleanly to library
-  useEffect(() => {
-    if (selectedAnimeKey && !selectedGroup && !formOpen) {
-      setSelectedAnimeKey(null);
-    }
-  }, [selectedAnimeKey, selectedGroup, formOpen]);
 
   const runDiagnostic = async () => {
     setShowDiagnostic(true);
@@ -544,7 +606,9 @@ function AdminPage() {
     setEditingId(null);
     setForm(EMPTY_FORM);
     resetFormTestState();
-    setSelectedAnimeKey(null);
+    setExpandedGroups({});
+    setPendingFocusGroupKey(null);
+    setGroupPage(1);
     setSearchQuery('');
     setSavedBanner(null);
     setShowDiagnostic(false);
@@ -949,7 +1013,9 @@ function AdminPage() {
           publicUrl: res.episode.public_url,
           action: 'updated',
         });
-        setSelectedAnimeKey(normalizeAnimeKey(res.episode.anime_name));
+        const targetKey = normalizeAnimeKey(res.episode.anime_name);
+        setExpandedGroups((prev) => ({ ...prev, [targetKey]: true }));
+        setPendingFocusGroupKey(targetKey);
         setEditingId(null);
         setForm(EMPTY_FORM);
         setFormOpen(false);
@@ -964,7 +1030,9 @@ function AdminPage() {
           publicUrl: res.episode.public_url,
           action: 'created',
         });
-        setSelectedAnimeKey(normalizeAnimeKey(res.episode.anime_name));
+        const targetKey = normalizeAnimeKey(res.episode.anime_name);
+        setExpandedGroups((prev) => ({ ...prev, [targetKey]: true }));
+        setPendingFocusGroupKey(targetKey);
         setForm(EMPTY_FORM);
         setFormOpen(false);
       }
@@ -1217,11 +1285,14 @@ function AdminPage() {
 
   return (
     <div className="min-h-screen bg-[#090B10] text-slate-100">
-      {/* Header */}
-      <header className="border-b border-white/10 bg-[#0D1018]">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5 min-w-0">
-            <span className="text-base sm:text-lg font-semibold tracking-tight text-white whitespace-nowrap shrink-0">
+      {/* Sticky Header */}
+      <header className="sticky top-0 z-30 border-b border-white/[0.08] bg-[#0D1018]/90 backdrop-blur-md">
+        <div className="max-w-5xl mx-auto px-4 sm:px-6 h-14 sm:h-16 flex items-center justify-between gap-2.5">
+          <div className="flex items-center gap-2 min-w-0">
+            <div className="w-7 h-7 rounded-lg bg-rose-600/15 border border-rose-500/30 flex items-center justify-center shrink-0">
+              <Film className="w-3.5 h-3.5 text-rose-400" />
+            </div>
+            <span className="text-sm sm:text-base font-semibold tracking-tight text-white whitespace-nowrap shrink-0">
               Player
             </span>
             <span className="text-slate-600 hidden sm:inline" aria-hidden="true">
@@ -1230,9 +1301,23 @@ function AdminPage() {
             <span className="text-xs sm:text-sm text-slate-400 hidden sm:inline truncate">
               Administração
             </span>
+            {initialState.authenticated && (batchOpen || formOpen) && (
+              <>
+                <span className="text-slate-600 hidden md:inline" aria-hidden="true">
+                  /
+                </span>
+                <span className="text-xs sm:text-sm font-medium text-slate-200 hidden md:inline truncate">
+                  {batchOpen
+                    ? 'Importar em lote'
+                    : editingId
+                      ? 'Editar episódio'
+                      : 'Novo episódio'}
+                </span>
+              </>
+            )}
           </div>
 
-          <div className="flex items-center gap-2 shrink-0">
+          <div className="flex items-center gap-1.5 sm:gap-2 shrink-0">
             {initialState.authenticated ? (
               <>
                 <button
@@ -1241,13 +1326,14 @@ function AdminPage() {
                     setFormOpen(false);
                     setBatchOpen((prev) => !prev);
                   }}
-                  className={`h-9 px-2.5 sm:px-3 rounded-lg border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer ${
+                  aria-pressed={batchOpen}
+                  className={`min-h-[40px] sm:h-9 px-2.5 sm:px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/70 ${
                     batchOpen
-                      ? 'border-rose-500/60 bg-rose-600/15 text-rose-200'
-                      : 'border-white/10 text-slate-300 hover:bg-white/5 hover:text-white'
+                      ? 'border-rose-500/50 bg-rose-600/15 text-rose-200'
+                      : 'border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.08] hover:text-white'
                   }`}
                 >
-                  <ListPlus className="w-3.5 h-3.5" />
+                  <ListPlus className="w-3.5 h-3.5 shrink-0" />
                   <span className="hidden sm:inline">Importar em lote</span>
                   <span className="sm:hidden">Lote</span>
                 </button>
@@ -1262,10 +1348,19 @@ function AdminPage() {
                     }
                   }}
                   disabled={diagnosticBusy}
-                  className="h-9 px-2.5 sm:px-3 rounded-lg border border-white/10 text-xs font-medium text-slate-300 hover:bg-white/5 hover:text-white disabled:opacity-50 inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                  aria-pressed={showDiagnostic}
+                  className={`min-h-[40px] sm:h-9 px-2.5 sm:px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/70 ${
+                    showDiagnostic
+                      ? 'border-white/25 bg-white/10 text-white'
+                      : 'border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.08] hover:text-white'
+                  }`}
                   title="Diagnóstico da conexão Neon"
                 >
-                  <Database className="w-3.5 h-3.5" />
+                  {diagnosticBusy ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                  ) : (
+                    <Database className="w-3.5 h-3.5 shrink-0" />
+                  )}
                   <span className="hidden sm:inline">
                     {diagnosticBusy ? 'Diagnosticando...' : 'Diagnóstico Neon'}
                   </span>
@@ -1275,10 +1370,10 @@ function AdminPage() {
                 <button
                   type="button"
                   onClick={handleLogout}
-                  className="h-9 px-2.5 sm:px-3 rounded-lg border border-white/10 text-xs font-medium text-slate-200 hover:bg-white/5 transition-colors inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                  className="min-h-[40px] sm:h-9 px-2.5 sm:px-3 rounded-xl border border-white/10 bg-white/[0.03] text-xs font-medium text-slate-200 hover:bg-white/[0.08] hover:text-white transition-colors inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/70"
                 >
-                  <LogOut className="w-3.5 h-3.5" />
-                  Sair
+                  <LogOut className="w-3.5 h-3.5 shrink-0" />
+                  <span>Sair</span>
                 </button>
               </>
             ) : (
@@ -1293,7 +1388,7 @@ function AdminPage() {
       <main className="max-w-5xl mx-auto px-4 sm:px-6 py-5 sm:py-8 space-y-5">
         {/* Pending environment setup notice */}
         {missingEnvItems.length > 0 && (
-          <section className="bg-[#11151E] border border-amber-500/30 rounded-xl p-4 sm:p-5">
+          <section className="bg-[#11151E] border border-amber-500/30 rounded-2xl p-4 sm:p-5">
             <div className="flex items-start gap-3">
               <AlertTriangle className="w-5 h-5 text-amber-400 shrink-0 mt-0.5" />
               <div className="space-y-1.5 text-sm">
@@ -1317,18 +1412,18 @@ function AdminPage() {
 
         {/* Unauthenticated login form */}
         {!initialState.authenticated ? (
-          <section className="max-w-md mx-auto pt-6 sm:pt-10">
+          <section className="max-w-md mx-auto pt-6 sm:pt-12">
             <form
               onSubmit={handleLogin}
-              className="bg-[#11151E] border border-white/10 rounded-xl p-6 sm:p-7 space-y-5"
+              className="bg-[#11151E] border border-white/[0.08] rounded-2xl p-6 sm:p-7 space-y-5"
             >
               <div>
-                <h1 className="text-xl font-semibold text-white">
+                <h1 className="text-xl font-semibold tracking-tight text-white">
                   Acesso administrativo
                 </h1>
-                <p className="mt-1 text-sm text-slate-400">
+                <p className="mt-1.5 text-sm text-slate-400 leading-relaxed">
                   Informe a senha definida em{' '}
-                  <code className="font-mono text-xs text-slate-300">
+                  <code className="font-mono text-xs text-slate-300 bg-white/[0.05] px-1.5 py-0.5 rounded">
                     PLAYER_ADMIN_PASSWORD
                   </code>{' '}
                   para gerenciar episódios.
@@ -1351,13 +1446,13 @@ function AdminPage() {
                     value={password}
                     onChange={(e) => setPassword(e.target.value)}
                     placeholder="Digite a senha do painel"
-                    className="w-full h-11 px-3.5 pr-11 rounded-lg bg-[#090B10] border border-white/15 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
+                    className="w-full h-11 px-3.5 pr-12 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-colors"
                   />
                   <button
                     type="button"
                     onClick={() => setShowPassword((prev) => !prev)}
                     aria-label={showPassword ? 'Ocultar senha' : 'Mostrar senha'}
-                    className="absolute right-2 top-1/2 -translate-y-1/2 p-2 text-slate-400 hover:text-white cursor-pointer"
+                    className="absolute right-1 top-1/2 -translate-y-1/2 w-10 h-10 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-white/5 cursor-pointer transition-colors"
                   >
                     {showPassword ? (
                       <EyeOff className="w-4 h-4" />
@@ -1369,7 +1464,7 @@ function AdminPage() {
               </div>
 
               {loginError && (
-                <p className="text-sm text-rose-400" role="alert">
+                <p className="text-xs sm:text-sm text-rose-400" role="alert">
                   {loginError}
                 </p>
               )}
@@ -1377,7 +1472,7 @@ function AdminPage() {
               <button
                 type="submit"
                 disabled={loginBusy}
-                className="w-full h-11 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-60 text-sm font-medium text-white transition-colors cursor-pointer"
+                className="w-full h-11 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-60 text-sm font-medium text-white transition-colors cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
               >
                 {loginBusy ? 'Entrando...' : 'Entrar'}
               </button>
@@ -1388,14 +1483,14 @@ function AdminPage() {
           <div className="space-y-5">
             {/* Database read error */}
             {initialState.errorMessage && (
-              <div className="rounded-xl border border-rose-500/30 bg-rose-950/30 px-4 py-3.5 text-xs sm:text-sm text-rose-300">
+              <div className="rounded-2xl border border-rose-500/30 bg-rose-950/30 px-4 py-3.5 text-xs sm:text-sm text-rose-300">
                 {initialState.errorMessage}
               </div>
             )}
 
             {/* Collapsible Neon diagnostic panel */}
             {showDiagnostic && (diagnostic || diagnosticError || diagnosticBusy) && (
-              <section className="rounded-xl border border-white/10 bg-[#0D1018] p-4 sm:p-5 space-y-3">
+              <section className="rounded-2xl border border-white/[0.08] bg-[#11151E] p-4 sm:p-5 space-y-3.5">
                 <div className="flex items-center justify-between gap-3">
                   <div className="flex items-center gap-2 min-w-0">
                     <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-300 truncate">
@@ -1411,14 +1506,17 @@ function AdminPage() {
                     type="button"
                     onClick={() => setShowDiagnostic(false)}
                     aria-label="Fechar diagnóstico"
-                    className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 cursor-pointer"
+                    className="w-9 h-9 flex items-center justify-center rounded-xl text-slate-400 hover:text-white hover:bg-white/5 cursor-pointer"
                   >
                     <X className="w-4 h-4" />
                   </button>
                 </div>
 
                 {diagnosticBusy && !diagnostic && (
-                  <p className="text-xs text-slate-400">Executando diagnóstico no servidor...</p>
+                  <p className="text-xs text-slate-400 inline-flex items-center gap-2">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Executando diagnóstico no servidor...
+                  </p>
                 )}
 
                 {diagnosticError && (
@@ -1430,7 +1528,7 @@ function AdminPage() {
                 {diagnostic && (
                   <div className="space-y-3 text-xs">
                     <div
-                      className={`rounded-lg border p-3 ${
+                      className={`rounded-xl border p-3 ${
                         diagnostic.diagnosisCode === 'ok'
                           ? 'bg-emerald-950/30 border-emerald-500/30 text-emerald-200'
                           : 'bg-amber-950/30 border-amber-500/30 text-amber-200'
@@ -1442,7 +1540,7 @@ function AdminPage() {
                       <p className="mt-1 leading-relaxed">{diagnostic.diagnosisSummary}</p>
                     </div>
 
-                    <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-1.5 bg-[#090B10] border border-white/10 rounded-lg p-3 font-mono">
+                    <dl className="grid grid-cols-1 sm:grid-cols-2 gap-x-4 gap-y-2 bg-[#090B10] border border-white/[0.08] rounded-xl p-3.5 font-mono">
                       <div className="flex justify-between gap-2">
                         <dt className="text-slate-400">DATABASE_URL:</dt>
                         <dd className="text-slate-200">
@@ -1474,11 +1572,11 @@ function AdminPage() {
                       <div className="flex justify-between gap-2">
                         <dt className="text-slate-400">Registros:</dt>
                         <dd
-                          className={
+                          className={`tabular-nums ${
                             diagnostic.tableReadExecuted && !diagnostic.tableReadError
                               ? 'text-emerald-400'
                               : 'text-rose-400'
-                          }
+                          }`}
                         >
                           {diagnostic.tableReadExecuted && !diagnostic.tableReadError
                             ? `${diagnostic.episodeCount ?? 0} registro(s)`
@@ -1490,21 +1588,21 @@ function AdminPage() {
                     </dl>
 
                     {diagnostic.missingColumns && diagnostic.missingColumns.length > 0 && (
-                      <div className="bg-amber-950/40 border border-amber-500/40 rounded-lg p-3 space-y-2">
+                      <div className="bg-amber-950/40 border border-amber-500/40 rounded-xl p-3 space-y-2">
                         <div className="text-xs font-semibold text-amber-200">
                           Colunas ausentes: {diagnostic.missingColumns.join(', ')}
                         </div>
-                        <div className="flex items-center gap-2">
+                        <div className="flex flex-col sm:flex-row sm:items-center gap-2">
                           <textarea
                             readOnly
                             rows={2}
                             value={diagnostic.correctionSql ?? ''}
-                            className="flex-1 w-full p-2 rounded bg-[#090B10] border border-white/10 font-mono text-[11px] text-amber-200 select-all"
+                            className="flex-1 w-full p-2.5 rounded-lg bg-[#090B10] border border-white/10 font-mono text-[11px] text-amber-200 select-all"
                           />
                           <button
                             type="button"
                             onClick={() => void copyLink('sql-fix', diagnostic.correctionSql ?? '')}
-                            className="h-8 px-3 rounded bg-amber-600 hover:bg-amber-500 text-xs font-medium text-white inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer"
+                            className="h-9 px-3 rounded-lg bg-amber-600 hover:bg-amber-500 text-xs font-medium text-white inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer shrink-0"
                           >
                             {copiedId === 'sql-fix' ? 'Copiado' : 'Copiar SQL'}
                           </button>
@@ -1518,7 +1616,7 @@ function AdminPage() {
 
             {/* Saved episode public URL banner */}
             {savedBanner && (
-              <div className="p-3.5 sm:p-4 rounded-xl bg-emerald-950/40 border border-emerald-500/30 space-y-2.5">
+              <div className="p-4 rounded-2xl bg-emerald-950/35 border border-emerald-500/30 space-y-2.5">
                 <div className="flex items-center justify-between gap-2">
                   <div className="text-xs sm:text-sm font-medium text-emerald-300">
                     {savedBanner.action === 'created'
@@ -1529,23 +1627,23 @@ function AdminPage() {
                     type="button"
                     onClick={() => setSavedBanner(null)}
                     aria-label="Fechar aviso"
-                    className="p-1 rounded text-emerald-300/70 hover:text-emerald-200 cursor-pointer"
+                    className="w-8 h-8 flex items-center justify-center rounded-lg text-emerald-300/70 hover:text-emerald-200 hover:bg-emerald-500/10 cursor-pointer"
                   >
                     <X className="w-4 h-4" />
                   </button>
                 </div>
-                <div className="flex items-center gap-2">
+                <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2">
                   <input
                     type="text"
                     readOnly
                     value={savedBanner.publicUrl}
                     aria-label="Link público gerado"
-                    className="flex-1 min-w-0 h-9 px-2.5 rounded-lg bg-[#090B10] border border-white/10 text-xs font-mono text-slate-200"
+                    className="flex-1 min-w-0 h-10 px-3 rounded-xl bg-[#090B10] border border-white/10 text-xs font-mono text-slate-200"
                   />
                   <button
                     type="button"
                     onClick={() => void copyLink('banner', savedBanner.publicUrl)}
-                    className="h-9 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs font-medium text-white inline-flex items-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                    className="h-10 px-3.5 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs font-medium text-white inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
                   >
                     {copiedId === 'banner' ? (
                       <>
@@ -1564,20 +1662,31 @@ function AdminPage() {
             )}
 
             {actionError && (
-              <div className="rounded-xl border border-rose-500/30 bg-rose-950/30 px-4 py-3 text-xs sm:text-sm text-rose-300" role="alert">
-                {actionError}
+              <div
+                className="rounded-2xl border border-rose-500/30 bg-rose-950/30 px-4 py-3 text-xs sm:text-sm text-rose-300 flex items-center justify-between gap-3"
+                role="alert"
+              >
+                <span>{actionError}</span>
+                <button
+                  type="button"
+                  onClick={() => setActionError(null)}
+                  aria-label="Fechar erro"
+                  className="p-1 text-rose-300/70 hover:text-rose-200 cursor-pointer shrink-0"
+                >
+                  <X className="w-4 h-4" />
+                </button>
               </div>
             )}
 
             {/* VIEW 0: Batch Import Screen ("Importar em lote") */}
             {batchOpen ? (
-              <section className="bg-[#11151E] border border-white/10 rounded-xl p-4 sm:p-6 space-y-5">
-                <div className="flex flex-wrap items-center justify-between gap-3 pb-3 border-b border-white/10">
-                  <div className="flex items-center gap-2.5 min-w-0">
+              <section className="bg-[#11151E] border border-white/[0.08] rounded-2xl p-4 sm:p-6 space-y-5">
+                <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-white/[0.08]">
+                  <div className="flex items-center gap-3 min-w-0">
                     <button
                       type="button"
                       onClick={() => setBatchOpen(false)}
-                      className="h-9 px-2.5 rounded-lg border border-white/10 text-xs font-medium text-slate-200 hover:bg-white/5 inline-flex items-center gap-1.5 cursor-pointer shrink-0"
+                      className="min-h-[40px] sm:h-9 px-3 rounded-xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer shrink-0 transition-colors"
                     >
                       <ArrowLeft className="w-3.5 h-3.5" />
                       Voltar
@@ -1595,16 +1704,21 @@ function AdminPage() {
                   </span>
                 </div>
 
-                <div className="space-y-2">
+                <div className="space-y-2.5">
                   <label
                     htmlFor="batch-import-textarea"
-                    className="block text-xs font-medium text-slate-300"
+                    className="block text-xs font-medium text-slate-200"
                   >
                     Lista de fontes (uma por linha)
                   </label>
-                  <p className="text-[11px] text-slate-400 leading-relaxed">
-                    Formato: <code className="font-mono text-slate-200">&lt;id_do_episodio&gt; ; &lt;url&gt; [; &lt;kind&gt;]</code>
-                    {' · '}kind opcional (<code className="font-mono">auto</code>, <code className="font-mono">iframe</code>). Linhas vazias e comentários com <code className="font-mono">#</code> são ignorados. Execução em série (1 item por vez, 400ms entre itens).
+                  <p className="text-xs text-slate-400 leading-relaxed">
+                    Formato:{' '}
+                    <code className="font-mono text-slate-200 bg-white/[0.05] px-1.5 py-0.5 rounded">
+                      &lt;id_do_episodio&gt; ; &lt;url&gt; [; &lt;kind&gt;]
+                    </code>
+                    {' · '}kind opcional (<code className="font-mono">auto</code>,{' '}
+                    <code className="font-mono">iframe</code>). Linhas vazias e comentários com{' '}
+                    <code className="font-mono">#</code> são ignorados. Execução em série (1 item por vez, 400ms entre itens).
                   </p>
                   <textarea
                     id="batch-import-textarea"
@@ -1613,7 +1727,7 @@ function AdminPage() {
                     value={batchInput}
                     onChange={(e) => setBatchInput(e.target.value)}
                     placeholder={`# Exemplo:\nep01_id ; https://anitube22.vip/playerricas.php?id=123 ; auto\nep02_id ; https://allappinc.com/embed/abc ; iframe`}
-                    className="w-full p-3 rounded-lg bg-[#090B10] border border-white/15 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-rose-500 disabled:opacity-60"
+                    className="w-full p-3.5 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 disabled:opacity-60 transition-colors"
                   />
                   {parsedBatchLines.length > BATCH_MAX_ITEMS && (
                     <p className="text-xs text-rose-400" role="alert">
@@ -1623,7 +1737,7 @@ function AdminPage() {
                   {hasBatchHashLinks && (
                     <div
                       role="note"
-                      className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
+                      className="flex items-start gap-2 rounded-xl border border-amber-500/35 bg-amber-950/30 px-3.5 py-2.5 text-xs text-amber-200"
                     >
                       <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                       <span>link com hash, use sempre um link novo e não reaproveite</span>
@@ -1632,10 +1746,12 @@ function AdminPage() {
                   {hasBatchExpirableHlsLinks && (
                     <div
                       role="note"
-                      className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
+                      className="flex items-start gap-2 rounded-xl border border-amber-500/35 bg-amber-950/30 px-3.5 py-2.5 text-xs text-amber-200"
                     >
                       <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
-                      <span>fonte HLS expirável (X-Amz-Expires, token= ou sig=): o link pode expirar depois de algum tempo</span>
+                      <span>
+                        fonte HLS expirável (X-Amz-Expires, token= ou sig=): o link pode expirar depois de algum tempo
+                      </span>
                     </div>
                   )}
                 </div>
@@ -1645,36 +1761,36 @@ function AdminPage() {
                     type="button"
                     disabled={
                       batchRunning ||
+                      !initialState.databaseConfigured ||
                       parsedBatchLines.length === 0 ||
                       parsedBatchLines.length > BATCH_MAX_ITEMS
                     }
-                    onClick={() => void handleStartBatch('validate')}
-                    className="h-10 px-4 rounded-lg border border-white/15 bg-[#090B10] hover:bg-white/5 disabled:opacity-40 text-xs sm:text-sm font-medium text-slate-200 inline-flex items-center gap-2 cursor-pointer"
+                    onClick={() => void handleStartBatch('validate_and_save')}
+                    className="min-h-[42px] sm:h-10 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-xs sm:text-sm font-medium text-white inline-flex items-center gap-2 cursor-pointer transition-colors"
                   >
-                    <Activity className="w-4 h-4" />
-                    Validar
+                    <Plus className="w-4 h-4" />
+                    Validar e salvar
                   </button>
 
                   <button
                     type="button"
                     disabled={
                       batchRunning ||
-                      !initialState.databaseConfigured ||
                       parsedBatchLines.length === 0 ||
                       parsedBatchLines.length > BATCH_MAX_ITEMS
                     }
-                    onClick={() => void handleStartBatch('validate_and_save')}
-                    className="h-10 px-4 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-40 text-xs sm:text-sm font-medium text-white inline-flex items-center gap-2 cursor-pointer"
+                    onClick={() => void handleStartBatch('validate')}
+                    className="min-h-[42px] sm:h-10 px-4 rounded-xl border border-white/15 bg-white/[0.03] hover:bg-white/[0.08] disabled:opacity-40 text-xs sm:text-sm font-medium text-slate-200 inline-flex items-center gap-2 cursor-pointer transition-colors"
                   >
-                    <Plus className="w-4 h-4" />
-                    Validar e salvar
+                    <Activity className="w-4 h-4" />
+                    Validar
                   </button>
 
                   {batchRunning && (
                     <button
                       type="button"
                       onClick={handlePauseBatch}
-                      className="h-10 px-4 rounded-lg border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 text-xs sm:text-sm font-medium text-amber-200 inline-flex items-center gap-2 cursor-pointer"
+                      className="min-h-[42px] sm:h-10 px-4 rounded-xl border border-amber-500/40 bg-amber-500/10 hover:bg-amber-500/20 text-xs sm:text-sm font-medium text-amber-200 inline-flex items-center gap-2 cursor-pointer transition-colors"
                     >
                       <Pause className="w-4 h-4" />
                       Pausar
@@ -1685,7 +1801,7 @@ function AdminPage() {
                     <button
                       type="button"
                       onClick={() => void handleResumeBatch()}
-                      className="h-10 px-4 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-xs sm:text-sm font-medium text-white inline-flex items-center gap-2 cursor-pointer"
+                      className="min-h-[42px] sm:h-10 px-4 rounded-xl bg-emerald-600 hover:bg-emerald-500 text-xs sm:text-sm font-medium text-white inline-flex items-center gap-2 cursor-pointer transition-colors"
                     >
                       <Play className="w-4 h-4" />
                       Continuar de onde parou (item {batchJob.lastProcessedIndex + 2}/{batchJob.items.length})
@@ -1696,7 +1812,7 @@ function AdminPage() {
                     <button
                       type="button"
                       onClick={handleClearBatchJob}
-                      className="h-10 px-3 rounded-lg border border-white/10 text-xs text-slate-400 hover:text-white hover:bg-white/5 inline-flex items-center gap-1.5 cursor-pointer"
+                      className="min-h-[42px] sm:h-10 px-3.5 rounded-xl border border-white/10 text-xs text-slate-400 hover:text-white hover:bg-white/5 inline-flex items-center gap-1.5 cursor-pointer transition-colors"
                     >
                       <RotateCcw className="w-3.5 h-3.5" />
                       Limpar relatório
@@ -1711,9 +1827,9 @@ function AdminPage() {
                 )}
 
                 {batchJob && (
-                  <div className="space-y-4 pt-2 border-t border-white/10">
+                  <div className="space-y-4 pt-4 border-t border-white/[0.08]">
                     {/* Progress counter */}
-                    <div className="space-y-1.5">
+                    <div className="space-y-2">
                       <div className="flex flex-wrap items-center justify-between gap-2 text-xs">
                         <span className="font-medium text-slate-200 tabular-nums">
                           Progresso: {batchTotals.processed} de {batchTotals.total} itens{' '}
@@ -1746,23 +1862,23 @@ function AdminPage() {
                       </div>
                     </div>
 
-                    {/* Totals */}
-                    <div className="grid grid-cols-3 gap-3 text-xs">
-                      <div className="rounded-lg bg-[#090B10] border border-white/10 px-3 py-2.5">
+                    {/* Totals summary */}
+                    <div className="grid grid-cols-3 divide-x divide-white/[0.08] rounded-xl bg-[#090B10] border border-white/[0.08] text-xs">
+                      <div className="px-3.5 py-2.5">
                         <div className="text-slate-400">Aprovados</div>
-                        <div className="text-lg font-semibold text-emerald-400 tabular-nums">
+                        <div className="text-lg font-semibold text-emerald-400 tabular-nums mt-0.5">
                           {batchTotals.aprovados}
                         </div>
                       </div>
-                      <div className="rounded-lg bg-[#090B10] border border-white/10 px-3 py-2.5">
+                      <div className="px-3.5 py-2.5">
                         <div className="text-slate-400">Reprovados</div>
-                        <div className="text-lg font-semibold text-rose-400 tabular-nums">
+                        <div className="text-lg font-semibold text-rose-400 tabular-nums mt-0.5">
                           {batchTotals.reprovados}
                         </div>
                       </div>
-                      <div className="rounded-lg bg-[#090B10] border border-white/10 px-3 py-2.5">
+                      <div className="px-3.5 py-2.5">
                         <div className="text-slate-400">Salvos</div>
-                        <div className="text-lg font-semibold text-sky-400 tabular-nums">
+                        <div className="text-lg font-semibold text-sky-400 tabular-nums mt-0.5">
                           {batchTotals.salvos}
                         </div>
                       </div>
@@ -1770,31 +1886,31 @@ function AdminPage() {
 
                     {/* Report table */}
                     {batchJob.results.length > 0 && (
-                      <div className="overflow-x-auto rounded-lg border border-white/10 bg-[#090B10]">
+                      <div className="overflow-x-auto rounded-xl border border-white/[0.08] bg-[#090B10]">
                         <table className="w-full text-left border-collapse text-[11px]">
                           <thead>
-                            <tr className="border-b border-white/10 text-slate-400">
-                              <th className="px-2.5 py-2 font-medium">Linha</th>
-                              <th className="px-2.5 py-2 font-medium">ID do episódio</th>
-                              <th className="px-2.5 py-2 font-medium">URL</th>
-                              <th className="px-2.5 py-2 font-medium">Veredito</th>
-                              <th className="px-2.5 py-2 font-medium">Salvo/Skipado</th>
-                              <th className="px-2.5 py-2 font-medium">Motivo</th>
+                            <tr className="border-b border-white/[0.08] text-slate-400">
+                              <th className="px-3 py-2.5 font-medium">Linha</th>
+                              <th className="px-3 py-2.5 font-medium">ID do episódio</th>
+                              <th className="px-3 py-2.5 font-medium">URL</th>
+                              <th className="px-3 py-2.5 font-medium">Veredito</th>
+                              <th className="px-3 py-2.5 font-medium">Salvo/Skipado</th>
+                              <th className="px-3 py-2.5 font-medium">Motivo</th>
                             </tr>
                           </thead>
-                          <tbody className="divide-y divide-white/10 font-mono">
+                          <tbody className="divide-y divide-white/[0.06] font-mono">
                             {batchJob.results.map((row, idx) => (
                               <tr key={`${row.lineNumber}-${idx}`} className="align-top text-slate-200">
-                                <td className="px-2.5 py-2 tabular-nums whitespace-nowrap">
+                                <td className="px-3 py-2 tabular-nums whitespace-nowrap">
                                   {row.lineNumber}
                                 </td>
-                                <td className="px-2.5 py-2 whitespace-nowrap">
+                                <td className="px-3 py-2 whitespace-nowrap">
                                   {row.episodeId || '—'}
                                 </td>
-                                <td className="px-2.5 py-2 max-w-[240px] truncate" title={row.url}>
+                                <td className="px-3 py-2 max-w-[240px] truncate" title={row.url}>
                                   {row.url || '—'}
                                 </td>
-                                <td className="px-2.5 py-2 whitespace-nowrap">
+                                <td className="px-3 py-2 whitespace-nowrap">
                                   <span
                                     className={
                                       row.verdict === 'aprovado'
@@ -1805,7 +1921,7 @@ function AdminPage() {
                                     {row.verdict}
                                   </span>
                                 </td>
-                                <td className="px-2.5 py-2 whitespace-nowrap">
+                                <td className="px-3 py-2 whitespace-nowrap">
                                   <span
                                     className={
                                       row.saveStatus === 'salvo'
@@ -1818,7 +1934,7 @@ function AdminPage() {
                                       : row.saveStatus}
                                   </span>
                                 </td>
-                                <td className="px-2.5 py-2 font-sans text-slate-300">
+                                <td className="px-3 py-2 font-sans text-slate-300">
                                   {row.reason}
                                 </td>
                               </tr>
@@ -1831,102 +1947,114 @@ function AdminPage() {
                 )}
               </section>
             ) : formOpen ? (
-              <section className="bg-[#11151E] border border-white/10 rounded-xl p-4 sm:p-6 space-y-5">
-                <div className="flex items-center justify-between gap-3 pb-3 border-b border-white/10">
-                  <div className="flex items-center gap-2.5 min-w-0">
+              /* VIEW 1: Create / Edit Episode Form */
+              <section className="bg-[#11151E] border border-white/[0.08] rounded-2xl p-4 sm:p-6 space-y-6">
+                <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-white/[0.08]">
+                  <div className="flex items-center gap-3 min-w-0">
                     <button
                       type="button"
                       onClick={handleCloseForm}
-                      className="h-9 px-2.5 rounded-lg border border-white/10 text-xs font-medium text-slate-200 hover:bg-white/5 inline-flex items-center gap-1.5 cursor-pointer shrink-0"
+                      className="min-h-[40px] sm:h-9 px-3 rounded-xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer shrink-0 transition-colors"
                     >
                       <ArrowLeft className="w-3.5 h-3.5" />
                       Voltar
                     </button>
-                    <h1 className="text-base sm:text-lg font-semibold text-white truncate">
-                      {editingId ? 'Editar episódio' : 'Novo episódio'}
-                    </h1>
+                    <div className="min-w-0">
+                      <h1 className="text-base sm:text-lg font-semibold text-white truncate">
+                        {editingId ? 'Editar episódio' : 'Novo episódio'}
+                      </h1>
+                      {editingId && (
+                        <p className="text-[11px] font-mono text-slate-400 truncate">
+                          ID: {editingId}
+                        </p>
+                      )}
+                    </div>
                   </div>
                 </div>
 
-                <form onSubmit={handleSaveEpisode} className="space-y-4">
-                  {/* Anime name + Episode number */}
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
-                    <div className="sm:col-span-2">
-                      <label
-                        htmlFor="ep-anime-name"
-                        className="block text-xs font-medium text-slate-300 mb-1.5"
-                      >
-                        Nome do anime
-                      </label>
-                      <input
-                        id="ep-anime-name"
-                        type="text"
-                        list="anime-names-datalist"
-                        maxLength={160}
-                        value={form.anime_name}
-                        onChange={(e) => setForm({ ...form, anime_name: e.target.value })}
-                        placeholder="Ex.: Frieren e a Jornada para o Além"
-                        className="w-full h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
-                      />
-                      <datalist id="anime-names-datalist">
-                        {existingAnimeNames.map((name) => (
-                          <option key={name} value={name} />
-                        ))}
-                      </datalist>
+                <form onSubmit={handleSaveEpisode} className="space-y-6">
+                  {/* Section 1: Episode Identification */}
+                  <div className="space-y-4">
+                    <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                      Identificação do episódio
+                    </h2>
+
+                    <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                      <div className="sm:col-span-2">
+                        <label
+                          htmlFor="ep-anime-name"
+                          className="block text-xs font-medium text-slate-300 mb-1.5"
+                        >
+                          Nome do anime
+                        </label>
+                        <input
+                          id="ep-anime-name"
+                          type="text"
+                          list="anime-names-datalist"
+                          maxLength={160}
+                          value={form.anime_name}
+                          onChange={(e) => setForm({ ...form, anime_name: e.target.value })}
+                          placeholder="Ex.: Frieren e a Jornada para o Além"
+                          className="w-full h-11 px-3.5 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-colors"
+                        />
+                        <datalist id="anime-names-datalist">
+                          {existingAnimeNames.map((name) => (
+                            <option key={name} value={name} />
+                          ))}
+                        </datalist>
+                      </div>
+
+                      <div>
+                        <label
+                          htmlFor="ep-number"
+                          className="block text-xs font-medium text-slate-300 mb-1.5"
+                        >
+                          Número do episódio
+                        </label>
+                        <input
+                          id="ep-number"
+                          type="text"
+                          maxLength={32}
+                          value={form.episode_number}
+                          onChange={(e) => setForm({ ...form, episode_number: e.target.value })}
+                          placeholder="Ex.: 01"
+                          className="w-full h-11 px-3.5 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-sm font-mono tabular-nums text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-colors"
+                        />
+                      </div>
                     </div>
 
                     <div>
                       <label
-                        htmlFor="ep-number"
+                        htmlFor="ep-title"
                         className="block text-xs font-medium text-slate-300 mb-1.5"
                       >
-                        Número do episódio
+                        Título do episódio{' '}
+                        <span className="text-slate-500 font-normal">(se aplicável)</span>
                       </label>
                       <input
-                        id="ep-number"
+                        id="ep-title"
                         type="text"
-                        maxLength={32}
-                        value={form.episode_number}
-                        onChange={(e) => setForm({ ...form, episode_number: e.target.value })}
-                        placeholder="Ex.: 01"
-                        className="w-full h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
+                        maxLength={200}
+                        value={form.title}
+                        onChange={(e) => setForm({ ...form, title: e.target.value })}
+                        placeholder="Ex.: O Fim da Jornada"
+                        className="w-full h-11 px-3.5 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-colors"
                       />
                     </div>
                   </div>
 
-                  {/* Episode title (if applicable) */}
-                  <div>
-                    <label
-                      htmlFor="ep-title"
-                      className="block text-xs font-medium text-slate-300 mb-1.5"
-                    >
-                      Título do episódio{' '}
-                      <span className="text-slate-500 font-normal">(se aplicável)</span>
-                    </label>
-                    <input
-                      id="ep-title"
-                      type="text"
-                      maxLength={200}
-                      value={form.title}
-                      onChange={(e) => setForm({ ...form, title: e.target.value })}
-                      placeholder="Ex.: O Fim da Jornada"
-                      className="w-full h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
-                    />
-                  </div>
-
-                  {/* Opening timestamps (optional) */}
-                  <div className="pt-2 border-t border-white/10 space-y-2.5">
+                  {/* Section 2: Opening timestamps (optional) */}
+                  <div className="pt-5 border-t border-white/[0.08] space-y-3">
                     <div className="flex flex-wrap items-center justify-between gap-2">
-                      <span className="text-xs font-medium text-slate-200">
-                        Opening{' '}
-                        <span className="text-slate-500 font-normal">(opcional)</span>
+                      <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                        Opening <span className="text-slate-500 font-normal lowercase">(opcional)</span>
                       </span>
-                      <span className="text-[11px] text-slate-400">
+                      <span className="text-[11px] font-mono text-slate-400">
                         MM:SS ou HH:MM:SS
                       </span>
                     </div>
 
-                    <div className="grid grid-cols-2 gap-3">
+                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
                       <div>
                         <label
                           htmlFor="ep-opening-start"
@@ -1942,7 +2070,7 @@ function AdminPage() {
                           value={form.opening_start}
                           onChange={(e) => setForm({ ...form, opening_start: e.target.value })}
                           placeholder="Ex.: 01:30"
-                          className="w-full h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-sm font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
+                          className="w-full h-11 px-3.5 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-sm font-mono tabular-nums text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-colors"
                         />
                       </div>
 
@@ -1961,29 +2089,29 @@ function AdminPage() {
                           value={form.opening_end}
                           onChange={(e) => setForm({ ...form, opening_end: e.target.value })}
                           placeholder="Ex.: 03:00"
-                          className="w-full h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-sm font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
+                          className="w-full h-11 px-3.5 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-sm font-mono tabular-nums text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-colors"
                         />
                       </div>
                     </div>
 
-                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                    <p className="text-xs text-slate-400 leading-relaxed">
                       Deixe ambos os campos vazios se o episódio não tiver abertura configurada.
                     </p>
                   </div>
 
-                  {/* Single Video Source: Player 1 only */}
-                  <div className="pt-2 border-t border-white/10 space-y-2.5">
-                    <div className="flex flex-wrap items-center justify-between gap-2">
+                  {/* Section 3: Single Video Source: Player 1 only */}
+                  <div className="pt-5 border-t border-white/[0.08] space-y-3">
+                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
                       <label
                         htmlFor="ep-video_url"
-                        className="text-xs font-medium text-slate-200"
+                        className="text-xs font-semibold uppercase tracking-wider text-slate-400"
                       >
                         Fonte de vídeo (Player 1)
                       </label>
 
-                      <div className="flex items-center gap-2">
+                      <div className="flex flex-wrap items-center gap-1.5">
                         {primarySourceInfo?.isUnconfirmed ? (
-                          <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-1.5 py-0.5 rounded border border-amber-500/30">
+                          <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-2 py-0.5 rounded-md border border-amber-500/30">
                             prefixo não confirmado
                           </span>
                         ) : primarySourceInfo?.detectedPrefix ? (
@@ -1992,12 +2120,15 @@ function AdminPage() {
                           </span>
                         ) : null}
                         {primarySourceInfo?.isR2 && !primarySourceInfo?.trimmed.includes('unconfirmed=1') && (
-                          <span className="text-[11px] font-mono text-amber-300" title="URL assinada do R2: prefixo verificado por tentativa ao salvar/testar">
+                          <span
+                            className="text-[11px] font-mono text-amber-300"
+                            title="URL assinada do R2: prefixo verificado por tentativa ao salvar/testar"
+                          >
                             R2 Signed URL (tentativa automática)
                           </span>
                         )}
                         {primarySourceInfo?.r2Inspection.status === 'r2_unsigned' && (
-                          <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-1.5 py-0.5 rounded border border-amber-500/30">
+                          <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-2 py-0.5 rounded-md border border-amber-500/30">
                             {primarySourceInfo.r2Inspection.badgeLabel}
                           </span>
                         )}
@@ -2009,7 +2140,7 @@ function AdminPage() {
                         {(primarySourceInfo?.isExpirableUrl ||
                           primarySourceInfo?.r2Inspection.isR2 ||
                           slotReport?.isExpirable) && (
-                          <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-1.5 py-0.5 rounded border border-amber-500/30">
+                          <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-2 py-0.5 rounded-md border border-amber-500/30">
                             fonte expirável
                           </span>
                         )}
@@ -2020,41 +2151,10 @@ function AdminPage() {
                         ) : primarySourceInfo?.check && !primarySourceInfo.check.valid ? (
                           <span className="text-[11px] text-rose-400">URL inválida</span>
                         ) : null}
-
-                        {primarySourceInfo?.r2Inspection.isR2 && primarySourceInfo.check.valid && (
-                          <button
-                            type="button"
-                            disabled={r2ResolveBusy}
-                            onClick={() => void handleAttemptControlledR2Resolution()}
-                            title="Tenta localizar uma fonte reproduzível em playerricas.php sem alterar a URL atual automaticamente"
-                            className="h-7 px-2.5 rounded-md border border-amber-500/40 bg-amber-950/30 hover:bg-amber-950/60 disabled:opacity-40 text-[11px] font-medium text-amber-200 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
-                          >
-                            {r2ResolveBusy ? (
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                            ) : (
-                              <Globe className="w-3 h-3" />
-                            )}
-                            {r2ResolveBusy ? 'Resolvendo R2...' : 'Tentar resolver R2'}
-                          </button>
-                        )}
-
-                        {primarySourceInfo?.trimmed && (
-                          <button
-                            type="button"
-                            disabled={
-                              slotTesting || Boolean(!primarySourceInfo.check.valid)
-                            }
-                            onClick={() => void handleTestFormPrimarySource()}
-                            className="h-7 px-2.5 rounded-md border border-white/15 bg-[#090B10] hover:bg-white/5 disabled:opacity-40 text-[11px] font-medium text-slate-200 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
-                          >
-                            <Activity className="w-3 h-3" />
-                            {slotTesting ? 'Testando...' : 'Testar fonte'}
-                          </button>
-                        )}
                       </div>
                     </div>
 
-                    <div className="flex items-center gap-2">
+                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
                       <input
                         id="ep-video_url"
                         type="url"
@@ -2069,7 +2169,7 @@ function AdminPage() {
                           }
                         }}
                         placeholder="https://.../playerricas.php?... ou https://.../index.m3u8"
-                        className="flex-1 min-w-0 h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
+                        className="flex-1 min-w-0 h-11 px-3.5 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-colors"
                       />
                       <select
                         id="ep-source_kind"
@@ -2081,7 +2181,7 @@ function AdminPage() {
                             source_kind: e.target.value as ExplicitSourceKind | '',
                           })
                         }
-                        className="h-11 px-2.5 rounded-lg bg-[#090B10] border border-white/15 text-xs font-mono text-slate-200 focus:outline-none focus:border-rose-500 shrink-0"
+                        className="h-11 sm:w-28 px-3 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-xs font-mono text-slate-200 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 shrink-0 transition-colors"
                       >
                         <option value="">auto</option>
                         <option value="iframe">iframe</option>
@@ -2090,6 +2190,45 @@ function AdminPage() {
                       </select>
                     </div>
 
+                    {/* Diagnostic & R2 Resolution secondary action buttons */}
+                    {(primarySourceInfo?.trimmed ||
+                      (primarySourceInfo?.r2Inspection.isR2 && primarySourceInfo.check.valid)) && (
+                      <div className="flex flex-wrap items-center gap-2">
+                        {primarySourceInfo?.trimmed && (
+                          <button
+                            type="button"
+                            disabled={slotTesting || Boolean(!primarySourceInfo.check.valid)}
+                            onClick={() => void handleTestFormPrimarySource()}
+                            className="min-h-[38px] sm:h-9 px-3 rounded-xl border border-white/15 bg-white/[0.03] hover:bg-white/[0.08] disabled:opacity-40 text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
+                          >
+                            {slotTesting ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Activity className="w-3.5 h-3.5" />
+                            )}
+                            {slotTesting ? 'Testando...' : 'Testar fonte'}
+                          </button>
+                        )}
+
+                        {primarySourceInfo?.r2Inspection.isR2 && primarySourceInfo.check.valid && (
+                          <button
+                            type="button"
+                            disabled={r2ResolveBusy}
+                            onClick={() => void handleAttemptControlledR2Resolution()}
+                            title="Tenta localizar uma fonte reproduzível em playerricas.php sem alterar a URL atual automaticamente"
+                            className="min-h-[38px] sm:h-9 px-3 rounded-xl border border-amber-500/40 bg-amber-950/30 hover:bg-amber-950/60 disabled:opacity-40 text-xs font-medium text-amber-200 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
+                          >
+                            {r2ResolveBusy ? (
+                              <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                            ) : (
+                              <Globe className="w-3.5 h-3.5" />
+                            )}
+                            {r2ResolveBusy ? 'Resolvendo R2...' : 'Tentar resolver R2'}
+                          </button>
+                        )}
+                      </div>
+                    )}
+
                     {form.source_referer.trim() && (
                       <div className="text-[11px] font-mono text-slate-400">
                         Referer do host:{' '}
@@ -2097,14 +2236,33 @@ function AdminPage() {
                       </div>
                     )}
 
-                    <p className="text-[11px] text-slate-400 leading-relaxed">
+                    <p className="text-xs text-slate-400 leading-relaxed">
                       Aceita URL direta (.m3u8, .mp4, .webm) ou página do provedor (.php, embed).
                     </p>
+
+                    {primarySourceInfo?.check.valid && primarySourceInfo.detectedKind === 'iframe' && (
+                      <div className="text-xs text-slate-200">
+                        Modo detectado para esta URL:{' '}
+                        <span
+                          className={`font-mono font-semibold ${
+                            primarySourceInfo.embedHostMode === 'proxied'
+                              ? 'text-amber-300'
+                              : 'text-emerald-300'
+                          }`}
+                        >
+                          {primarySourceInfo.embedHostMode === 'proxied'
+                            ? 'via /api/embed'
+                            : primarySourceInfo.referrerPolicy === 'no-referrer'
+                              ? 'iframe direto (sem Referer)'
+                              : 'iframe direto'}
+                        </span>
+                      </div>
+                    )}
 
                     {primarySourceInfo?.hasHashParams && (
                       <div
                         role="note"
-                        className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
+                        className="flex items-start gap-2 rounded-xl border border-amber-500/35 bg-amber-950/30 px-3.5 py-2.5 text-xs text-amber-200"
                       >
                         <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                         <span>link com hash, use sempre um link novo e não reaproveite</span>
@@ -2114,7 +2272,7 @@ function AdminPage() {
                     {primarySourceInfo?.r2Inspection.warningMessage && (
                       <div
                         role="note"
-                        className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
+                        className="flex items-start gap-2 rounded-xl border border-amber-500/35 bg-amber-950/30 px-3.5 py-2.5 text-xs text-amber-200"
                       >
                         <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                         <span>{primarySourceInfo.r2Inspection.warningMessage}</span>
@@ -2125,7 +2283,7 @@ function AdminPage() {
                       (slotReport?.isExpirable && !primarySourceInfo?.r2Inspection.isR2)) && (
                       <div
                         role="note"
-                        className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
+                        className="flex items-start gap-2 rounded-xl border border-amber-500/35 bg-amber-950/30 px-3.5 py-2.5 text-xs text-amber-200"
                       >
                         <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                         <span>
@@ -2135,51 +2293,37 @@ function AdminPage() {
                       </div>
                     )}
 
-                    <div className="rounded-lg bg-[#090B10] border border-white/10 px-3 py-2 text-[11px] text-slate-300 space-y-1 leading-relaxed">
-                      <div>
-                        <span className="text-amber-300 font-medium">Exige /api/embed:</span>{' '}
-                        <span className="font-mono text-slate-200">
-                          {EMBED_PROXIED_HOSTS.join(', ')}
-                        </span>{' '}
-                        (CSP frame-ancestors bloqueia iframe direto)
+                    <details className="rounded-xl bg-[#090B10] border border-white/[0.08] px-3.5 py-2.5 text-[11px] text-slate-300">
+                      <summary className="cursor-pointer font-medium text-slate-300 hover:text-white select-none">
+                        Regras de compatibilidade de embed
+                      </summary>
+                      <div className="mt-2.5 pt-2.5 border-t border-white/[0.06] space-y-1 leading-relaxed">
+                        <div>
+                          <span className="text-amber-300 font-medium">Exige /api/embed:</span>{' '}
+                          <span className="font-mono text-slate-200">
+                            {EMBED_PROXIED_HOSTS.join(', ')}
+                          </span>{' '}
+                          (CSP frame-ancestors bloqueia iframe direto)
+                        </div>
+                        <div>
+                          <span className="text-emerald-300 font-medium">Iframe direto:</span>{' '}
+                          <span className="font-mono text-slate-200">
+                            {EMBED_DIRECT_HOSTS.join(', ')}
+                          </span>
+                        </div>
+                        <div>
+                          <span className="text-sky-300 font-medium">Iframe sem Referer:</span>{' '}
+                          <span className="font-mono text-slate-200">
+                            {EMBED_NO_REFERRER_HOSTS.join(', ')}
+                          </span>
+                        </div>
                       </div>
-                      <div>
-                        <span className="text-emerald-300 font-medium">Iframe direto:</span>{' '}
-                        <span className="font-mono text-slate-200">
-                          {EMBED_DIRECT_HOSTS.join(', ')}
-                        </span>
-                      </div>
-                      <div>
-                        <span className="text-sky-300 font-medium">Iframe sem Referer:</span>{' '}
-                        <span className="font-mono text-slate-200">
-                          {EMBED_NO_REFERRER_HOSTS.join(', ')}
-                        </span>
-                      </div>
-                      {primarySourceInfo?.check.valid &&
-                        primarySourceInfo.detectedKind === 'iframe' && (
-                          <div className="pt-0.5 text-slate-200">
-                            Modo detectado para esta URL:{' '}
-                            <span
-                              className={`font-mono font-semibold ${
-                                primarySourceInfo.embedHostMode === 'proxied'
-                                  ? 'text-amber-300'
-                                  : 'text-emerald-300'
-                              }`}
-                            >
-                              {primarySourceInfo.embedHostMode === 'proxied'
-                                ? 'via /api/embed'
-                                : primarySourceInfo.referrerPolicy === 'no-referrer'
-                                  ? 'iframe direto (sem Referer)'
-                                  : 'iframe direto'}
-                            </span>
-                          </div>
-                        )}
-                    </div>
+                    </details>
 
                     {r2ResolveError && (
                       <div
                         role="alert"
-                        className="rounded-lg border border-rose-500/35 bg-rose-950/30 px-3 py-2 text-xs text-rose-200"
+                        className="rounded-xl border border-rose-500/35 bg-rose-950/30 px-3.5 py-2.5 text-xs text-rose-200"
                       >
                         {r2ResolveError}
                       </div>
@@ -2188,14 +2332,14 @@ function AdminPage() {
                     {r2AppliedNotice && (
                       <div
                         role="status"
-                        className="rounded-lg border border-emerald-500/35 bg-emerald-950/30 px-3 py-2 text-xs text-emerald-200"
+                        className="rounded-xl border border-emerald-500/35 bg-emerald-950/30 px-3.5 py-2.5 text-xs text-emerald-200"
                       >
                         {r2AppliedNotice}
                       </div>
                     )}
 
                     {r2ResolveResult && (
-                      <div className="rounded-lg bg-[#090B10] border border-white/15 p-3 text-xs space-y-2">
+                      <div className="rounded-xl bg-[#090B10] border border-white/15 p-3.5 text-xs space-y-2.5">
                         <div className="flex items-center justify-between gap-2">
                           <span
                             className={`font-semibold ${
@@ -2232,7 +2376,7 @@ function AdminPage() {
                               <span
                                 key={attempt.prefix}
                                 title={attempt.reason}
-                                className={`px-1.5 py-0.5 rounded border text-[10px] font-mono ${
+                                className={`px-2 py-0.5 rounded-md border text-[10px] font-mono ${
                                   attempt.valid
                                     ? 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300'
                                     : 'border-white/10 bg-white/5 text-slate-400'
@@ -2246,7 +2390,7 @@ function AdminPage() {
                         )}
 
                         {r2ResolveResult.found && r2ResolveResult.resolvedUrl && (
-                          <div className="space-y-2 pt-1 border-t border-white/10">
+                          <div className="space-y-2 pt-2 border-t border-white/10">
                             <div className="text-[11px] text-slate-300">
                               Tipo detectado:{' '}
                               <span className="font-mono text-emerald-300">
@@ -2256,14 +2400,14 @@ function AdminPage() {
                                 ? ` · ${r2ResolveResult.validationDetail}`
                                 : ''}
                             </div>
-                            <div className="p-2 rounded bg-black/40 border border-white/10 text-[11px] font-mono text-slate-200 break-all">
+                            <div className="p-2.5 rounded-lg bg-black/40 border border-white/10 text-[11px] font-mono text-slate-200 break-all">
                               {r2ResolveResult.resolvedUrl}
                             </div>
                             <div className="flex flex-wrap items-center gap-2">
                               <button
                                 type="button"
                                 onClick={handleConfirmApplyR2Candidate}
-                                className="h-7 px-3 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer"
+                                className="min-h-[36px] sm:h-8 px-3 rounded-lg bg-emerald-600 hover:bg-emerald-500 text-white text-xs font-medium inline-flex items-center gap-1.5 cursor-pointer"
                               >
                                 <Check className="w-3.5 h-3.5" />
                                 Aplicar fonte resolvida
@@ -2271,7 +2415,7 @@ function AdminPage() {
                               <button
                                 type="button"
                                 onClick={handleDiscardR2Candidate}
-                                className="h-7 px-3 rounded-md border border-white/15 bg-white/5 hover:bg-white/10 text-slate-200 text-[11px] font-medium cursor-pointer"
+                                className="min-h-[36px] sm:h-8 px-3 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 text-slate-200 text-xs font-medium cursor-pointer"
                               >
                                 Manter URL atual
                               </button>
@@ -2288,8 +2432,8 @@ function AdminPage() {
                     )}
 
                     {slotReport && (
-                      <div className="rounded-lg bg-[#090B10] border border-white/10 p-3 text-[11px] space-y-1 font-mono">
-                        <div className="flex items-center justify-between gap-2">
+                      <div className="rounded-xl bg-[#090B10] border border-white/10 p-3.5 text-[11px] space-y-1.5 font-mono">
+                        <div className="flex flex-wrap items-center justify-between gap-2">
                           <span
                             className={`font-semibold ${
                               slotReport.verdict === 'direto_ok'
@@ -2337,7 +2481,7 @@ function AdminPage() {
                           {slotReport.withHeaders.accessControlAllowOrigin ?? 'ausente'}
                         </div>
                         {slotReport.embedDiagnostic && (
-                          <div className="text-slate-200 pt-1 border-t border-white/10 space-y-0.5">
+                          <div className="text-slate-200 pt-1.5 border-t border-white/10 space-y-0.5">
                             <div>
                               Embed:{' '}
                               <span
@@ -2411,8 +2555,12 @@ function AdminPage() {
                     )}
                   </div>
 
-                  {/* Episode poster image & manual thumbnail generator */}
-                  <div className="space-y-3">
+                  {/* Section 4: Episode poster image & manual thumbnail generator */}
+                  <div className="pt-5 border-t border-white/[0.08] space-y-3.5">
+                    <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                      Capa e thumbnails
+                    </h2>
+
                     <div>
                       <label
                         htmlFor="ep-poster"
@@ -2433,7 +2581,7 @@ function AdminPage() {
                           setForm({ ...form, poster_url: e.target.value });
                         }}
                         placeholder="https://cdn.exemplo.com/capas/ep01.jpg"
-                        className="w-full h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
+                        className="w-full h-11 px-3.5 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-colors"
                       />
                       {posterValidation && !posterValidation.valid && !selectedThumbnail && (
                         <p className="mt-1 text-xs text-rose-400">{posterValidation.error}</p>
@@ -2441,14 +2589,14 @@ function AdminPage() {
                     </div>
 
                     {/* Visual thumbnail extraction & manual selection */}
-                    <div className="rounded-lg border border-white/10 bg-[#090B10]/80 p-3 space-y-3">
-                      <div className="flex flex-wrap items-center justify-between gap-2">
+                    <div className="rounded-xl border border-white/[0.08] bg-[#090B10]/80 p-3.5 space-y-3">
+                      <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2.5">
                         <div className="min-w-0">
                           <div className="flex items-center gap-1.5 text-xs font-medium text-slate-200">
                             <Camera className="w-3.5 h-3.5 text-rose-400 shrink-0" />
                             <span>Gerar thumbnails do vídeo</span>
                           </div>
-                          <p className="mt-0.5 text-[11px] text-slate-400">
+                          <p className="mt-0.5 text-xs text-slate-400">
                             {thumbSourceInfo
                               ? `Fonte usada: ${thumbSourceInfo.label}.`
                               : hasBlobThumbnailSource
@@ -2459,13 +2607,13 @@ function AdminPage() {
                           </p>
                         </div>
 
-                        <div className="flex items-center gap-2 shrink-0">
+                        <div className="flex flex-wrap items-center gap-2 shrink-0">
                           {selectedThumbnail && (
                             <button
                               type="button"
                               onClick={() => setSelectedThumbId(null)}
                               disabled={thumbBusy || saveBusy}
-                              className="h-9 px-2.5 rounded-lg border border-white/10 text-xs text-slate-300 hover:bg-white/5 disabled:opacity-50 cursor-pointer"
+                              className="min-h-[38px] sm:h-9 px-3 rounded-xl border border-white/10 text-xs text-slate-300 hover:bg-white/5 disabled:opacity-50 cursor-pointer"
                             >
                               Limpar escolha
                             </button>
@@ -2474,7 +2622,7 @@ function AdminPage() {
                             type="button"
                             onClick={() => void handleGenerateThumbnails()}
                             disabled={thumbBusy || saveBusy || !hasAnyThumbnailSource}
-                            className="h-9 px-3 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-50 text-xs font-medium text-slate-100 inline-flex items-center gap-1.5 transition-colors cursor-pointer"
+                            className="min-h-[38px] sm:h-9 px-3.5 rounded-xl border border-white/15 bg-white/[0.04] hover:bg-white/[0.08] disabled:opacity-50 text-xs font-medium text-slate-100 inline-flex items-center gap-1.5 transition-colors cursor-pointer"
                           >
                             {thumbBusy ? (
                               <>
@@ -2497,7 +2645,7 @@ function AdminPage() {
 
                       {thumbSourceInfo && !thumbError && (
                         <div className="flex flex-wrap items-center gap-2 text-[11px] text-slate-400">
-                          <span className="px-2 py-0.5 rounded bg-white/5 border border-white/10 text-slate-300">
+                          <span className="px-2 py-0.5 rounded-md bg-white/5 border border-white/10 text-slate-300">
                             Fonte usada: {thumbSourceInfo.label}
                           </span>
                           {thumbCandidates.length > 0 && !selectedThumbnail && (
@@ -2511,7 +2659,7 @@ function AdminPage() {
                       {thumbError && (
                         <div
                           role="status"
-                          className="rounded-lg border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 flex items-start gap-2"
+                          className="rounded-xl border border-amber-500/30 bg-amber-500/10 px-3 py-2 text-xs text-amber-200 flex items-start gap-2"
                         >
                           <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                           <span>{thumbError}</span>
@@ -2528,9 +2676,9 @@ function AdminPage() {
                                 type="button"
                                 onClick={() => setSelectedThumbId(cand.id)}
                                 aria-pressed={isSelected}
-                                className={`group relative aspect-video rounded-lg overflow-hidden border text-left transition-all cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 ${
+                                className={`group relative aspect-video rounded-xl overflow-hidden border text-left transition-all cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 ${
                                   isSelected
-                                    ? 'border-rose-500 ring-2 ring-rose-500/80 shadow-lg shadow-rose-950/40'
+                                    ? 'border-rose-500 ring-2 ring-rose-500/80'
                                     : 'border-white/10 hover:border-white/30'
                                 }`}
                               >
@@ -2540,7 +2688,7 @@ function AdminPage() {
                                   className="w-full h-full object-cover"
                                 />
                                 <div className="absolute inset-x-0 bottom-0 px-2 py-1 bg-gradient-to-t from-black/85 via-black/45 to-transparent flex items-center justify-between text-[11px]">
-                                  <span className="font-mono text-slate-200">
+                                  <span className="font-mono text-slate-200 tabular-nums">
                                     {cand.timestampLabel}
                                   </span>
                                   {isSelected ? (
@@ -2561,16 +2709,16 @@ function AdminPage() {
                       )}
                     </div>
 
-                    {/* Poster preview: shows explicitly chosen thumbnail or saved/typed poster_url */}
+                    {/* Poster preview */}
                     {selectedThumbnail ? (
                       <div className="space-y-1.5">
-                        <div className="aspect-video max-w-sm w-full rounded-lg overflow-hidden border border-rose-500/60 bg-[#090B10] relative">
+                        <div className="aspect-video max-w-sm w-full rounded-xl overflow-hidden border border-rose-500/60 bg-[#090B10] relative">
                           <img
                             src={selectedThumbnail.previewUrl}
                             alt="Prévia da thumbnail escolhida"
                             className="w-full h-full object-cover"
                           />
-                          <div className="absolute top-2 left-2 px-2 py-0.5 rounded bg-rose-600/95 text-[11px] font-medium text-white">
+                          <div className="absolute top-2 left-2 px-2 py-0.5 rounded-md bg-rose-600/95 text-[11px] font-medium text-white tabular-nums">
                             Capa escolhida ({selectedThumbnail.timestampLabel})
                           </div>
                         </div>
@@ -2582,7 +2730,7 @@ function AdminPage() {
                       posterValidation?.valid &&
                       posterValidation.normalizedUrl &&
                       !posterPreviewError && (
-                        <div className="aspect-video max-w-sm w-full rounded-lg overflow-hidden border border-white/10 bg-[#090B10]">
+                        <div className="aspect-video max-w-sm w-full rounded-xl overflow-hidden border border-white/10 bg-[#090B10]">
                           <img
                             {...getOptimizedImageProps(posterValidation.normalizedUrl, 'capa')}
                             alt="Prévia da imagem do episódio"
@@ -2601,20 +2749,24 @@ function AdminPage() {
                     </p>
                   )}
 
-                  <div className="pt-2 flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2.5">
+                  <div className="pt-4 border-t border-white/[0.08] flex flex-col-reverse sm:flex-row sm:items-center sm:justify-end gap-2.5">
                     <button
                       type="button"
                       onClick={handleCloseForm}
-                      className="h-11 px-4 rounded-lg border border-white/10 text-sm font-medium text-slate-300 hover:bg-white/5 cursor-pointer"
+                      className="h-11 px-4 rounded-xl border border-white/10 bg-white/[0.02] hover:bg-white/[0.06] text-sm font-medium text-slate-300 cursor-pointer transition-colors"
                     >
                       Cancelar
                     </button>
                     <button
                       type="submit"
                       disabled={saveBusy || !initialState.databaseConfigured}
-                      className="h-11 px-5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-sm font-medium text-white inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
+                      className="h-11 px-5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-sm font-medium text-white inline-flex items-center justify-center gap-2 transition-colors cursor-pointer"
                     >
-                      <Plus className="w-4 h-4" />
+                      {saveBusy ? (
+                        <Loader2 className="w-4 h-4 animate-spin" />
+                      ) : (
+                        <Check className="w-4 h-4" />
+                      )}
                       {saveBusy
                         ? 'Salvando...'
                         : editingId
@@ -2624,436 +2776,13 @@ function AdminPage() {
                   </div>
                 </form>
               </section>
-            ) : selectedGroup ? (
-              /* VIEW 2: Episodes for Selected Anime */
-              <section className="space-y-4">
-                <div className="flex flex-wrap items-center justify-between gap-3">
-                  <button
-                    type="button"
-                    onClick={() => {
-                      setSelectedAnimeKey(null);
-                      setOpenMenuId(null);
-                      setConfirmDeleteId(null);
-                    }}
-                    className="h-9 px-3 rounded-lg border border-white/10 bg-[#11151E] hover:bg-white/5 text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <ArrowLeft className="w-3.5 h-3.5" />
-                    Voltar para animes
-                  </button>
-
-                  <button
-                    type="button"
-                    disabled={!initialState.databaseConfigured}
-                    onClick={() =>
-                      handleOpenCreateForm(selectedGroup.isUnassigned ? '' : selectedGroup.name)
-                    }
-                    className="h-9 px-3.5 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-xs font-medium text-white inline-flex items-center gap-1.5 cursor-pointer"
-                  >
-                    <Plus className="w-3.5 h-3.5" />
-                    Novo episódio
-                  </button>
-                </div>
-
-                {/* Anime group header */}
-                <div className="bg-[#11151E] border border-white/10 rounded-xl p-4 sm:p-5 flex items-center gap-3.5">
-                  <AnimeThumbnail
-                    posterUrl={selectedGroup.representativePosterUrl}
-                    alt={selectedGroup.name}
-                    className="w-16 h-12 sm:w-20 sm:h-14"
-                  />
-                  <div className="min-w-0 flex-1">
-                    <h1 className="text-base sm:text-lg font-semibold text-white truncate">
-                      {selectedGroup.name}
-                    </h1>
-                    <p className="text-xs text-slate-400 mt-0.5 tabular-nums">
-                      {selectedGroup.episodeCount}{' '}
-                      {selectedGroup.episodeCount === 1 ? 'episódio' : 'episódios'}
-                      {selectedGroup.isUnassigned
-                        ? ' · Edite um registro para associar o nome do anime'
-                        : ''}
-                    </p>
-                  </div>
-                </div>
-
-                {/* Episodes list */}
-                <div
-                  ref={menuContainerRef}
-                  className="bg-[#11151E] border border-white/10 rounded-xl overflow-visible"
-                >
-                  <ul className="divide-y divide-white/10">
-                    {selectedGroup.episodes.map((ep) => {
-                      const sourceCount = countEpisodeSources(ep);
-                      const isDeleting = confirmDeleteId === ep.id;
-                      const isBusyDeleting = deleteBusyId === ep.id;
-                      const isMenuOpen = openMenuId === ep.id;
-                      const hasTitle = Boolean(ep.title && ep.title.trim());
-                      const epLabel = formatEpisodeDisplayTitle(ep);
-                      const isTesting = episodeTestingId === ep.id;
-                      const testReports = episodeTests[ep.id];
-                      const testError = episodeTestErrors[ep.id];
-                      const episodeSources = getEpisodeSourcesList(ep);
-                      const hasMirror = episodeSources.some((src) => src.isMirror);
-                      const forceRedo = Boolean(mirrorForceMap[ep.id]);
-                      const mirrorBlocked = hasMirror && !forceRedo;
-                      const isMirroring = mirrorBusyId === ep.id;
-                      const mirrorUrlValue = mirrorInputs[ep.id] ?? '';
-                      const mirrorError = mirrorErrorMap[ep.id];
-                      const mirrorSuccess = mirrorSuccessMap[ep.id];
-                      const hasHashSource = episodeSources.some((src) =>
-                        hasUrlHashParams(src.url)
-                      );
-                      const hasExpirableSource =
-                        episodeSources.some((src) => src.isExpirable) ||
-                        Boolean(testReports?.some((report) => report.isExpirable && !isR2StorageUrl(report.url)));
-
-                      return (
-                        <li
-                          key={ep.id}
-                          className="px-4 sm:px-5 py-3.5 sm:py-4 hover:bg-white/[0.02] transition-colors space-y-3"
-                        >
-                          <div className="flex items-start justify-between gap-3">
-                            {/* Episode metadata */}
-                            <div className="min-w-0 flex-1 space-y-1">
-                              <div className="flex flex-wrap items-center gap-2 min-w-0">
-                                {ep.episode_number && (
-                                  <span className="inline-flex items-center px-2 py-0.5 rounded bg-white/5 border border-white/10 text-xs font-mono text-slate-200 shrink-0 tabular-nums">
-                                    Ep. {ep.episode_number}
-                                  </span>
-                                )}
-                                {hasTitle ? (
-                                  <h2 className="text-sm font-medium text-white truncate min-w-0">
-                                    {ep.title}
-                                  </h2>
-                                ) : !ep.episode_number ? (
-                                  <h2 className="text-sm font-medium text-slate-300 truncate min-w-0">
-                                    {epLabel}
-                                  </h2>
-                                ) : null}
-                              </div>
-
-                              <p className="text-xs text-slate-400 tabular-nums">
-                                {sourceCount} {sourceCount === 1 ? 'fonte' : 'fontes'}
-                                <span aria-hidden="true"> · </span>
-                                {formatDatePtBr(ep.created_at)}
-                              </p>
-
-                              {hasHashSource && (
-                                <p className="inline-flex items-center gap-1.5 text-[11px] text-amber-300">
-                                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                                  <span>link com hash, use sempre um link novo e não reaproveite</span>
-                                </p>
-                              )}
-
-                              {hasExpirableSource && (
-                                <p className="inline-flex items-center gap-1.5 text-[11px] text-amber-300">
-                                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
-                                  <span>fonte expirável: M3U8 com X-Amz-Expires, token= ou sig= pode vencer</span>
-                                </p>
-                              )}
-                            </div>
-
-                            {/* Compact actions: Copiar link, Abrir + 3-dots menu */}
-                            <div className="flex items-center gap-1.5 shrink-0">
-                              <button
-                                type="button"
-                                onClick={() => void copyLink(ep.id, ep.public_url)}
-                                aria-label={`Copiar link de ${epLabel}`}
-                                className="h-9 px-2.5 rounded-lg border border-white/10 text-xs font-medium text-slate-200 hover:bg-white/5 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
-                              >
-                                {copiedId === ep.id ? (
-                                  <>
-                                    <Check className="w-3.5 h-3.5 text-emerald-400" />
-                                    <span className="hidden sm:inline">Copiado</span>
-                                  </>
-                                ) : (
-                                  <>
-                                    <Copy className="w-3.5 h-3.5" />
-                                    <span className="hidden sm:inline">Copiar link</span>
-                                  </>
-                                )}
-                              </button>
-
-                              <a
-                                href={`/e/${encodeURIComponent(ep.id)}`}
-                                target="_blank"
-                                rel="noreferrer"
-                                aria-label={`Abrir ${epLabel}`}
-                                className="h-9 px-2.5 rounded-lg border border-white/10 text-xs font-medium text-slate-200 hover:bg-white/5 inline-flex items-center gap-1.5 whitespace-nowrap"
-                              >
-                                <ExternalLink className="w-3.5 h-3.5" />
-                                <span className="hidden sm:inline">Abrir</span>
-                              </a>
-
-                              {/* Three-dots secondary actions menu */}
-                              <div className="relative" data-episode-menu-root="true">
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setOpenMenuId((curr) => (curr === ep.id ? null : ep.id))
-                                  }
-                                  aria-label={`Mais ações para ${epLabel}`}
-                                  aria-haspopup="menu"
-                                  aria-expanded={isMenuOpen}
-                                  className="h-9 w-9 rounded-lg border border-white/10 text-slate-300 hover:text-white hover:bg-white/5 inline-flex items-center justify-center cursor-pointer"
-                                >
-                                  <MoreVertical className="w-4 h-4" />
-                                </button>
-
-                                {isMenuOpen && (
-                                  <div
-                                    role="menu"
-                                    aria-label={`Ações de ${epLabel}`}
-                                    className="absolute right-0 top-full mt-1.5 z-30 w-44 rounded-xl bg-[#0D1018] border border-white/15 shadow-xl py-1"
-                                  >
-                                    <button
-                                      type="button"
-                                      role="menuitem"
-                                      onClick={() => handleEditStart(ep)}
-                                      className="w-full px-3.5 py-2.5 text-left text-xs font-medium text-slate-200 hover:bg-white/5 inline-flex items-center gap-2.5 cursor-pointer"
-                                    >
-                                      <Pencil className="w-3.5 h-3.5 text-slate-400" />
-                                      Editar
-                                    </button>
-
-                                    <button
-                                      type="button"
-                                      role="menuitem"
-                                      disabled={isTesting}
-                                      onClick={() => void handleTestEpisodeSources(ep)}
-                                      className="w-full px-3.5 py-2.5 text-left text-xs font-medium text-slate-200 hover:bg-white/5 disabled:opacity-50 inline-flex items-center gap-2.5 cursor-pointer"
-                                    >
-                                      <Activity className="w-3.5 h-3.5 text-slate-400" />
-                                      {isTesting ? 'Testando fonte...' : 'Testar fonte'}
-                                    </button>
-
-                                    <div className="my-1 border-t border-white/10" />
-
-                                    <button
-                                      type="button"
-                                      role="menuitem"
-                                      onClick={() => {
-                                        setOpenMenuId(null);
-                                        setConfirmDeleteId(ep.id);
-                                      }}
-                                      className="w-full px-3.5 py-2.5 text-left text-xs font-medium text-rose-300 hover:bg-rose-500/10 inline-flex items-center gap-2.5 cursor-pointer"
-                                    >
-                                      <Trash2 className="w-3.5 h-3.5" />
-                                      Excluir
-                                    </button>
-                                  </div>
-                                )}
-                              </div>
-                            </div>
-                          </div>
-
-                          {/* Delete confirmation bar */}
-                          {isDeleting && (
-                            <div className="flex flex-wrap items-center justify-between gap-2 rounded-lg border border-rose-500/30 bg-rose-950/25 px-3 py-2.5">
-                              <span className="text-xs text-rose-200">
-                                Confirmar exclusão deste episódio?
-                              </span>
-                              <div className="flex items-center gap-2">
-                                <button
-                                  type="button"
-                                  onClick={() => setConfirmDeleteId(null)}
-                                  className="h-8 px-3 rounded-lg border border-white/10 text-xs text-slate-300 hover:bg-white/5 cursor-pointer"
-                                >
-                                  Cancelar
-                                </button>
-                                <button
-                                  type="button"
-                                  disabled={isBusyDeleting}
-                                  onClick={() => void handleConfirmDelete(ep.id)}
-                                  className="h-8 px-3 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-xs font-medium text-white cursor-pointer"
-                                >
-                                  {isBusyDeleting ? 'Excluindo...' : 'Confirmar'}
-                                </button>
-                              </div>
-                            </div>
-                          )}
-
-                          {/* Testing feedback / diagnostic output */}
-                          {isTesting && (
-                            <p className="text-xs text-slate-400">
-                              Verificando fonte no servidor...
-                            </p>
-                          )}
-
-                          {testError && (
-                            <div className="flex items-center justify-between gap-2 rounded-lg border border-rose-500/30 bg-rose-950/25 px-3 py-2 text-xs text-rose-300">
-                              <span role="alert">{testError}</span>
-                              <button
-                                type="button"
-                                onClick={() =>
-                                  setEpisodeTestErrors((prev) => {
-                                    const next = { ...prev };
-                                    delete next[ep.id];
-                                    return next;
-                                  })
-                                }
-                                aria-label="Fechar erro do teste"
-                                className="p-1 text-rose-300/70 hover:text-rose-200 cursor-pointer"
-                              >
-                                <X className="w-3.5 h-3.5" />
-                              </button>
-                            </div>
-                          )}
-
-                          {/* Sources list & Vercel Blob mirror controls */}
-                          <div className="rounded-lg bg-[#090B10] border border-white/10 p-3 space-y-2.5">
-                            <div className="flex flex-wrap items-center justify-between gap-2">
-                              <span className="text-[11px] font-medium uppercase tracking-wider text-slate-400">
-                                Fontes do episódio
-                              </span>
-                              {hasMirror && (
-                                <span className="inline-flex items-center px-2 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-medium text-emerald-300">
-                                  espelho ativo
-                                </span>
-                              )}
-                            </div>
-
-                            <ul className="space-y-1.5">
-                              {episodeSources.map((src) => {
-                                const slotExpirable =
-                                  src.isExpirable ||
-                                  Boolean(
-                                    testReports?.find((report) => report.slot === src.slot)
-                                      ?.isExpirable
-                                  );
-                                return (
-                                  <li
-                                    key={`${ep.id}-slot-${src.slot}`}
-                                    className="flex items-center gap-2 text-[11px] min-w-0"
-                                  >
-                                    <span className="font-mono text-slate-300 shrink-0">
-                                      {`Fonte ${src.slot}`}
-                                    </span>
-                                    <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 font-mono text-[10px] text-slate-300 shrink-0">
-                                      {src.kind}
-                                    </span>
-                                    {src.isMirror && (
-                                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-[10px] font-semibold text-emerald-300 shrink-0">
-                                        espelho
-                                      </span>
-                                    )}
-                                    {src.r2Inspection.badgeLabel && (
-                                      <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[10px] font-semibold text-amber-300 shrink-0">
-                                        {src.r2Inspection.badgeLabel}
-                                      </span>
-                                    )}
-                                    {(slotExpirable || src.r2Inspection.isR2) && (
-                                      <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[10px] font-semibold text-amber-300 shrink-0">
-                                        expirável
-                                      </span>
-                                    )}
-                                    <span
-                                      className="font-mono text-slate-400 truncate min-w-0 flex-1"
-                                      title={src.url}
-                                    >
-                                      {src.url}
-                                    </span>
-                                  </li>
-                                );
-                              })}
-                            </ul>
-
-                            <div className="pt-2 border-t border-white/10 space-y-2">
-                              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
-                                <input
-                                  type="url"
-                                  value={mirrorUrlValue}
-                                  disabled={isMirroring || mirrorBlocked}
-                                  onChange={(e) =>
-                                    setMirrorInputs((prev) => ({
-                                      ...prev,
-                                      [ep.id]: e.target.value,
-                                    }))
-                                  }
-                                  aria-label={`URL de origem para guardar cópia de ${epLabel}`}
-                                  placeholder="https://...r2.cloudflarestorage.com/... (link fresco)"
-                                  className="flex-1 min-w-0 h-9 px-3 rounded-lg bg-[#11151E] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 disabled:opacity-50"
-                                />
-                                <button
-                                  type="button"
-                                  disabled={isMirroring || mirrorBlocked}
-                                  onClick={() => void handleMirrorEpisode(ep, hasMirror)}
-                                  className="h-9 px-3 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed text-xs font-medium text-white inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
-                                >
-                                  <Download className="w-3.5 h-3.5" />
-                                  {isMirroring ? 'Guardando...' : 'Guardar cópia'}
-                                </button>
-                              </div>
-
-                              {hasMirror && (
-                                <label className="inline-flex items-center gap-2 text-[11px] text-slate-300 cursor-pointer select-none">
-                                  <input
-                                    type="checkbox"
-                                    checked={forceRedo}
-                                    disabled={isMirroring}
-                                    onChange={(e) =>
-                                      setMirrorForceMap((prev) => ({
-                                        ...prev,
-                                        [ep.id]: e.target.checked,
-                                      }))
-                                    }
-                                    className="rounded border-white/20 bg-[#11151E] text-rose-500 focus:ring-rose-500"
-                                  />
-                                  <span>
-                                    Forçar refazer espelho (episódio já possui espelho; bloqueado até marcar)
-                                  </span>
-                                </label>
-                              )}
-
-                              {mirrorError && (
-                                <p className="text-xs text-rose-400" role="alert">
-                                  {mirrorError}
-                                </p>
-                              )}
-
-                              {mirrorSuccess && (
-                                <p className="text-xs text-emerald-300">
-                                  {mirrorSuccess}
-                                </p>
-                              )}
-                            </div>
-                          </div>
-
-                          {testReports && testReports.length > 0 && (
-                            <div className="space-y-1.5">
-                              <div className="flex items-center justify-between">
-                                <span className="text-[11px] font-medium text-slate-400">
-                                  Resultado do teste de fonte
-                                </span>
-                                <button
-                                  type="button"
-                                  onClick={() =>
-                                    setEpisodeTests((prev) => {
-                                      const next = { ...prev };
-                                      delete next[ep.id];
-                                      return next;
-                                    })
-                                  }
-                                  className="text-[11px] text-slate-400 hover:text-white cursor-pointer"
-                                >
-                                  Fechar
-                                </button>
-                              </div>
-                              <SourceDiagnosticTable reports={testReports} />
-                            </div>
-                          )}
-                        </li>
-                      );
-                    })}
-                  </ul>
-                </div>
-              </section>
             ) : (
-              /* VIEW 3: Main Anime Library Screen */
+              /* VIEW 2: Grouped Expandable & Collapsible Anime Library */
               <section className="space-y-4">
                 {/* Library title + totals + primary action */}
                 <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-3">
                   <div>
-                    <h1 className="text-xl sm:text-2xl font-semibold tracking-tight text-white">
+                    <h1 className="text-xl sm:text-2xl font-bold tracking-tight text-white">
                       Biblioteca de episódios
                     </h1>
                     <p className="text-xs sm:text-sm text-slate-400 mt-0.5 tabular-nums">
@@ -3069,139 +2798,753 @@ function AdminPage() {
                     type="button"
                     disabled={!initialState.databaseConfigured}
                     onClick={() => handleOpenCreateForm()}
-                    className="h-10 sm:h-10 px-4 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-sm font-medium text-white inline-flex items-center justify-center gap-2 transition-colors cursor-pointer shrink-0"
+                    className="h-11 sm:h-10 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-sm font-medium text-white inline-flex items-center justify-center gap-2 transition-colors cursor-pointer shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500"
                   >
                     <Plus className="w-4 h-4" />
                     Novo episódio
                   </button>
                 </div>
 
-                {/* Search + Sort bar */}
+                {/* Search + Sort + Expand/Collapse controls */}
                 {initialState.episodes.length > 0 && (
-                  <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
+                  <div className="flex flex-col md:flex-row items-stretch md:items-center gap-2.5">
                     <div className="relative flex-1 min-w-0">
-                      <Search className="w-4 h-4 text-slate-500 absolute left-3 top-1/2 -translate-y-1/2 pointer-events-none" />
+                      <Search className="w-4 h-4 text-slate-500 absolute left-3.5 top-1/2 -translate-y-1/2 pointer-events-none" />
                       <input
                         type="search"
                         value={searchQuery}
-                        onChange={(e) => setSearchQuery(e.target.value)}
-                        placeholder="Pesquisar anime..."
-                        aria-label="Pesquisar anime"
-                        className="w-full h-10 pl-9 pr-9 rounded-lg bg-[#11151E] border border-white/10 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
+                        onChange={(e) => {
+                          setSearchQuery(e.target.value);
+                          setGroupPage(1);
+                        }}
+                        placeholder="Pesquisar anime, episódio ou ID..."
+                        aria-label="Pesquisar anime ou episódio"
+                        className="w-full h-11 sm:h-10 pl-10 pr-10 rounded-xl bg-[#11151E] border border-white/[0.08] hover:border-white/20 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-colors"
                       />
                       {searchQuery && (
                         <button
                           type="button"
-                          onClick={() => setSearchQuery('')}
+                          onClick={() => {
+                            setSearchQuery('');
+                            setGroupPage(1);
+                          }}
                           aria-label="Limpar pesquisa"
-                          className="absolute right-2 top-1/2 -translate-y-1/2 p-1.5 text-slate-400 hover:text-white cursor-pointer"
+                          className="absolute right-1.5 top-1/2 -translate-y-1/2 w-9 h-9 flex items-center justify-center rounded-lg text-slate-400 hover:text-white hover:bg-white/5 cursor-pointer"
                         >
                           <X className="w-3.5 h-3.5" />
                         </button>
                       )}
                     </div>
 
-                    <div
-                      role="group"
-                      aria-label="Ordenar animes"
-                      className="inline-flex p-1 rounded-lg bg-[#11151E] border border-white/10 shrink-0"
-                    >
-                      <button
-                        type="button"
-                        onClick={() => setSortBy('recent')}
-                        aria-pressed={sortBy === 'recent'}
-                        className={`flex-1 sm:flex-initial px-3 h-8 rounded-md text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
-                          sortBy === 'recent'
-                            ? 'bg-white/10 text-white'
-                            : 'text-slate-400 hover:text-slate-200'
-                        }`}
+                    <div className="flex flex-wrap sm:flex-nowrap items-center gap-2 shrink-0">
+                      <div
+                        role="group"
+                        aria-label="Ordenar animes"
+                        className="flex-1 sm:flex-initial inline-flex p-1 rounded-xl bg-[#11151E] border border-white/[0.08]"
                       >
-                        Mais recentes
-                      </button>
-                      <button
-                        type="button"
-                        onClick={() => setSortBy('name')}
-                        aria-pressed={sortBy === 'name'}
-                        className={`flex-1 sm:flex-initial px-3 h-8 rounded-md text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
-                          sortBy === 'name'
-                            ? 'bg-white/10 text-white'
-                            : 'text-slate-400 hover:text-slate-200'
-                        }`}
-                      >
-                        Nome (A–Z)
-                      </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSortBy('recent');
+                            setGroupPage(1);
+                          }}
+                          aria-pressed={sortBy === 'recent'}
+                          className={`flex-1 sm:flex-initial px-3 min-h-[36px] sm:h-8 rounded-lg text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                            sortBy === 'recent'
+                              ? 'bg-white/10 text-white'
+                              : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          Mais recentes
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => {
+                            setSortBy('name');
+                            setGroupPage(1);
+                          }}
+                          aria-pressed={sortBy === 'name'}
+                          className={`flex-1 sm:flex-initial px-3 min-h-[36px] sm:h-8 rounded-lg text-xs font-medium transition-colors cursor-pointer whitespace-nowrap ${
+                            sortBy === 'name'
+                              ? 'bg-white/10 text-white'
+                              : 'text-slate-400 hover:text-slate-200'
+                          }`}
+                        >
+                          Nome (A–Z)
+                        </button>
+                      </div>
+
+                      {pagedGroups.items.length > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleToggleAllGroups}
+                          className="min-h-[44px] sm:h-10 px-3 rounded-xl border border-white/[0.08] bg-[#11151E] hover:bg-white/[0.06] text-xs font-medium text-slate-200 inline-flex items-center justify-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors"
+                        >
+                          {allVisibleExpanded ? (
+                            <>
+                              <ChevronsDownUp className="w-3.5 h-3.5 text-slate-400" />
+                              <span>Recolher todos</span>
+                            </>
+                          ) : (
+                            <>
+                              <ChevronsUpDown className="w-3.5 h-3.5 text-slate-400" />
+                              <span>Expandir todos</span>
+                            </>
+                          )}
+                        </button>
+                      )}
                     </div>
                   </div>
                 )}
 
-                {/* Empty state or anime cards */}
+                {/* Empty state, Search no-match, or Expandable Anime Groups */}
                 {initialState.episodes.length === 0 ? (
-                  <div className="bg-[#11151E] border border-white/10 rounded-xl px-6 py-14 text-center">
-                    <Film className="w-9 h-9 text-slate-600 mx-auto mb-3" />
-                    <p className="text-sm font-medium text-slate-200">
-                      Nenhum episódio cadastrado ainda
-                    </p>
-                    <p className="mt-1 text-xs text-slate-400">
-                      Cadastre o primeiro episódio para organizar sua biblioteca por anime.
-                    </p>
+                  <div className="bg-[#11151E] border border-white/[0.08] rounded-2xl px-6 py-14 text-center space-y-3">
+                    <Film className="w-9 h-9 text-slate-600 mx-auto" />
+                    <div>
+                      <p className="text-sm font-medium text-slate-200">
+                        Nenhum episódio cadastrado ainda
+                      </p>
+                      <p className="mt-1 text-xs text-slate-400">
+                        Cadastre o primeiro episódio para organizar sua biblioteca por anime.
+                      </p>
+                    </div>
+                    <button
+                      type="button"
+                      disabled={!initialState.databaseConfigured}
+                      onClick={() => handleOpenCreateForm()}
+                      className="h-10 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-xs font-medium text-white inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                    >
+                      <Plus className="w-4 h-4" />
+                      Cadastrar primeiro episódio
+                    </button>
                   </div>
                 ) : filteredGroups.length === 0 ? (
-                  <div className="bg-[#11151E] border border-white/10 rounded-xl px-6 py-12 text-center space-y-3">
+                  <div className="bg-[#11151E] border border-white/[0.08] rounded-2xl px-6 py-12 text-center space-y-3">
                     <p className="text-sm text-slate-300">
-                      Nenhum anime encontrado para “{searchQuery}”.
+                      Nenhum anime ou episódio encontrado para “{searchQuery}”.
                     </p>
                     <button
                       type="button"
-                      onClick={() => setSearchQuery('')}
-                      className="h-9 px-3.5 rounded-lg border border-white/10 text-xs font-medium text-slate-200 hover:bg-white/5 cursor-pointer"
+                      onClick={() => {
+                        setSearchQuery('');
+                        setGroupPage(1);
+                      }}
+                      className="h-10 px-4 rounded-xl border border-white/10 text-xs font-medium text-slate-200 hover:bg-white/5 cursor-pointer"
                     >
                       Limpar pesquisa
                     </button>
                   </div>
                 ) : (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-3">
-                    {filteredGroups.map((group) => (
-                      <button
-                        key={group.key}
-                        type="button"
-                        onClick={() => {
-                          setSelectedAnimeKey(group.key);
-                          setOpenMenuId(null);
-                          setConfirmDeleteId(null);
-                        }}
-                        className="group w-full text-left bg-[#11151E] hover:bg-[#161B27] border border-white/10 hover:border-white/20 rounded-xl p-3.5 flex items-center gap-3.5 transition-colors cursor-pointer"
-                      >
-                        {group.isUnassigned && !group.representativePosterUrl ? (
-                          <div className="w-20 h-14 rounded-lg bg-[#090B10] border border-white/10 flex items-center justify-center shrink-0">
-                            <FolderOpen className="w-5 h-5 text-slate-500" />
+                  <div ref={menuContainerRef} className="space-y-3">
+                    {pagedGroups.items.map((group) => {
+                      const expanded = isGroupExpanded(group.key);
+                      const currentEpPage = episodePageMap[group.key] ?? 1;
+                      const pagedGroupEpisodes = paginateItems(
+                        group.episodes,
+                        currentEpPage,
+                        EPISODES_PER_GROUP_PAGE
+                      );
+
+                      return (
+                        <article
+                          key={group.key}
+                          className="bg-[#11151E] border border-white/[0.08] rounded-2xl transition-colors"
+                        >
+                          {/* Group accordion header */}
+                          <div className="flex items-center justify-between gap-2 pr-3 sm:pr-4">
+                            <button
+                              type="button"
+                              aria-expanded={expanded}
+                              onClick={() => toggleGroup(group.key)}
+                              className="flex-1 min-w-0 p-3.5 sm:p-4 flex items-center gap-3.5 text-left hover:bg-white/[0.02] rounded-l-2xl cursor-pointer focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/70 transition-colors"
+                            >
+                              {group.isUnassigned && !group.representativePosterUrl ? (
+                                <div className="w-16 h-12 sm:w-20 sm:h-14 rounded-xl bg-[#090B10] border border-white/10 flex items-center justify-center shrink-0">
+                                  <FolderOpen className="w-5 h-5 text-slate-500" />
+                                </div>
+                              ) : (
+                                <AnimeThumbnail
+                                  posterUrl={group.representativePosterUrl}
+                                  alt={group.name}
+                                  className="w-16 h-12 sm:w-20 sm:h-14 rounded-xl"
+                                />
+                              )}
+
+                              <div className="min-w-0 flex-1">
+                                <div className="flex items-center gap-2 min-w-0">
+                                  <h2
+                                    className={`text-sm sm:text-base font-semibold truncate ${
+                                      group.key === UNASSIGNED_ANIME_KEY
+                                        ? 'text-slate-300'
+                                        : 'text-white'
+                                    }`}
+                                  >
+                                    {group.name}
+                                  </h2>
+                                </div>
+                                <p className="mt-0.5 text-xs text-slate-400 tabular-nums truncate">
+                                  {group.episodeCount}{' '}
+                                  {group.episodeCount === 1 ? 'episódio' : 'episódios'}
+                                  <span aria-hidden="true"> · </span>
+                                  <span className="text-slate-500">
+                                    {group.isUnassigned
+                                      ? 'Edite para associar um anime'
+                                      : `Atualizado em ${formatDatePtBr(group.latestCreatedAt)}`}
+                                  </span>
+                                </p>
+                              </div>
+                            </button>
+
+                            <div className="flex items-center gap-1.5 shrink-0">
+                              <button
+                                type="button"
+                                disabled={!initialState.databaseConfigured}
+                                onClick={() =>
+                                  handleOpenCreateForm(group.isUnassigned ? '' : group.name)
+                                }
+                                aria-label={`Novo episódio em ${group.name}`}
+                                title={`Novo episódio em ${group.name}`}
+                                className="min-h-[42px] min-w-[42px] sm:min-w-0 sm:h-9 sm:px-3 rounded-xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] disabled:opacity-40 text-xs font-medium text-slate-200 inline-flex items-center justify-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
+                              >
+                                <Plus className="w-3.5 h-3.5" />
+                                <span className="hidden sm:inline">Novo episódio</span>
+                              </button>
+
+                              <button
+                                type="button"
+                                aria-expanded={expanded}
+                                aria-label={
+                                  expanded ? `Recolher ${group.name}` : `Expandir ${group.name}`
+                                }
+                                onClick={() => toggleGroup(group.key)}
+                                className="min-h-[42px] min-w-[42px] sm:h-9 sm:w-9 rounded-xl text-slate-400 hover:text-white hover:bg-white/[0.06] inline-flex items-center justify-center cursor-pointer transition-colors"
+                              >
+                                <ChevronDown
+                                  className={`w-4 h-4 transition-transform duration-200 ${
+                                    expanded ? 'rotate-180 text-slate-200' : ''
+                                  }`}
+                                />
+                              </button>
+                            </div>
                           </div>
-                        ) : (
-                          <AnimeThumbnail
-                            posterUrl={group.representativePosterUrl}
-                            alt={group.name}
-                            className="w-20 h-14"
-                          />
-                        )}
 
-                        <div className="min-w-0 flex-1">
-                          <h2
-                            className={`text-sm font-semibold truncate ${
-                              group.key === UNASSIGNED_ANIME_KEY
-                                ? 'text-slate-300'
-                                : 'text-white'
-                            }`}
+                          {/* Expanded Episodes List */}
+                          {expanded && (
+                            <div className="border-t border-white/[0.08]">
+                              <ul className="divide-y divide-white/[0.06]">
+                                {pagedGroupEpisodes.items.map((ep) => {
+                                  const sourceCount = countEpisodeSources(ep);
+                                  const isDeleting = confirmDeleteId === ep.id;
+                                  const isBusyDeleting = deleteBusyId === ep.id;
+                                  const isMenuOpen = openMenuId === ep.id;
+                                  const hasTitle = Boolean(ep.title && ep.title.trim());
+                                  const epLabel = formatEpisodeDisplayTitle(ep);
+                                  const isTesting = episodeTestingId === ep.id;
+                                  const testReports = episodeTests[ep.id];
+                                  const testError = episodeTestErrors[ep.id];
+                                  const episodeSources = getEpisodeSourcesList(ep);
+                                  const hasMirror = episodeSources.some((src) => src.isMirror);
+                                  const forceRedo = Boolean(mirrorForceMap[ep.id]);
+                                  const mirrorBlocked = hasMirror && !forceRedo;
+                                  const isMirroring = mirrorBusyId === ep.id;
+                                  const mirrorUrlValue = mirrorInputs[ep.id] ?? '';
+                                  const mirrorError = mirrorErrorMap[ep.id];
+                                  const mirrorSuccess = mirrorSuccessMap[ep.id];
+                                  const isMirrorPanelOpen =
+                                    Boolean(openMirrorPanelIds[ep.id]) ||
+                                    isMirroring ||
+                                    Boolean(mirrorError) ||
+                                    Boolean(mirrorSuccess);
+                                  const hasHashSource = episodeSources.some((src) =>
+                                    hasUrlHashParams(src.url)
+                                  );
+                                  const hasExpirableSource =
+                                    episodeSources.some((src) => src.isExpirable) ||
+                                    Boolean(
+                                      testReports?.some(
+                                        (report) => report.isExpirable && !isR2StorageUrl(report.url)
+                                      )
+                                    );
+                                  const r2Badge = episodeSources.find(
+                                    (src) => src.r2Inspection.badgeLabel
+                                  )?.r2Inspection.badgeLabel;
+
+                                  return (
+                                    <li
+                                      key={ep.id}
+                                      className="px-3.5 sm:px-5 py-3.5 sm:py-4 hover:bg-white/[0.015] transition-colors space-y-3"
+                                    >
+                                      <div className="flex flex-col sm:flex-row sm:items-start sm:justify-between gap-3">
+                                        {/* Episode info */}
+                                        <div className="min-w-0 flex-1 space-y-1.5">
+                                          <div className="flex flex-wrap items-center gap-2 min-w-0">
+                                            {ep.episode_number && (
+                                              <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-white/[0.06] border border-white/10 text-xs font-mono font-semibold text-slate-100 shrink-0 tabular-nums">
+                                                Ep. {ep.episode_number}
+                                              </span>
+                                            )}
+                                            {hasTitle ? (
+                                              <h3 className="text-sm font-medium text-white truncate min-w-0">
+                                                {ep.title}
+                                              </h3>
+                                            ) : !ep.episode_number ? (
+                                              <h3 className="text-sm font-medium text-slate-300 truncate min-w-0">
+                                                {epLabel}
+                                              </h3>
+                                            ) : null}
+                                          </div>
+
+                                          <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-400 tabular-nums">
+                                            <span>
+                                              {sourceCount} {sourceCount === 1 ? 'fonte' : 'fontes'}
+                                            </span>
+                                            <span aria-hidden="true">·</span>
+                                            <span>{formatDatePtBr(ep.created_at)}</span>
+
+                                            {hasMirror && (
+                                              <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-medium text-emerald-300">
+                                                espelho
+                                              </span>
+                                            )}
+                                            {r2Badge && (
+                                              <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-[10px] font-medium text-amber-300">
+                                                {r2Badge}
+                                              </span>
+                                            )}
+                                            {(hasExpirableSource ||
+                                              episodeSources.some((src) => src.r2Inspection.isR2)) && (
+                                              <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-[10px] font-medium text-amber-300">
+                                                expirável
+                                              </span>
+                                            )}
+                                          </div>
+
+                                          {hasHashSource && (
+                                            <p className="inline-flex items-center gap-1.5 text-[11px] text-amber-300">
+                                              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                              <span>
+                                                link com hash, use sempre um link novo e não reaproveite
+                                              </span>
+                                            </p>
+                                          )}
+
+                                          {hasExpirableSource && (
+                                            <p className="inline-flex items-center gap-1.5 text-[11px] text-amber-300">
+                                              <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                              <span>
+                                                fonte expirável: M3U8 com X-Amz-Expires, token= ou sig= pode vencer
+                                              </span>
+                                            </p>
+                                          )}
+                                        </div>
+
+                                        {/* Episode actions */}
+                                        <div className="flex items-center flex-wrap sm:flex-nowrap gap-1.5 shrink-0">
+                                          <button
+                                            type="button"
+                                            onClick={() => void copyLink(ep.id, ep.public_url)}
+                                            aria-label={`Copiar link de ${epLabel}`}
+                                            className="min-h-[40px] sm:h-9 px-3 rounded-xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
+                                          >
+                                            {copiedId === ep.id ? (
+                                              <>
+                                                <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                                <span>Copiado</span>
+                                              </>
+                                            ) : (
+                                              <>
+                                                <Copy className="w-3.5 h-3.5" />
+                                                <span>Copiar link</span>
+                                              </>
+                                            )}
+                                          </button>
+
+                                          <a
+                                            href={`/e/${encodeURIComponent(ep.id)}`}
+                                            target="_blank"
+                                            rel="noreferrer"
+                                            aria-label={`Abrir ${epLabel}`}
+                                            className="min-h-[40px] sm:h-9 px-3 rounded-xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
+                                          >
+                                            <ExternalLink className="w-3.5 h-3.5" />
+                                            <span>Abrir</span>
+                                          </a>
+
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setOpenMirrorPanelIds((prev) => ({
+                                                ...prev,
+                                                [ep.id]: !isMirrorPanelOpen,
+                                              }))
+                                            }
+                                            aria-expanded={isMirrorPanelOpen}
+                                            className={`min-h-[40px] sm:h-9 px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors ${
+                                              isMirrorPanelOpen
+                                                ? 'border-rose-500/40 bg-rose-600/15 text-rose-200'
+                                                : 'border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-slate-200'
+                                            }`}
+                                          >
+                                            <Download className="w-3.5 h-3.5" />
+                                            <span>Espelho</span>
+                                          </button>
+
+                                          {/* Three-dots secondary actions menu */}
+                                          <div className="relative" data-episode-menu-root="true">
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                setOpenMenuId((curr) => (curr === ep.id ? null : ep.id))
+                                              }
+                                              aria-label={`Mais ações para ${epLabel}`}
+                                              aria-haspopup="menu"
+                                              aria-expanded={isMenuOpen}
+                                              className="min-h-[40px] min-w-[40px] sm:h-9 sm:w-9 rounded-xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-slate-300 hover:text-white inline-flex items-center justify-center cursor-pointer transition-colors"
+                                            >
+                                              <MoreVertical className="w-4 h-4" />
+                                            </button>
+
+                                            {isMenuOpen && (
+                                              <div
+                                                role="menu"
+                                                aria-label={`Ações de ${epLabel}`}
+                                                className="absolute right-0 top-full mt-1.5 z-30 w-48 rounded-xl bg-[#0D1018] border border-white/15 shadow-xl py-1"
+                                              >
+                                                <button
+                                                  type="button"
+                                                  role="menuitem"
+                                                  onClick={() => handleEditStart(ep)}
+                                                  className="w-full px-3.5 py-2.5 text-left text-xs font-medium text-slate-200 hover:bg-white/5 inline-flex items-center gap-2.5 cursor-pointer"
+                                                >
+                                                  <Pencil className="w-3.5 h-3.5 text-slate-400" />
+                                                  Editar
+                                                </button>
+
+                                                <button
+                                                  type="button"
+                                                  role="menuitem"
+                                                  disabled={isTesting}
+                                                  onClick={() => void handleTestEpisodeSources(ep)}
+                                                  className="w-full px-3.5 py-2.5 text-left text-xs font-medium text-slate-200 hover:bg-white/5 disabled:opacity-50 inline-flex items-center gap-2.5 cursor-pointer"
+                                                >
+                                                  <Activity className="w-3.5 h-3.5 text-slate-400" />
+                                                  {isTesting ? 'Testando fonte...' : 'Testar fonte'}
+                                                </button>
+
+                                                <div className="my-1 border-t border-white/10" />
+
+                                                <button
+                                                  type="button"
+                                                  role="menuitem"
+                                                  onClick={() => {
+                                                    setOpenMenuId(null);
+                                                    setConfirmDeleteId(ep.id);
+                                                  }}
+                                                  className="w-full px-3.5 py-2.5 text-left text-xs font-medium text-rose-300 hover:bg-rose-500/10 inline-flex items-center gap-2.5 cursor-pointer"
+                                                >
+                                                  <Trash2 className="w-3.5 h-3.5" />
+                                                  Excluir
+                                                </button>
+                                              </div>
+                                            )}
+                                          </div>
+                                        </div>
+                                      </div>
+
+                                      {/* Delete confirmation bar */}
+                                      {isDeleting && (
+                                        <div className="flex flex-wrap items-center justify-between gap-2.5 rounded-xl border border-rose-500/30 bg-rose-950/25 px-3.5 py-2.5">
+                                          <span className="text-xs text-rose-200">
+                                            Confirmar exclusão deste episódio?
+                                          </span>
+                                          <div className="flex items-center gap-2">
+                                            <button
+                                              type="button"
+                                              onClick={() => setConfirmDeleteId(null)}
+                                              className="min-h-[36px] sm:h-8 px-3 rounded-lg border border-white/10 text-xs text-slate-300 hover:bg-white/5 cursor-pointer"
+                                            >
+                                              Cancelar
+                                            </button>
+                                            <button
+                                              type="button"
+                                              disabled={isBusyDeleting}
+                                              onClick={() => void handleConfirmDelete(ep.id)}
+                                              className="min-h-[36px] sm:h-8 px-3 rounded-lg bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-xs font-medium text-white cursor-pointer"
+                                            >
+                                              {isBusyDeleting ? 'Excluindo...' : 'Confirmar'}
+                                            </button>
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {/* Testing feedback / diagnostic output */}
+                                      {isTesting && (
+                                        <p className="text-xs text-slate-400 inline-flex items-center gap-2">
+                                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                          Verificando fonte no servidor...
+                                        </p>
+                                      )}
+
+                                      {testError && (
+                                        <div className="flex items-center justify-between gap-2 rounded-xl border border-rose-500/30 bg-rose-950/25 px-3.5 py-2 text-xs text-rose-300">
+                                          <span role="alert">{testError}</span>
+                                          <button
+                                            type="button"
+                                            onClick={() =>
+                                              setEpisodeTestErrors((prev) => {
+                                                const next = { ...prev };
+                                                delete next[ep.id];
+                                                return next;
+                                              })
+                                            }
+                                            aria-label="Fechar erro do teste"
+                                            className="p-1 text-rose-300/70 hover:text-rose-200 cursor-pointer"
+                                          >
+                                            <X className="w-3.5 h-3.5" />
+                                          </button>
+                                        </div>
+                                      )}
+
+                                      {/* Collapsible Sources list & Vercel Blob mirror controls */}
+                                      {isMirrorPanelOpen && (
+                                        <div className="rounded-xl bg-[#090B10] border border-white/[0.08] p-3.5 space-y-3">
+                                          <div className="flex flex-wrap items-center justify-between gap-2">
+                                            <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                                              Fontes do episódio
+                                            </span>
+                                            {hasMirror && (
+                                              <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-medium text-emerald-300">
+                                                espelho ativo
+                                              </span>
+                                            )}
+                                          </div>
+
+                                          <ul className="space-y-1.5">
+                                            {episodeSources.map((src) => {
+                                              const slotExpirable =
+                                                src.isExpirable ||
+                                                Boolean(
+                                                  testReports?.find(
+                                                    (report) => report.slot === src.slot
+                                                  )?.isExpirable
+                                                );
+                                              return (
+                                                <li
+                                                  key={`${ep.id}-slot-${src.slot}`}
+                                                  className="flex flex-wrap sm:flex-nowrap items-center gap-2 text-[11px] min-w-0"
+                                                >
+                                                  <span className="font-mono text-slate-300 shrink-0">
+                                                    {`Fonte ${src.slot}`}
+                                                  </span>
+                                                  <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 font-mono text-[10px] text-slate-300 shrink-0">
+                                                    {src.kind}
+                                                  </span>
+                                                  {src.isMirror && (
+                                                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-[10px] font-semibold text-emerald-300 shrink-0">
+                                                      espelho
+                                                    </span>
+                                                  )}
+                                                  {src.r2Inspection.badgeLabel && (
+                                                    <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[10px] font-semibold text-amber-300 shrink-0">
+                                                      {src.r2Inspection.badgeLabel}
+                                                    </span>
+                                                  )}
+                                                  {(slotExpirable || src.r2Inspection.isR2) && (
+                                                    <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[10px] font-semibold text-amber-300 shrink-0">
+                                                      expirável
+                                                    </span>
+                                                  )}
+                                                  <span
+                                                    className="font-mono text-slate-400 truncate min-w-0 flex-1"
+                                                    title={src.url}
+                                                  >
+                                                    {src.url}
+                                                  </span>
+                                                </li>
+                                              );
+                                            })}
+                                          </ul>
+
+                                          <div className="pt-2.5 border-t border-white/[0.08] space-y-2.5">
+                                            <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                                              <input
+                                                type="url"
+                                                value={mirrorUrlValue}
+                                                disabled={isMirroring || mirrorBlocked}
+                                                onChange={(e) =>
+                                                  setMirrorInputs((prev) => ({
+                                                    ...prev,
+                                                    [ep.id]: e.target.value,
+                                                  }))
+                                                }
+                                                aria-label={`URL de origem para guardar cópia de ${epLabel}`}
+                                                placeholder="https://...r2.cloudflarestorage.com/... (link fresco)"
+                                                className="flex-1 min-w-0 h-10 sm:h-9 px-3 rounded-xl bg-[#11151E] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 disabled:opacity-50"
+                                              />
+                                              <button
+                                                type="button"
+                                                disabled={isMirroring || mirrorBlocked}
+                                                onClick={() => void handleMirrorEpisode(ep, hasMirror)}
+                                                className="min-h-[40px] sm:h-9 px-3.5 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 disabled:cursor-not-allowed text-xs font-medium text-white inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                                              >
+                                                {isMirroring ? (
+                                                  <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                                                ) : (
+                                                  <Download className="w-3.5 h-3.5" />
+                                                )}
+                                                {isMirroring ? 'Guardando...' : 'Guardar cópia'}
+                                              </button>
+                                            </div>
+
+                                            {hasMirror && (
+                                              <label className="inline-flex items-center gap-2 text-xs text-slate-300 cursor-pointer select-none">
+                                                <input
+                                                  type="checkbox"
+                                                  checked={forceRedo}
+                                                  disabled={isMirroring}
+                                                  onChange={(e) =>
+                                                    setMirrorForceMap((prev) => ({
+                                                      ...prev,
+                                                      [ep.id]: e.target.checked,
+                                                    }))
+                                                  }
+                                                  className="rounded border-white/20 bg-[#11151E] text-rose-500 focus:ring-rose-500"
+                                                />
+                                                <span>
+                                                  Forçar refazer espelho (episódio já possui espelho; bloqueado até marcar)
+                                                </span>
+                                              </label>
+                                            )}
+
+                                            {mirrorError && (
+                                              <p className="text-xs text-rose-400" role="alert">
+                                                {mirrorError}
+                                              </p>
+                                            )}
+
+                                            {mirrorSuccess && (
+                                              <p className="text-xs text-emerald-300">
+                                                {mirrorSuccess}
+                                              </p>
+                                            )}
+                                          </div>
+                                        </div>
+                                      )}
+
+                                      {testReports && testReports.length > 0 && (
+                                        <div className="space-y-1.5">
+                                          <div className="flex items-center justify-between">
+                                            <span className="text-[11px] font-medium text-slate-400">
+                                              Resultado do teste de fonte
+                                            </span>
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                setEpisodeTests((prev) => {
+                                                  const next = { ...prev };
+                                                  delete next[ep.id];
+                                                  return next;
+                                                })
+                                              }
+                                              className="text-[11px] text-slate-400 hover:text-white cursor-pointer"
+                                            >
+                                              Fechar
+                                            </button>
+                                          </div>
+                                          <SourceDiagnosticTable reports={testReports} />
+                                        </div>
+                                      )}
+                                    </li>
+                                  );
+                                })}
+                              </ul>
+
+                              {/* Inside-group episode pagination when an anime has > EPISODES_PER_GROUP_PAGE */}
+                              {pagedGroupEpisodes.totalPages > 1 && (
+                                <div className="flex flex-wrap items-center justify-between gap-2 px-4 sm:px-5 py-3 border-t border-white/[0.06] bg-[#0D1018]/60 text-xs text-slate-400">
+                                  <span className="tabular-nums">
+                                    Mostrando {pagedGroupEpisodes.startIndex + 1}–
+                                    {pagedGroupEpisodes.endIndex} de {pagedGroupEpisodes.totalItems} episódios
+                                  </span>
+                                  <div className="flex items-center gap-1.5">
+                                    <button
+                                      type="button"
+                                      disabled={pagedGroupEpisodes.page <= 1}
+                                      onClick={() =>
+                                        setEpisodePageMap((prev) => ({
+                                          ...prev,
+                                          [group.key]: Math.max(1, pagedGroupEpisodes.page - 1),
+                                        }))
+                                      }
+                                      className="min-h-[36px] sm:h-8 px-2.5 rounded-lg border border-white/10 hover:bg-white/5 disabled:opacity-40 text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                                    >
+                                      <ChevronLeft className="w-3.5 h-3.5" />
+                                      Anterior
+                                    </button>
+                                    <span className="px-2 tabular-nums font-mono text-slate-300">
+                                      {pagedGroupEpisodes.page}/{pagedGroupEpisodes.totalPages}
+                                    </span>
+                                    <button
+                                      type="button"
+                                      disabled={pagedGroupEpisodes.page >= pagedGroupEpisodes.totalPages}
+                                      onClick={() =>
+                                        setEpisodePageMap((prev) => ({
+                                          ...prev,
+                                          [group.key]: Math.min(
+                                            pagedGroupEpisodes.totalPages,
+                                            pagedGroupEpisodes.page + 1
+                                          ),
+                                        }))
+                                      }
+                                      className="min-h-[36px] sm:h-8 px-2.5 rounded-lg border border-white/10 hover:bg-white/5 disabled:opacity-40 text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                                    >
+                                      Próxima
+                                      <ChevronRight className="w-3.5 h-3.5" />
+                                    </button>
+                                  </div>
+                                </div>
+                              )}
+                            </div>
+                          )}
+                        </article>
+                      );
+                    })}
+
+                    {/* Group-level pagination */}
+                    {pagedGroups.totalPages > 1 && (
+                      <div className="flex flex-wrap items-center justify-between gap-3 pt-2 text-xs text-slate-400">
+                        <span className="tabular-nums">
+                          Mostrando grupos {pagedGroups.startIndex + 1}–{pagedGroups.endIndex} de{' '}
+                          {pagedGroups.totalItems}
+                        </span>
+                        <div className="flex items-center gap-1.5">
+                          <button
+                            type="button"
+                            disabled={pagedGroups.page <= 1}
+                            onClick={() => setGroupPage((p) => Math.max(1, p - 1))}
+                            className="min-h-[40px] sm:h-9 px-3 rounded-xl border border-white/10 bg-[#11151E] hover:bg-white/[0.06] disabled:opacity-40 text-slate-200 inline-flex items-center gap-1 cursor-pointer"
                           >
-                            {group.name}
-                          </h2>
-                          <p className="mt-0.5 text-xs text-slate-400 tabular-nums">
-                            {group.episodeCount}{' '}
-                            {group.episodeCount === 1 ? 'episódio' : 'episódios'}
-                          </p>
+                            <ChevronLeft className="w-3.5 h-3.5" />
+                            Anterior
+                          </button>
+                          <span className="px-2.5 font-mono tabular-nums text-slate-300">
+                            Página {pagedGroups.page} de {pagedGroups.totalPages}
+                          </span>
+                          <button
+                            type="button"
+                            disabled={pagedGroups.page >= pagedGroups.totalPages}
+                            onClick={() =>
+                              setGroupPage((p) => Math.min(pagedGroups.totalPages, p + 1))
+                            }
+                            className="min-h-[40px] sm:h-9 px-3 rounded-xl border border-white/10 bg-[#11151E] hover:bg-white/[0.06] disabled:opacity-40 text-slate-200 inline-flex items-center gap-1 cursor-pointer"
+                          >
+                            Próxima
+                            <ChevronRight className="w-3.5 h-3.5" />
+                          </button>
                         </div>
-
-                        <ChevronRight className="w-4 h-4 text-slate-500 group-hover:text-slate-200 transition-colors shrink-0" />
-                      </button>
-                    ))}
+                      </div>
+                    )}
                   </div>
                 )}
               </section>

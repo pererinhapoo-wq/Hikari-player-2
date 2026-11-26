@@ -65,17 +65,35 @@ export function formatEpisodeDisplayTitle(ep: {
   return 'Episódio';
 }
 
+function extractEpisodeNumericValue(raw: string): number | null {
+  const direct = Number(raw.replace(',', '.'));
+  if (Number.isFinite(direct)) return direct;
+
+  const match = raw.match(/^(?:ep(?:is[oó]dio)?\.?\s*|#)?(\d+(?:[.,]\d+)?)/i);
+  if (!match) return null;
+
+  const parsed = Number(match[1].replace(',', '.'));
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 export function sortAnimeEpisodes(episodes: EpisodeDto[]): EpisodeDto[] {
   return [...episodes].sort((a, b) => {
     const numA = sanitizeEpisodeNumber(a.episode_number);
     const numB = sanitizeEpisodeNumber(b.episode_number);
 
     if (numA && numB) {
-      const parsedA = Number(numA.replace(',', '.'));
-      const parsedB = Number(numB.replace(',', '.'));
-      if (Number.isFinite(parsedA) && Number.isFinite(parsedB) && parsedA !== parsedB) {
-        return parsedA - parsedB;
+      const parsedA = extractEpisodeNumericValue(numA);
+      const parsedB = extractEpisodeNumericValue(numB);
+      if (parsedA !== null && parsedB !== null) {
+        if (parsedA !== parsedB) {
+          return parsedA - parsedB;
+        }
+      } else if (parsedA !== null && parsedB === null) {
+        return -1;
+      } else if (parsedA === null && parsedB !== null) {
+        return 1;
       }
+
       const cmp = numA.localeCompare(numB, 'pt-BR', { numeric: true, sensitivity: 'base' });
       if (cmp !== 0) return cmp;
     } else if (numA && !numB) {
@@ -148,18 +166,8 @@ export function groupEpisodesByAnime(episodes: EpisodeDto[]): AnimeGroup[] {
   }));
 }
 
-export function filterAndSortAnimeGroups(
-  groups: AnimeGroup[],
-  query: string,
-  sortBy: AnimeSortMode
-): AnimeGroup[] {
-  const normalizedQuery = normalizeSearchText(query);
-
-  const filtered = normalizedQuery
-    ? groups.filter((group) => normalizeSearchText(group.name).includes(normalizedQuery))
-    : [...groups];
-
-  return filtered.sort((a, b) => {
+function sortGroups(groups: AnimeGroup[], sortBy: AnimeSortMode): AnimeGroup[] {
+  return [...groups].sort((a, b) => {
     if (a.isUnassigned !== b.isUnassigned) {
       return a.isUnassigned ? 1 : -1;
     }
@@ -174,6 +182,91 @@ export function filterAndSortAnimeGroups(
 
     return a.name.localeCompare(b.name, 'pt-BR', { sensitivity: 'base', numeric: true });
   });
+}
+
+export function filterAndSortAnimeGroups(
+  groups: AnimeGroup[],
+  query: string,
+  sortBy: AnimeSortMode
+): AnimeGroup[] {
+  const normalizedQuery = normalizeSearchText(query);
+
+  const filtered = normalizedQuery
+    ? groups.filter((group) => normalizeSearchText(group.name).includes(normalizedQuery))
+    : [...groups];
+
+  return sortGroups(filtered, sortBy);
+}
+
+export function searchAndSortAnimeGroups(
+  groups: AnimeGroup[],
+  query: string,
+  sortBy: AnimeSortMode
+): AnimeGroup[] {
+  const normalizedQuery = normalizeSearchText(query);
+  if (!normalizedQuery) {
+    return sortGroups(groups, sortBy);
+  }
+
+  const matched: AnimeGroup[] = [];
+  for (const group of groups) {
+    if (normalizeSearchText(group.name).includes(normalizedQuery)) {
+      matched.push(group);
+      continue;
+    }
+
+    const matchingEpisodes = group.episodes.filter((ep) => {
+      const candidates = [
+        ep.title,
+        ep.episode_number,
+        ep.id,
+        formatEpisodeDisplayTitle(ep),
+      ];
+      return candidates.some((field) =>
+        field ? normalizeSearchText(field).includes(normalizedQuery) : false
+      );
+    });
+
+    if (matchingEpisodes.length > 0) {
+      matched.push({
+        ...group,
+        episodes: matchingEpisodes,
+        episodeCount: matchingEpisodes.length,
+      });
+    }
+  }
+
+  return sortGroups(matched, sortBy);
+}
+
+export interface PaginatedResult<T> {
+  items: T[];
+  page: number;
+  totalPages: number;
+  totalItems: number;
+  startIndex: number;
+  endIndex: number;
+}
+
+export function paginateItems<T>(
+  items: T[],
+  requestedPage: number,
+  pageSize: number
+): PaginatedResult<T> {
+  const safeSize = Math.max(1, Math.floor(pageSize));
+  const totalItems = items.length;
+  const totalPages = Math.max(1, Math.ceil(totalItems / safeSize));
+  const page = Math.min(Math.max(1, Math.floor(requestedPage) || 1), totalPages);
+  const startIndex = (page - 1) * safeSize;
+  const endIndex = Math.min(startIndex + safeSize, totalItems);
+  return {
+    items: items.slice(startIndex, endIndex),
+    page,
+    totalPages,
+    totalItems,
+    startIndex,
+    endIndex,
+  };
 }
 
 export function countEpisodeSources(ep: Pick<
