@@ -92,6 +92,7 @@ import {
   EMBED_NO_REFERRER_HOSTS,
   EMBED_PROXIED_HOSTS,
   type ExplicitSourceKind,
+  getEpisodeMirrorInfo,
   getIframeReferrerPolicy,
   type GoogleVideoSourceInspection,
   hasUrlHashParams,
@@ -707,6 +708,21 @@ function AdminPage() {
     resetFormTestState();
   };
 
+  const handleClearPrimarySource = () => {
+    setForm((prev) => ({
+      ...prev,
+      video_url: '',
+      source_kind: '',
+      source_referer: '',
+    }));
+    setFormError(null);
+    setSlotReport(null);
+    setSlotTestError(null);
+    setR2ResolveResult(null);
+    setR2ResolveError(null);
+    setR2AppliedNotice(null);
+  };
+
   const handleTestFormPrimarySource = async () => {
     const trimmed = form.video_url.trim();
     if (!trimmed) return;
@@ -841,11 +857,29 @@ function AdminPage() {
     [thumbCandidates, selectedThumbId]
   );
 
-  const editingEpisodeSources = useMemo(() => {
-    if (!editingId) return [];
-    const ep = initialState.episodes.find((item) => item.id === editingId);
-    return ep ? getEpisodeSourcesList(ep) : [];
+  const editingEpisode = useMemo(() => {
+    if (!editingId) return null;
+    return initialState.episodes.find((item) => item.id === editingId) ?? null;
   }, [editingId, initialState.episodes]);
+
+  const editingEpisodeSources = useMemo(() => {
+    return editingEpisode ? getEpisodeSourcesList(editingEpisode) : [];
+  }, [editingEpisode]);
+
+  const editingOtherSources = useMemo(
+    () => editingEpisodeSources.filter((src) => src.slot !== 1),
+    [editingEpisodeSources]
+  );
+
+  const editingHasFallbackSources = editingOtherSources.length > 0;
+
+  const editingMirrorInfo = useMemo(
+    () =>
+      editingEpisode
+        ? getEpisodeMirrorInfo(editingEpisode)
+        : { hasMirror: false, slot: null, url: null, kind: null, isVercelBlob: false },
+    [editingEpisode]
+  );
 
   const hasAnyThumbnailSource = Boolean(
     form.video_url.trim() || editingEpisodeSources.length > 0
@@ -953,6 +987,13 @@ function AdminPage() {
   const handleSaveEpisode = async (e: FormEvent) => {
     e.preventDefault();
     setFormError(null);
+
+    if (!form.video_url.trim() && !editingHasFallbackSources) {
+      setFormError(
+        'Informe a URL do Player 1 ou mantenha pelo menos uma outra fonte válida no episódio.'
+      );
+      return;
+    }
 
     let openingRange: { opening_start_seconds: number | null; opening_end_seconds: number | null };
     try {
@@ -2173,7 +2214,7 @@ function AdminPage() {
                       <input
                         id="ep-video_url"
                         type="url"
-                        required
+                        required={!editingHasFallbackSources}
                         value={form.video_url}
                         onChange={(e) => {
                           setForm({ ...form, video_url: e.target.value });
@@ -2183,7 +2224,11 @@ function AdminPage() {
                             setR2AppliedNotice(null);
                           }
                         }}
-                        placeholder="https://.../playerricas.php?... ou https://.../index.m3u8"
+                        placeholder={
+                          editingHasFallbackSources
+                            ? 'Player 1 vazio (usando outra fonte salva do episódio)'
+                            : 'https://.../playerricas.php?... ou https://.../index.m3u8'
+                        }
                         className="flex-1 min-w-0 h-11 px-3.5 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-colors"
                       />
                       <select
@@ -2203,7 +2248,30 @@ function AdminPage() {
                         <option value="hls">hls</option>
                         <option value="mp4">mp4</option>
                       </select>
+                      {form.video_url.trim().length > 0 && (
+                        <button
+                          type="button"
+                          onClick={handleClearPrimarySource}
+                          title="Remover a URL e os metadados exclusivos do Player 1"
+                          aria-label="Remover fonte do Player 1"
+                          className="h-11 px-3 rounded-xl border border-rose-500/35 bg-rose-950/25 hover:bg-rose-950/55 text-xs font-medium text-rose-200 inline-flex items-center justify-center gap-1.5 shrink-0 cursor-pointer whitespace-nowrap transition-colors"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          <span>Remover fonte</span>
+                        </button>
+                      )}
                     </div>
+
+                    {editingId && !form.video_url.trim() && editingHasFallbackSources && (
+                      <div
+                        role="status"
+                        className="rounded-xl border border-emerald-500/30 bg-emerald-950/20 px-3.5 py-2.5 text-xs text-emerald-200 leading-relaxed"
+                      >
+                        Player 1 vazio neste formulário. Ao clicar em Salvar alterações, as demais
+                        fontes cadastradas (como a cópia espelhada no Vercel Blob) serão mantidas e
+                        a URL anterior do Player 1 não será restaurada.
+                      </div>
+                    )}
 
                     {/* Diagnostic & R2 Resolution secondary action buttons */}
                     {(primarySourceInfo?.trimmed ||
@@ -2577,6 +2645,63 @@ function AdminPage() {
                             1ª linha:{' '}
                             {slotReport.withHeaders.firstLine ?? slotReport.noHeaders.firstLine}
                           </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Real Vercel Blob mirror URL details while editing */}
+                    {editingId && (
+                      <div className="rounded-xl bg-[#090B10] border border-white/[0.08] p-3.5 space-y-2.5">
+                        {editingMirrorInfo.hasMirror && editingMirrorInfo.url ? (
+                          <>
+                            <div className="flex flex-wrap items-center justify-between gap-2">
+                              <span className="text-xs font-medium text-emerald-300">
+                                {editingMirrorInfo.isVercelBlob
+                                  ? `Cópia armazenada no Vercel Blob · Fonte ${editingMirrorInfo.slot}`
+                                  : `Cópia espelhada ativa · Fonte ${editingMirrorInfo.slot}`}
+                              </span>
+                              <div className="flex items-center gap-1.5">
+                                <button
+                                  type="button"
+                                  onClick={() =>
+                                    void copyLink(
+                                      `form-mirror-${editingId}`,
+                                      editingMirrorInfo.url!
+                                    )
+                                  }
+                                  className="min-h-[34px] sm:h-8 px-2.5 rounded-lg border border-white/15 bg-white/[0.04] hover:bg-white/[0.09] text-[11px] font-medium text-slate-100 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
+                                >
+                                  {copiedId === `form-mirror-${editingId}` ? (
+                                    <>
+                                      <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                      <span>Copiado</span>
+                                    </>
+                                  ) : (
+                                    <>
+                                      <Copy className="w-3.5 h-3.5" />
+                                      <span>Copiar URL do espelho</span>
+                                    </>
+                                  )}
+                                </button>
+                                <a
+                                  href={editingMirrorInfo.url}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="min-h-[34px] sm:h-8 px-2.5 rounded-lg border border-white/15 bg-white/[0.04] hover:bg-white/[0.09] text-[11px] font-medium text-slate-100 inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
+                                >
+                                  <ExternalLink className="w-3.5 h-3.5" />
+                                  <span>Abrir espelho</span>
+                                </a>
+                              </div>
+                            </div>
+                            <div className="p-2.5 rounded-lg bg-black/40 border border-white/10 text-[11px] font-mono text-slate-200 break-all select-all">
+                              {editingMirrorInfo.url}
+                            </div>
+                          </>
+                        ) : (
+                          <p className="text-xs text-slate-400">
+                            Nenhuma cópia espelhada armazenada no Vercel Blob para este episódio.
+                          </p>
                         )}
                       </div>
                     )}
@@ -3071,7 +3196,8 @@ function AdminPage() {
                                   const testReports = episodeTests[ep.id];
                                   const testError = episodeTestErrors[ep.id];
                                   const episodeSources = getEpisodeSourcesList(ep);
-                                  const hasMirror = episodeSources.some((src) => src.isMirror);
+                                  const mirrorInfo = getEpisodeMirrorInfo(ep);
+                                  const hasMirror = mirrorInfo.hasMirror;
                                   const forceRedo = Boolean(mirrorForceMap[ep.id]);
                                   const mirrorBlocked = hasMirror && !forceRedo;
                                   const isMirroring = mirrorBusyId === ep.id;
@@ -3352,12 +3478,67 @@ function AdminPage() {
                                             <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                                               Fontes do episódio
                                             </span>
-                                            {hasMirror && (
+                                            {mirrorInfo.hasMirror && (
                                               <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-emerald-500/15 border border-emerald-500/30 text-[10px] font-medium text-emerald-300">
-                                                espelho ativo
+                                                {mirrorInfo.isVercelBlob
+                                                  ? `Vercel Blob · Fonte ${mirrorInfo.slot}`
+                                                  : `Espelho · Fonte ${mirrorInfo.slot}`}
                                               </span>
                                             )}
                                           </div>
+
+                                          {mirrorInfo.hasMirror && mirrorInfo.url ? (
+                                            <div className="rounded-xl bg-emerald-950/15 border border-emerald-500/25 p-3 space-y-2">
+                                              <div className="flex flex-wrap items-center justify-between gap-2">
+                                                <span className="text-xs font-medium text-emerald-300">
+                                                  {mirrorInfo.isVercelBlob
+                                                    ? `Cópia armazenada no Vercel Blob (Fonte ${mirrorInfo.slot})`
+                                                    : `URL real do espelho (Fonte ${mirrorInfo.slot})`}
+                                                </span>
+                                                <div className="flex items-center gap-1.5">
+                                                  <button
+                                                    type="button"
+                                                    onClick={() =>
+                                                      void copyLink(
+                                                        `list-mirror-${ep.id}`,
+                                                        mirrorInfo.url!
+                                                      )
+                                                    }
+                                                    className="min-h-[34px] sm:h-8 px-2.5 rounded-lg border border-white/15 bg-white/[0.04] hover:bg-white/[0.09] text-[11px] font-medium text-slate-100 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
+                                                  >
+                                                    {copiedId === `list-mirror-${ep.id}` ? (
+                                                      <>
+                                                        <Check className="w-3.5 h-3.5 text-emerald-400" />
+                                                        <span>Copiado</span>
+                                                      </>
+                                                    ) : (
+                                                      <>
+                                                        <Copy className="w-3.5 h-3.5" />
+                                                        <span>Copiar URL do espelho</span>
+                                                      </>
+                                                    )}
+                                                  </button>
+                                                  <a
+                                                    href={mirrorInfo.url}
+                                                    target="_blank"
+                                                    rel="noopener noreferrer"
+                                                    className="min-h-[34px] sm:h-8 px-2.5 rounded-lg border border-white/15 bg-white/[0.04] hover:bg-white/[0.09] text-[11px] font-medium text-slate-100 inline-flex items-center gap-1.5 whitespace-nowrap transition-colors"
+                                                  >
+                                                    <ExternalLink className="w-3.5 h-3.5" />
+                                                    <span>Abrir espelho</span>
+                                                  </a>
+                                                </div>
+                                              </div>
+                                              <div className="p-2 rounded-lg bg-black/40 border border-white/10 text-[11px] font-mono text-slate-200 break-all select-all">
+                                                {mirrorInfo.url}
+                                              </div>
+                                            </div>
+                                          ) : (
+                                            <p className="text-xs text-slate-400">
+                                              Nenhuma cópia espelhada armazenada no Vercel Blob para
+                                              este episódio.
+                                            </p>
+                                          )}
 
                                           <ul className="space-y-1.5">
                                             {episodeSources.map((src) => {

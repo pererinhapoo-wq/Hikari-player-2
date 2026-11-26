@@ -118,7 +118,14 @@ export function generateEpisodeId(length = 21): string {
   return id;
 }
 
-export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInput {
+export interface SanitizeEpisodeOptions {
+  hasPersistedFallbackSources?: boolean;
+}
+
+export function sanitizeEpisodeInput(
+  input: EpisodeWriteInput,
+  options: SanitizeEpisodeOptions = {}
+): EpisodeWriteInput {
   const animeName = sanitizeAnimeName(input.anime_name);
   if (animeName && animeName.length > 160) {
     throw new Error('O nome do anime deve ter no máximo 160 caracteres.');
@@ -147,11 +154,6 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
     throw new Error(`Imagem de capa inválida: ${posterCheck.error}`);
   }
 
-  const primaryCheck = validateHttpUrl(input.video_url ?? '', MAX_VIDEO_SOURCE_URL_LENGTH);
-  if (!primaryCheck.valid || !primaryCheck.normalizedUrl) {
-    throw new Error(`Player 1 inválido: ${primaryCheck.error}`);
-  }
-
   const optionalSlots: Array<[keyof EpisodeWriteInput, string]> = [
     ['video_url_2', 'Player 2'],
     ['video_url_3', 'Player 3'],
@@ -175,6 +177,32 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
       throw new Error(`${label} inválido: ${check.error}`);
     }
     sanitizedOptional[key] = check.normalizedUrl;
+  }
+
+  const hasOtherInputSources = Boolean(
+    sanitizedOptional.video_url_2 ||
+      sanitizedOptional.video_url_3 ||
+      sanitizedOptional.video_url_4 ||
+      sanitizedOptional.video_url_5
+  );
+  const allowEmptyPrimary = hasOtherInputSources || Boolean(options.hasPersistedFallbackSources);
+
+  const rawPrimaryUrl = typeof input.video_url === 'string' ? input.video_url.trim() : '';
+  let normalizedPrimaryUrl = '';
+  let primaryCleared = false;
+
+  if (!rawPrimaryUrl) {
+    if (!allowEmptyPrimary) {
+      throw new Error('Player 1 inválido: URL vazia. Informe ao menos uma fonte de vídeo.');
+    }
+    normalizedPrimaryUrl = '';
+    primaryCleared = true;
+  } else {
+    const primaryCheck = validateHttpUrl(rawPrimaryUrl, MAX_VIDEO_SOURCE_URL_LENGTH);
+    if (!primaryCheck.valid || !primaryCheck.normalizedUrl) {
+      throw new Error(`Player 1 inválido: ${primaryCheck.error}`);
+    }
+    normalizedPrimaryUrl = primaryCheck.normalizedUrl;
   }
 
   const resolveSlotKind = (
@@ -226,22 +254,30 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
     opening_end_seconds: openingRange.opening_end_seconds,
     title,
     poster_url: posterCheck.normalizedUrl,
-    video_url: primaryCheck.normalizedUrl,
+    video_url: normalizedPrimaryUrl,
     video_url_2: sanitizedOptional.video_url_2,
     video_url_3: sanitizedOptional.video_url_3,
     video_url_4: sanitizedOptional.video_url_4,
     video_url_5: sanitizedOptional.video_url_5,
-    source_kind: resolveSlotKind(primaryCheck.normalizedUrl, input.source_kind) ?? null,
+    source_kind: primaryCleared
+      ? null
+      : (resolveSlotKind(normalizedPrimaryUrl, input.source_kind) ?? null),
     source_kind_2: resolveSlotKind(sanitizedOptional.video_url_2, input.source_kind_2),
     source_kind_3: resolveSlotKind(sanitizedOptional.video_url_3, input.source_kind_3),
     source_kind_4: resolveSlotKind(sanitizedOptional.video_url_4, input.source_kind_4),
     source_kind_5: resolveSlotKind(sanitizedOptional.video_url_5, input.source_kind_5),
-    force_proxy: resolveSlotForceProxy(primaryCheck.normalizedUrl, input.force_proxy ?? true) ?? true,
+    force_proxy: primaryCleared
+      ? typeof input.force_proxy === 'boolean'
+        ? input.force_proxy
+        : true
+      : (resolveSlotForceProxy(normalizedPrimaryUrl, input.force_proxy ?? true) ?? true),
     force_proxy_2: resolveSlotForceProxy(sanitizedOptional.video_url_2, input.force_proxy_2),
     force_proxy_3: resolveSlotForceProxy(sanitizedOptional.video_url_3, input.force_proxy_3),
     force_proxy_4: resolveSlotForceProxy(sanitizedOptional.video_url_4, input.force_proxy_4),
     force_proxy_5: resolveSlotForceProxy(sanitizedOptional.video_url_5, input.force_proxy_5),
-    source_referer: resolveSlotReferer(primaryCheck.normalizedUrl, input.source_referer) ?? null,
+    source_referer: primaryCleared
+      ? null
+      : (resolveSlotReferer(normalizedPrimaryUrl, input.source_referer) ?? null),
     source_referer_2: resolveSlotReferer(sanitizedOptional.video_url_2, input.source_referer_2),
     source_referer_3: resolveSlotReferer(sanitizedOptional.video_url_3, input.source_referer_3),
     source_referer_4: resolveSlotReferer(sanitizedOptional.video_url_4, input.source_referer_4),
@@ -718,15 +754,25 @@ export async function createEpisode(
 }
 
 async function resolveEpisodeInputUrls(rawInput: EpisodeWriteInput): Promise<EpisodeWriteInput> {
-  const videoUrl = rawInput.video_url ? (await resolveVideoInputUrl(rawInput.video_url)).finalUrl : rawInput.video_url;
-  const videoUrl2 = rawInput.video_url_2 ? (await resolveVideoInputUrl(rawInput.video_url_2)).finalUrl : rawInput.video_url_2;
-  const videoUrl3 = rawInput.video_url_3 ? (await resolveVideoInputUrl(rawInput.video_url_3)).finalUrl : rawInput.video_url_3;
-  const videoUrl4 = rawInput.video_url_4 ? (await resolveVideoInputUrl(rawInput.video_url_4)).finalUrl : rawInput.video_url_4;
-  const videoUrl5 = rawInput.video_url_5 ? (await resolveVideoInputUrl(rawInput.video_url_5)).finalUrl : rawInput.video_url_5;
+  const videoUrl = rawInput.video_url?.trim()
+    ? (await resolveVideoInputUrl(rawInput.video_url)).finalUrl
+    : (rawInput.video_url ?? '');
+  const videoUrl2 = rawInput.video_url_2?.trim()
+    ? (await resolveVideoInputUrl(rawInput.video_url_2)).finalUrl
+    : rawInput.video_url_2;
+  const videoUrl3 = rawInput.video_url_3?.trim()
+    ? (await resolveVideoInputUrl(rawInput.video_url_3)).finalUrl
+    : rawInput.video_url_3;
+  const videoUrl4 = rawInput.video_url_4?.trim()
+    ? (await resolveVideoInputUrl(rawInput.video_url_4)).finalUrl
+    : rawInput.video_url_4;
+  const videoUrl5 = rawInput.video_url_5?.trim()
+    ? (await resolveVideoInputUrl(rawInput.video_url_5)).finalUrl
+    : rawInput.video_url_5;
 
   return {
     ...rawInput,
-    video_url: videoUrl ?? rawInput.video_url,
+    video_url: videoUrl,
     video_url_2: videoUrl2,
     video_url_3: videoUrl3,
     video_url_4: videoUrl4,
@@ -745,7 +791,6 @@ export async function updateEpisode(
   }
 
   const resolvedRaw = await resolveEpisodeInputUrls(rawInput);
-  const input = sanitizeEpisodeInput(resolvedRaw);
   const sql = sqlOverride ?? (getSql() as unknown as DiagnosticSqlTag);
   const preserveAdditionalSources =
     rawInput.video_url_2 === undefined &&
@@ -764,6 +809,23 @@ export async function updateEpisode(
     rawInput.source_referer_3 === undefined &&
     rawInput.source_referer_4 === undefined &&
     rawInput.source_referer_5 === undefined;
+
+  let hasPersistedFallbackSources = false;
+  const primaryTrimmed = typeof resolvedRaw.video_url === 'string' ? resolvedRaw.video_url.trim() : '';
+  if (!primaryTrimmed && preserveAdditionalSources) {
+    const existingEpisode = await getEpisodeById(cleanId, sql);
+    if (!existingEpisode) {
+      return null;
+    }
+    hasPersistedFallbackSources = Boolean(
+      existingEpisode.video_url_2?.trim() ||
+        existingEpisode.video_url_3?.trim() ||
+        existingEpisode.video_url_4?.trim() ||
+        existingEpisode.video_url_5?.trim()
+    );
+  }
+
+  const input = sanitizeEpisodeInput(resolvedRaw, { hasPersistedFallbackSources });
   const hasOpeningTimes =
     input.opening_start_seconds !== null &&
     input.opening_start_seconds !== undefined &&

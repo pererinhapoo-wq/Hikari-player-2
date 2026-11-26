@@ -1181,6 +1181,118 @@ export function collectEpisodeSources(episode: EpisodeUrlsInput): NormalizedVide
   return sources.sort((a, b) => getSourcePriorityRank(a) - getSourcePriorityRank(b));
 }
 
+export interface EpisodeMirrorInfo {
+  hasMirror: boolean;
+  slot: 1 | 2 | 3 | 4 | 5 | null;
+  url: string | null;
+  kind: ExplicitSourceKind | null;
+  isVercelBlob: boolean;
+}
+
+export function getEpisodeMirrorInfo(
+  episode: Pick<
+    EpisodeUrlsInput,
+    | 'video_url'
+    | 'video_url_2'
+    | 'video_url_3'
+    | 'video_url_4'
+    | 'video_url_5'
+    | 'source_kind'
+    | 'source_kind_2'
+    | 'source_kind_3'
+    | 'source_kind_4'
+    | 'source_kind_5'
+    | 'is_mirror'
+    | 'is_mirror_2'
+    | 'is_mirror_3'
+    | 'is_mirror_4'
+    | 'is_mirror_5'
+  >
+): EpisodeMirrorInfo {
+  const slots: Array<{
+    slot: 1 | 2 | 3 | 4 | 5;
+    url: string | null | undefined;
+    explicitKind: ExplicitSourceKind | string | null | undefined;
+    isMirrorFlag: boolean | null | undefined;
+  }> = [
+    {
+      slot: 1,
+      url: episode.video_url,
+      explicitKind: episode.source_kind,
+      isMirrorFlag: episode.is_mirror,
+    },
+    {
+      slot: 2,
+      url: episode.video_url_2,
+      explicitKind: episode.source_kind_2,
+      isMirrorFlag: episode.is_mirror_2,
+    },
+    {
+      slot: 3,
+      url: episode.video_url_3,
+      explicitKind: episode.source_kind_3,
+      isMirrorFlag: episode.is_mirror_3,
+    },
+    {
+      slot: 4,
+      url: episode.video_url_4,
+      explicitKind: episode.source_kind_4,
+      isMirrorFlag: episode.is_mirror_4,
+    },
+    {
+      slot: 5,
+      url: episode.video_url_5,
+      explicitKind: episode.source_kind_5,
+      isMirrorFlag: episode.is_mirror_5,
+    },
+  ];
+
+  for (const item of slots) {
+    const trimmed = item.url?.trim() ?? '';
+    if (!trimmed) continue;
+    const urlCheck = validateHttpUrl(trimmed, MAX_VIDEO_SOURCE_URL_LENGTH);
+    if (!urlCheck.valid || !urlCheck.normalizedUrl) continue;
+    if (isVercelBlobUrl(urlCheck.normalizedUrl)) {
+      return {
+        hasMirror: true,
+        slot: item.slot,
+        url: urlCheck.normalizedUrl,
+        kind:
+          normalizeExplicitSourceKind(item.explicitKind) ??
+          deriveKindFromExtension(urlCheck.normalizedUrl),
+        isVercelBlob: true,
+      };
+    }
+  }
+
+  for (const item of slots) {
+    const trimmed = item.url?.trim() ?? '';
+    if (!trimmed) continue;
+    const urlCheck = validateHttpUrl(trimmed, MAX_VIDEO_SOURCE_URL_LENGTH);
+    if (!urlCheck.valid || !urlCheck.normalizedUrl) continue;
+    if (item.isMirrorFlag === true && !isR2StorageUrl(urlCheck.normalizedUrl)) {
+      const detected = detectSourceKind(urlCheck.normalizedUrl, item.explicitKind);
+      return {
+        hasMirror: true,
+        slot: item.slot,
+        url: urlCheck.normalizedUrl,
+        kind:
+          normalizeExplicitSourceKind(item.explicitKind) ??
+          (detected === 'hls' || detected === 'mp4' || detected === 'iframe' ? detected : 'mp4'),
+        isVercelBlob: false,
+      };
+    }
+  }
+
+  return {
+    hasMirror: false,
+    slot: null,
+    url: null,
+    kind: null,
+    isVercelBlob: false,
+  };
+}
+
 export function getNextFallbackSourceIndex(
   sources: NormalizedVideoSource[],
   currentIndex: number,
@@ -1194,3 +1306,4 @@ export function getNextFallbackSourceIndex(
   }
   return null;
 }
+
