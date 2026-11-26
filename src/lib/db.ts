@@ -649,6 +649,37 @@ export async function createEpisode(
       }
     }
 
+    // Fallback 0b: schema com anime_name/episode_number (0004) e opening (0005), sem source_kind/force_proxy/referer
+    try {
+      const rows = await sql`
+        INSERT INTO public.player_episodes (
+          id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
+          title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5
+        ) VALUES (
+          ${id},
+          ${input.anime_name ?? null},
+          ${input.episode_number ?? null},
+          ${input.opening_start_seconds ?? null},
+          ${input.opening_end_seconds ?? null},
+          ${input.title},
+          ${input.poster_url},
+          ${input.video_url},
+          ${input.video_url_2 ?? null},
+          ${input.video_url_3 ?? null},
+          ${input.video_url_4 ?? null},
+          ${input.video_url_5 ?? null}
+        )
+        RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
+                  title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                  created_at, updated_at
+      `;
+      return finalizeCreated((rows as Array<Record<string, unknown>>)[0]);
+    } catch (err0b: unknown) {
+      if (!isUndefinedColumnError(err0b)) {
+        throw err0b;
+      }
+    }
+
     // Fallback 1: schema sem anime_name / episode_number (migration 0004 pendente), mas com 0002, 0003 e 0005
     try {
       const rows = await sql`
@@ -662,7 +693,7 @@ export async function createEpisode(
           ${id},
           ${input.opening_start_seconds ?? null},
           ${input.opening_end_seconds ?? null},
-          ${input.title || input.anime_name || 'Episódio'},
+          ${input.title},
           ${input.poster_url},
           ${input.video_url},
           ${input.video_url_2 ?? null},
@@ -707,7 +738,7 @@ export async function createEpisode(
             ${id},
             ${input.opening_start_seconds ?? null},
             ${input.opening_end_seconds ?? null},
-            ${input.title || input.anime_name || 'Episódio'},
+            ${input.title},
             ${input.poster_url},
             ${input.video_url},
             ${input.video_url_2 ?? null},
@@ -730,13 +761,42 @@ export async function createEpisode(
           );
         }
 
+        // Fallback 0c: schema com anime_name/episode_number (0004), sem opening/force_proxy/source_kind
+        try {
+          const rows = await sql`
+            INSERT INTO public.player_episodes (
+              id, anime_name, episode_number,
+              title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5
+            ) VALUES (
+              ${id},
+              ${input.anime_name ?? null},
+              ${input.episode_number ?? null},
+              ${input.title},
+              ${input.poster_url},
+              ${input.video_url},
+              ${input.video_url_2 ?? null},
+              ${input.video_url_3 ?? null},
+              ${input.video_url_4 ?? null},
+              ${input.video_url_5 ?? null}
+            )
+            RETURNING id, anime_name, episode_number,
+                      title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                      created_at, updated_at
+          `;
+          return finalizeCreated((rows as Array<Record<string, unknown>>)[0]);
+        } catch (err4: unknown) {
+          if (!isUndefinedColumnError(err4)) {
+            throw err4;
+          }
+        }
+
         // Fallback 3: schema legado mínimo (0001) apenas quando não há horários de opening para gravar
         const rows = await sql`
           INSERT INTO public.player_episodes (
             id, title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5
           ) VALUES (
             ${id},
-            ${input.title || input.anime_name || 'Episódio'},
+            ${input.title},
             ${input.poster_url},
             ${input.video_url},
             ${input.video_url_2 ?? null},
@@ -989,6 +1049,52 @@ export async function updateEpisode(
       }
     }
 
+    // Fallback 0b: schema com anime_name/episode_number (0004) e opening (0005), sem source_kind/force_proxy/referer
+    try {
+      const rows = preserveAdditionalSources
+        ? await sql`
+            UPDATE public.player_episodes
+            SET
+              anime_name = ${input.anime_name ?? null},
+              episode_number = ${input.episode_number ?? null},
+              opening_start_seconds = ${input.opening_start_seconds ?? null},
+              opening_end_seconds = ${input.opening_end_seconds ?? null},
+              title = ${input.title},
+              poster_url = ${input.poster_url},
+              video_url = ${input.video_url},
+              updated_at = NOW()
+            WHERE id = ${cleanId}
+            RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
+                      title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                      created_at, updated_at
+          `
+        : await sql`
+            UPDATE public.player_episodes
+            SET
+              anime_name = ${input.anime_name ?? null},
+              episode_number = ${input.episode_number ?? null},
+              opening_start_seconds = ${input.opening_start_seconds ?? null},
+              opening_end_seconds = ${input.opening_end_seconds ?? null},
+              title = ${input.title},
+              poster_url = ${input.poster_url},
+              video_url = ${input.video_url},
+              video_url_2 = ${input.video_url_2 ?? null},
+              video_url_3 = ${input.video_url_3 ?? null},
+              video_url_4 = ${input.video_url_4 ?? null},
+              video_url_5 = ${input.video_url_5 ?? null},
+              updated_at = NOW()
+            WHERE id = ${cleanId}
+            RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
+                      title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                      created_at, updated_at
+          `;
+      return finalizeUpdated((rows as Array<Record<string, unknown>>)[0]);
+    } catch (err0b: unknown) {
+      if (!isUndefinedColumnError(err0b)) {
+        throw err0b;
+      }
+    }
+
     // Fallback 1: schema sem anime_name / episode_number (migration 0004 pendente), mas com 0002, 0003 e 0005
     try {
       const rows = preserveAdditionalSources
@@ -997,7 +1103,7 @@ export async function updateEpisode(
             SET
               opening_start_seconds = ${input.opening_start_seconds ?? null},
               opening_end_seconds = ${input.opening_end_seconds ?? null},
-              title = ${input.title || input.anime_name || 'Episódio'},
+              title = ${input.title},
               poster_url = ${input.poster_url},
               video_url = ${input.video_url},
               source_kind = ${input.source_kind ?? null},
@@ -1020,7 +1126,7 @@ export async function updateEpisode(
             SET
               opening_start_seconds = ${input.opening_start_seconds ?? null},
               opening_end_seconds = ${input.opening_end_seconds ?? null},
-              title = ${input.title || input.anime_name || 'Episódio'},
+              title = ${input.title},
               poster_url = ${input.poster_url},
               video_url = ${input.video_url},
               video_url_2 = ${input.video_url_2 ?? null},
@@ -1064,7 +1170,7 @@ export async function updateEpisode(
               SET
                 opening_start_seconds = ${input.opening_start_seconds ?? null},
                 opening_end_seconds = ${input.opening_end_seconds ?? null},
-                title = ${input.title || input.anime_name || 'Episódio'},
+                title = ${input.title},
                 poster_url = ${input.poster_url},
                 video_url = ${input.video_url},
                 updated_at = NOW()
@@ -1078,7 +1184,7 @@ export async function updateEpisode(
               SET
                 opening_start_seconds = ${input.opening_start_seconds ?? null},
                 opening_end_seconds = ${input.opening_end_seconds ?? null},
-                title = ${input.title || input.anime_name || 'Episódio'},
+                title = ${input.title},
                 poster_url = ${input.poster_url},
                 video_url = ${input.video_url},
                 video_url_2 = ${input.video_url_2 ?? null},
@@ -1102,12 +1208,54 @@ export async function updateEpisode(
           );
         }
 
+        // Fallback 0c: schema com anime_name/episode_number (0004), sem opening/force_proxy/source_kind
+        try {
+          const rows = preserveAdditionalSources
+            ? await sql`
+                UPDATE public.player_episodes
+                SET
+                  anime_name = ${input.anime_name ?? null},
+                  episode_number = ${input.episode_number ?? null},
+                  title = ${input.title},
+                  poster_url = ${input.poster_url},
+                  video_url = ${input.video_url},
+                  updated_at = NOW()
+                WHERE id = ${cleanId}
+                RETURNING id, anime_name, episode_number,
+                          title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                          created_at, updated_at
+              `
+            : await sql`
+                UPDATE public.player_episodes
+                SET
+                  anime_name = ${input.anime_name ?? null},
+                  episode_number = ${input.episode_number ?? null},
+                  title = ${input.title},
+                  poster_url = ${input.poster_url},
+                  video_url = ${input.video_url},
+                  video_url_2 = ${input.video_url_2 ?? null},
+                  video_url_3 = ${input.video_url_3 ?? null},
+                  video_url_4 = ${input.video_url_4 ?? null},
+                  video_url_5 = ${input.video_url_5 ?? null},
+                  updated_at = NOW()
+                WHERE id = ${cleanId}
+                RETURNING id, anime_name, episode_number,
+                          title, poster_url, video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                          created_at, updated_at
+              `;
+          return finalizeUpdated((rows as Array<Record<string, unknown>>)[0]);
+        } catch (err4: unknown) {
+          if (!isUndefinedColumnError(err4)) {
+            throw err4;
+          }
+        }
+
         // Fallback 3: schema legado mínimo (0001) apenas quando não há horários de opening para gravar
         const rows = preserveAdditionalSources
           ? await sql`
               UPDATE public.player_episodes
               SET
-                title = ${input.title || input.anime_name || 'Episódio'},
+                title = ${input.title},
                 poster_url = ${input.poster_url},
                 video_url = ${input.video_url},
                 updated_at = NOW()
@@ -1118,7 +1266,7 @@ export async function updateEpisode(
           : await sql`
               UPDATE public.player_episodes
               SET
-                title = ${input.title || input.anime_name || 'Episódio'},
+                title = ${input.title},
                 poster_url = ${input.poster_url},
                 video_url = ${input.video_url},
                 video_url_2 = ${input.video_url_2 ?? null},

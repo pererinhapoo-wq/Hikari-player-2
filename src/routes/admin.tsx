@@ -37,11 +37,12 @@ import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } fro
 import {
   type AnimeSortMode,
   countEpisodeSources,
-  formatEpisodeDisplayTitle,
+  formatEpisodeIdentification,
   groupEpisodesByAnime,
   normalizeAnimeKey,
   paginateItems,
   sanitizeAnimeName,
+  sanitizeEpisodeNumber,
   searchAndSortAnimeGroups,
   UNASSIGNED_ANIME_KEY,
 } from '@/lib/anime-library';
@@ -1039,7 +1040,7 @@ function AdminPage() {
 
       const payload = {
         anime_name: sanitizeAnimeName(form.anime_name),
-        episode_number: form.episode_number.trim() || null,
+        episode_number: sanitizeEpisodeNumber(form.episode_number),
         opening_start_seconds: openingRange.opening_start_seconds,
         opening_end_seconds: openingRange.opening_end_seconds,
         title: form.title.trim(),
@@ -1059,7 +1060,7 @@ function AdminPage() {
           return;
         }
         setSavedBanner({
-          label: formatEpisodeDisplayTitle(res.episode),
+          label: formatEpisodeIdentification(res.episode),
           publicUrl: res.episode.public_url,
           action: 'updated',
         });
@@ -1076,7 +1077,7 @@ function AdminPage() {
           return;
         }
         setSavedBanner({
-          label: formatEpisodeDisplayTitle(res.episode),
+          label: formatEpisodeIdentification(res.episode),
           publicUrl: res.episode.public_url,
           action: 'created',
         });
@@ -2043,7 +2044,9 @@ function AdminPage() {
                           list="anime-names-datalist"
                           maxLength={160}
                           value={form.anime_name}
-                          onChange={(e) => setForm({ ...form, anime_name: e.target.value })}
+                          onChange={(e) =>
+                            setForm((prev) => ({ ...prev, anime_name: e.target.value }))
+                          }
                           placeholder="Ex.: Frieren e a Jornada para o Além"
                           className="w-full h-11 px-3.5 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-colors"
                         />
@@ -2066,7 +2069,9 @@ function AdminPage() {
                           type="text"
                           maxLength={32}
                           value={form.episode_number}
-                          onChange={(e) => setForm({ ...form, episode_number: e.target.value })}
+                          onChange={(e) =>
+                            setForm((prev) => ({ ...prev, episode_number: e.target.value }))
+                          }
                           placeholder="Ex.: 01"
                           className="w-full h-11 px-3.5 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-sm font-mono tabular-nums text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-colors"
                         />
@@ -2086,7 +2091,9 @@ function AdminPage() {
                         type="text"
                         maxLength={200}
                         value={form.title}
-                        onChange={(e) => setForm({ ...form, title: e.target.value })}
+                        onChange={(e) =>
+                          setForm((prev) => ({ ...prev, title: e.target.value }))
+                        }
                         placeholder="Ex.: O Fim da Jornada"
                         className="w-full h-11 px-3.5 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-sm text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-colors"
                       />
@@ -3191,7 +3198,7 @@ function AdminPage() {
                                   const isBusyDeleting = deleteBusyId === ep.id;
                                   const isMenuOpen = openMenuId === ep.id;
                                   const hasTitle = Boolean(ep.title && ep.title.trim());
-                                  const epLabel = formatEpisodeDisplayTitle(ep);
+                                  const epLabel = formatEpisodeIdentification(ep);
                                   const isTesting = episodeTestingId === ep.id;
                                   const testReports = episodeTests[ep.id];
                                   const testError = episodeTestErrors[ep.id];
@@ -3244,11 +3251,15 @@ function AdminPage() {
                                               <h3 className="text-sm font-medium text-white truncate min-w-0">
                                                 {ep.title}
                                               </h3>
-                                            ) : !ep.episode_number ? (
+                                            ) : ep.episode_number ? (
+                                              <h3 className="text-sm font-medium text-slate-300 truncate min-w-0">
+                                                Episódio {ep.episode_number}
+                                              </h3>
+                                            ) : (
                                               <h3 className="text-sm font-medium text-slate-300 truncate min-w-0">
                                                 {epLabel}
                                               </h3>
-                                            ) : null}
+                                            )}
                                           </div>
 
                                           <div className="flex flex-wrap items-center gap-x-2 gap-y-1 text-xs text-slate-400 tabular-nums">

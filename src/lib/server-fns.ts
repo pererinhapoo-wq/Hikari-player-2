@@ -7,7 +7,11 @@ import {
   setCookie,
   setResponseHeader,
 } from '@tanstack/react-start/server';
-import { formatEpisodeDisplayTitle } from '@/lib/anime-library';
+import {
+  formatEpisodeIdentification,
+  sanitizeAnimeName,
+  sanitizeEpisodeNumber,
+} from '@/lib/anime-library';
 import {
   ADMIN_SESSION_COOKIE_NAME,
   buildPublicEpisodeUrl,
@@ -184,76 +188,94 @@ export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
       return { status: 'not_found' };
     }
 
-    const forceProxyBySlot: Record<1 | 2 | 3 | 4 | 5, boolean | null> = {
-      1: episode.force_proxy,
-      2: episode.force_proxy_2,
-      3: episode.force_proxy_3,
-      4: episode.force_proxy_4,
-      5: episode.force_proxy_5,
-    };
+    return buildPublicEpisodeResult(episode);
+  });
 
-    const sourceRefererBySlot: Record<1 | 2 | 3 | 4 | 5, string | null> = {
-      1: episode.source_referer ?? null,
-      2: episode.source_referer_2 ?? null,
-      3: episode.source_referer_3 ?? null,
-      4: episode.source_referer_4 ?? null,
-      5: episode.source_referer_5 ?? null,
-    };
+export function buildPublicEpisodeResult(episode: PlayerEpisode): PublicEpisodeResult {
+  const forceProxyBySlot: Record<1 | 2 | 3 | 4 | 5, boolean | null> = {
+    1: episode.force_proxy,
+    2: episode.force_proxy_2,
+    3: episode.force_proxy_3,
+    4: episode.force_proxy_4,
+    5: episode.force_proxy_5,
+  };
 
-    const normalizedSources = collectEpisodeSources(episode);
-    const sources: PlayableSource[] = normalizedSources.map((src) => {
-      const isMirrorSource = Boolean(
-        src.isMirror || isDirectMediaUrl(src.resolvedUrl) || isVercelBlobUrl(src.resolvedUrl)
-      );
-      const shouldProxy =
-        src.kind !== 'iframe' &&
-        !src.requiresServerResolve &&
-        !isMirrorSource &&
-        forceProxyBySlot[src.slot] !== false &&
-        src.needsProxy;
-      let customRefererForProxy: string | null = null;
-      if (shouldProxy && sourceRefererBySlot[src.slot]) {
-        try {
-          const defaultRef = resolveUpstreamReferer(new URL(src.resolvedUrl));
-          if (sourceRefererBySlot[src.slot] !== defaultRef) {
-            customRefererForProxy = sourceRefererBySlot[src.slot];
-          }
-        } catch {
-          // Ignora URL inválida ao resolver referer
+  const sourceRefererBySlot: Record<1 | 2 | 3 | 4 | 5, string | null> = {
+    1: episode.source_referer ?? null,
+    2: episode.source_referer_2 ?? null,
+    3: episode.source_referer_3 ?? null,
+    4: episode.source_referer_4 ?? null,
+    5: episode.source_referer_5 ?? null,
+  };
+
+  const normalizedSources = collectEpisodeSources(episode);
+  const sources: PlayableSource[] = normalizedSources.map((src) => {
+    const isMirrorSource = Boolean(
+      src.isMirror || isDirectMediaUrl(src.resolvedUrl) || isVercelBlobUrl(src.resolvedUrl)
+    );
+    const shouldProxy =
+      src.kind !== 'iframe' &&
+      !src.requiresServerResolve &&
+      !isMirrorSource &&
+      forceProxyBySlot[src.slot] !== false &&
+      src.needsProxy;
+    let customRefererForProxy: string | null = null;
+    if (shouldProxy && sourceRefererBySlot[src.slot]) {
+      try {
+        const defaultRef = resolveUpstreamReferer(new URL(src.resolvedUrl));
+        if (sourceRefererBySlot[src.slot] !== defaultRef) {
+          customRefererForProxy = sourceRefererBySlot[src.slot];
         }
+      } catch {
+        // Ignora URL inválida ao resolver referer
       }
-      const playUrl =
-        src.kind === 'iframe'
-          ? buildIframePlayUrl(src.resolvedUrl)
-          : shouldProxy
-            ? resolveProxyPlayUrl(
-                src.resolvedUrl,
-                undefined,
-                undefined,
-                customRefererForProxy,
-                Boolean(src.isExpirable)
-              )
-            : src.resolvedUrl;
-      return {
-        ...src,
-        isMirror: isMirrorSource,
-        needsProxy: shouldProxy,
-        playUrl,
-      };
-    });
-
+    }
+    const playUrl =
+      src.kind === 'iframe'
+        ? buildIframePlayUrl(src.resolvedUrl)
+        : shouldProxy
+          ? resolveProxyPlayUrl(
+              src.resolvedUrl,
+              undefined,
+              undefined,
+              customRefererForProxy,
+              Boolean(src.isExpirable)
+            )
+          : src.resolvedUrl;
     return {
-      status: 'ok',
-      episode: {
-        id: episode.id,
-        title: formatEpisodeDisplayTitle(episode),
-        poster_url: resizeImageUrlForWidth(episode.poster_url, IMAGE_WIDTH_LIMITS.banner),
-        opening_start_seconds: episode.opening_start_seconds,
-        opening_end_seconds: episode.opening_end_seconds,
-        sources,
-      },
+      ...src,
+      isMirror: isMirrorSource,
+      needsProxy: shouldProxy,
+      playUrl,
     };
   });
+
+  const cleanAnimeName = sanitizeAnimeName(episode.anime_name);
+  const cleanEpisodeNumber = sanitizeEpisodeNumber(episode.episode_number);
+  const cleanEpisodeTitle =
+    typeof episode.title === 'string' && episode.title.trim().length > 0
+      ? episode.title.trim()
+      : null;
+
+  return {
+    status: 'ok',
+    episode: {
+      id: episode.id,
+      anime_name: cleanAnimeName,
+      episode_number: cleanEpisodeNumber,
+      episode_title: cleanEpisodeTitle,
+      title: formatEpisodeIdentification({
+        anime_name: cleanAnimeName,
+        episode_number: cleanEpisodeNumber,
+        title: cleanEpisodeTitle,
+      }),
+      poster_url: resizeImageUrlForWidth(episode.poster_url, IMAGE_WIDTH_LIMITS.banner),
+      opening_start_seconds: episode.opening_start_seconds,
+      opening_end_seconds: episode.opening_end_seconds,
+      sources,
+    },
+  };
+}
 
 export const getAdminDashboardFn = createServerFn({ method: 'GET' }).handler(
   async (): Promise<AdminDashboardState> => {

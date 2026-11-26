@@ -1,5 +1,8 @@
+import { useEffect, useState } from 'react';
 import { createFileRoute, Link } from '@tanstack/react-router';
 import { Film, Lock } from 'lucide-react';
+
+let hasPlayedLogoEntrance = false;
 
 export const Route = createFileRoute('/')({
   headers: () => ({
@@ -10,17 +13,25 @@ export const Route = createFileRoute('/')({
 });
 
 function HomePage() {
+  const [animateLogo] = useState(() => !hasPlayedLogoEntrance);
+
+  useEffect(() => {
+    hasPlayedLogoEntrance = true;
+  }, []);
+
   return (
-    <main className="min-h-screen bg-[#090B10] flex items-center justify-center px-6 py-12">
-      <div className="max-w-lg w-full bg-[#11151E] border border-white/10 rounded-xl p-8 sm:p-10">
-        <div className="flex items-center gap-3">
-          <div className="w-10 h-10 rounded-lg bg-rose-600/15 border border-rose-500/30 flex items-center justify-center text-rose-400">
+    <main className="min-h-screen bg-transparent flex items-center justify-center px-6 py-12">
+      <div className="max-w-lg w-full bg-[#11151E]/95 border border-white/10 rounded-xl p-8 sm:p-10">
+        <div
+          className={`flex items-center gap-3 ${animateLogo ? 'hikari-logo-enter' : ''}`}
+        >
+          <div className="w-10 h-10 rounded-lg bg-rose-600/15 border border-violet-500/35 flex items-center justify-center text-rose-400 hikari-logo-mark">
             <Film className="w-5 h-5" />
           </div>
           <h1 className="text-2xl font-semibold tracking-tight text-white">Player</h1>
         </div>
 
-        <p className="mt-4 text-sm sm:text-base text-slate-300 leading-relaxed">
+        <p className="mt-4 text-sm sm:text-base text-slate-300 leading-relaxed hikari-header-enter">
           Reprodutor dedicado para episódios por link individual. Abra uma URL no formato{' '}
           <code className="text-xs font-mono text-slate-200 bg-white/5 px-1.5 py-0.5 rounded border border-white/10">
             /e/identificador
@@ -28,7 +39,7 @@ function HomePage() {
           para reproduzir diretamente um episódio cadastrado.
         </p>
 
-        <div className="mt-8 pt-6 border-t border-white/10 flex items-center justify-between gap-4">
+        <div className="mt-8 pt-6 border-t border-white/10 hikari-divider-glow flex items-center justify-between gap-4">
           <span className="text-xs text-slate-400">
             Acesso público somente por link direto
           </span>

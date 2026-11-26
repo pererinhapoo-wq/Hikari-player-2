@@ -84,6 +84,9 @@ export type PublicEpisodeResult =
       status: 'ok';
       episode: {
         id: string;
+        anime_name: string | null;
+        episode_number: string | null;
+        episode_title: string | null;
         title: string;
         poster_url: string;
         opening_start_seconds: number | null;

@@ -1,8 +1,10 @@
+import { useEffect, useRef, useState } from 'react';
 import {
   createRootRoute,
   HeadContent,
   Outlet,
   Scripts,
+  useRouterState,
 } from '@tanstack/react-router';
 import appCss from '@/index.css?url';
 
@@ -44,6 +46,37 @@ export const Route = createRootRoute({
   notFoundComponent: RootNotFound,
 });
 
+function PageTransitionShell() {
+  const pathname = useRouterState({ select: (s) => s.location.pathname });
+  const routerStatus = useRouterState({ select: (s) => s.status });
+  const initialPathnameRef = useRef(pathname);
+  const [hasNavigated, setHasNavigated] = useState(false);
+
+  useEffect(() => {
+    if (pathname !== initialPathnameRef.current) {
+      setHasNavigated(true);
+    }
+  }, [pathname]);
+
+  const shouldAnimateEnter = hasNavigated || pathname !== initialPathnameRef.current;
+  const isPendingNavigation = routerStatus === 'pending';
+
+  return (
+    <div
+      key={pathname}
+      className={[
+        'hikari-page-shell',
+        shouldAnimateEnter ? 'hikari-page-enter' : '',
+        isPendingNavigation ? 'hikari-page-pending' : '',
+      ]
+        .filter(Boolean)
+        .join(' ')}
+    >
+      <Outlet />
+    </div>
+  );
+}
+
 function RootLayout() {
   return (
     <html lang="pt-BR">
@@ -51,7 +84,13 @@ function RootLayout() {
         <HeadContent />
       </head>
       <body className="min-h-screen bg-[#090B10] text-slate-100 antialiased selection:bg-rose-600/30 selection:text-white">
-        <Outlet />
+        <div className="hikari-ambient-layer" aria-hidden="true">
+          <div className="hikari-ambient-orb-violet" />
+          <div className="hikari-ambient-orb-magenta" />
+        </div>
+        <div className="relative z-10 min-h-screen">
+          <PageTransitionShell />
+        </div>
         <Scripts />
       </body>
     </html>

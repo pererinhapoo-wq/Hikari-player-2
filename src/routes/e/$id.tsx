@@ -48,8 +48,8 @@ function PublicEpisodePage() {
 
   if (data.status === 'db_unconfigured') {
     return (
-      <main className="min-h-screen bg-[#090B10] flex items-center justify-center px-6 py-12">
-        <div className="max-w-md w-full bg-[#11151E] border border-white/10 rounded-xl p-8 text-center">
+      <main className="min-h-screen bg-transparent flex items-center justify-center px-6 py-12">
+        <div className="max-w-md w-full bg-[#11151E]/95 border border-white/10 rounded-xl p-8 text-center">
           <AlertTriangle className="w-10 h-10 text-amber-400 mx-auto mb-3" />
           <h1 className="text-lg font-semibold text-white">Banco de dados não configurado</h1>
           <p className="mt-2 text-sm text-slate-400">
@@ -63,8 +63,8 @@ function PublicEpisodePage() {
 
   if (data.status === 'not_found') {
     return (
-      <main className="min-h-screen bg-[#090B10] flex items-center justify-center px-6 py-12">
-        <div className="max-w-md w-full bg-[#11151E] border border-white/10 rounded-xl p-8 text-center">
+      <main className="min-h-screen bg-transparent flex items-center justify-center px-6 py-12">
+        <div className="max-w-md w-full bg-[#11151E]/95 border border-white/10 rounded-xl p-8 text-center">
           <Film className="w-10 h-10 text-slate-500 mx-auto mb-3" />
           <h1 className="text-lg font-semibold text-white">Episódio não encontrado</h1>
           <p className="mt-2 text-sm text-slate-400">
@@ -76,14 +76,31 @@ function PublicEpisodePage() {
   }
 
   const { episode } = data;
+  const hasSeparateMetaAndTitle = Boolean(
+    episode.episode_title && (episode.anime_name || episode.episode_number)
+  );
 
   return (
-    <main className="min-h-screen bg-[#090B10] flex flex-col items-center justify-center px-4 sm:px-8 py-6 sm:py-10">
+    <main className="min-h-screen bg-transparent flex flex-col items-center justify-center px-4 sm:px-8 py-6 sm:py-10">
       <div className="w-full max-w-5xl space-y-4">
-        <header className="flex items-baseline justify-between gap-4">
-          <h1 className="text-lg sm:text-2xl font-semibold tracking-tight text-white text-balance">
-            {episode.title}
-          </h1>
+        <header className="hikari-header-enter flex items-baseline justify-between gap-4">
+          <div className="min-w-0 space-y-1">
+            {hasSeparateMetaAndTitle && (
+              <div className="flex flex-wrap items-center gap-2 text-xs sm:text-sm text-slate-400">
+                {episode.anime_name && (
+                  <span className="font-medium text-slate-300">{episode.anime_name}</span>
+                )}
+                {episode.episode_number && (
+                  <span className="inline-flex items-center px-2 py-0.5 rounded-md bg-white/[0.06] border border-white/10 text-xs font-mono font-semibold text-slate-200 tabular-nums">
+                    Episódio {episode.episode_number}
+                  </span>
+                )}
+              </div>
+            )}
+            <h1 className="text-lg sm:text-2xl font-semibold tracking-tight text-white text-balance">
+              {hasSeparateMetaAndTitle ? episode.episode_title : episode.title}
+            </h1>
+          </div>
           <span className="text-xs text-slate-500 whitespace-nowrap shrink-0">
             Player
           </span>

@@ -65,6 +65,23 @@ export function formatEpisodeDisplayTitle(ep: {
   return 'Episódio';
 }
 
+export function formatEpisodeIdentification(ep: {
+  anime_name?: string | null;
+  episode_number?: string | null;
+  title?: string | null;
+}): string {
+  const anime = sanitizeAnimeName(ep.anime_name);
+  const epNum = sanitizeEpisodeNumber(ep.episode_number);
+  const title = typeof ep.title === 'string' ? ep.title.trim() : '';
+
+  const parts: string[] = [];
+  if (anime) parts.push(anime);
+  if (epNum) parts.push(`Episódio ${epNum}`);
+  if (title) parts.push(title);
+
+  return parts.length > 0 ? parts.join(' · ') : 'Episódio';
+}
+
 function extractEpisodeNumericValue(raw: string): number | null {
   const direct = Number(raw.replace(',', '.'));
   if (Number.isFinite(direct)) return direct;
@@ -221,6 +238,7 @@ export function searchAndSortAnimeGroups(
         ep.episode_number,
         ep.id,
         formatEpisodeDisplayTitle(ep),
+        formatEpisodeIdentification(ep),
       ];
       return candidates.some((field) =>
         field ? normalizeSearchText(field).includes(normalizedQuery) : false
