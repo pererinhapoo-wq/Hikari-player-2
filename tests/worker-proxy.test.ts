@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   createProxyDepthSignature,
+  createProxyExpirableSignature,
   createProxyRefererSignature,
   createProxySignature,
   verifyProxySignature,
@@ -10,13 +11,16 @@ import {
   type CfRequestInit,
   clearWorkerLearnedRefererCache,
   createWorkerDepthSignature,
+  createWorkerExpirableSignature,
   createWorkerProxySignature,
   createWorkerRefererSignature,
   getStableSegmentExpiry,
   handleWorkerProxyRequest,
+  hasExpirableHlsTokens,
   LEARNED_REFERER_TTL_SECONDS,
   resolveUpstreamReferer,
   resolveUpstreamRefererCandidates,
+  verifyWorkerProxyExpirable,
   verifyWorkerProxyReferer,
   verifyWorkerProxySignature,
   type WorkerEnv,
@@ -863,5 +867,265 @@ describe('Cloudflare Worker Edge Proxy', () => {
       { fetcher, edgeCache: null, learnedRefererStore: brokenStore, nowSeconds: () => nowSec }
     );
     expect(rFailOpen.status).toBe(200);
+  });
+
+  it('mantém paridade no Worker para detecção de tokens e interoperabilidade/rejeição de xsig', async () => {
+    const target = 'https://cdn-s01.mywallpaper-4k-image.net/stream/sv/t/tsuihou-sareta/21v2.mp4/index.m3u8';
+    const exp = 2_000_000_000;
+    const now = 1_795_000_000;
+
+    // Sem falsos positivos em /t/ e #t=, mas detecta tokens variados
+    expect(hasExpirableHlsTokens(target)).toBe(false);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/index.m3u8#t=10')).toBe(false);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/index.m3u8?e=1795003600&t=1795003600&hmac=123')).toBe(true);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/token/abcd1234/index.m3u8')).toBe(true);
+
+    const nodeXsig = createProxyExpirableSignature(target, exp);
+    const workerXsig = await createWorkerExpirableSignature(target, exp, TEST_SECRET);
+    expect(workerXsig).toBe(nodeXsig);
+
+    expect(
+      await verifyWorkerProxyExpirable(target, String(exp), '1', nodeXsig, TEST_SECRET, now)
+    ).toEqual({ valid: true, expirable: true });
+    expect(
+      await verifyWorkerProxyExpirable(target, String(exp), '1', 'adulterada', TEST_SECRET, now)
+    ).toEqual({ valid: false, expirable: false });
+    expect(
+      await verifyWorkerProxyExpirable(target, String(exp), '1', null, TEST_SECRET, now)
+    ).toEqual({ valid: false, expirable: false });
+
+    const sig = await createWorkerProxySignature(target, exp, TEST_SECRET);
+    const fetcher = vi.fn();
+    const tamperedReq = new Request(
+      `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(target)}&exp=${exp}&sig=${sig}&ex=1&xsig=forjada`
+    );
+    const tamperedRes = await handleWorkerProxyRequest(tamperedReq, env, undefined, {
+      fetcher,
+      edgeCache: null,
+      nowSeconds: () => now,
+    });
+    expect(tamperedRes.status).toBe(403);
+    expect(fetcher).not.toHaveBeenCalled();
+  });
+
+  it('não armazena HLS expirável no edgeCache nem cf.cacheEverything, protege manifestos com tokens no corpo/redirect e respeita TTL/origem no Worker', async () => {
+    const now = 1_795_000_000;
+    const exp = 2_000_000_000;
+    const edgeCache = createMemoryEdgeCache();
+    const pending: Promise<unknown>[] = [];
+    const ctx: WorkerExecutionContext = {
+      waitUntil(p) {
+        pending.push(p);
+      },
+    };
+
+    // 1. Manifesto assinado na URL: cf.cacheEverything=false, cacheTtl=0, no-store, não entra no edgeCache e propaga ex=1&xsig
+    const signedManifestUrl = `https://cdn.signed.example.com/ep01/master.m3u8?token=tok123&expires=${now + 600}`;
+    const signedSig = await createWorkerProxySignature(signedManifestUrl, exp, TEST_SECRET);
+    const signedReqUrl = `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(signedManifestUrl)}&exp=${exp}&sig=${signedSig}`;
+    const capturedCfList: Array<CfRequestInit['cf']> = [];
+
+    const signedFetcher = vi.fn(async (_input: string, init?: CfRequestInit) => {
+      capturedCfList.push(init?.cf);
+      return new Response(
+        [
+          '#EXTM3U',
+          '#EXT-X-KEY:METHOD=AES-128,URI="enc.key"',
+          '#EXT-X-MAP:URI="init.mp4"',
+          '#EXTINF:5.0,',
+          'seg-001.ts',
+        ].join('\n'),
+        {
+          status: 200,
+          headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+        }
+      );
+    });
+
+    const signedRes1 = await handleWorkerProxyRequest(new Request(signedReqUrl), env, ctx, {
+      fetcher: signedFetcher,
+      edgeCache,
+      nowSeconds: () => now,
+    });
+    await Promise.all(pending.splice(0));
+
+    expect(signedRes1.status).toBe(200);
+    expect(signedRes1.headers.get('cache-control')).toBe('no-store');
+    expect(signedRes1.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(signedRes1.headers.get('x-hikari-source-expirable')).toBe('1');
+    expect(capturedCfList[0]).toEqual({ cacheEverything: false, cacheTtl: 0 });
+
+    const signedRes2 = await handleWorkerProxyRequest(new Request(signedReqUrl), env, ctx, {
+      fetcher: signedFetcher,
+      edgeCache,
+      nowSeconds: () => now + 2,
+    });
+    expect(signedRes2.status).toBe(200);
+    // Nunca sofreu HIT do edgeCache -> chamou origem nas 2 requisições
+    expect(signedFetcher).toHaveBeenCalledTimes(2);
+
+    const signedBody = await signedRes1.text();
+    const childLinks = (signedBody.match(/\/api\/proxy\/stream\?[^\s"']+/g) ?? []).map(
+      (p) => new URL(`https://hikari-media-proxy.workers.dev${p}`)
+    );
+    expect(childLinks).toHaveLength(3);
+    for (const c of childLinks) {
+      expect(c.searchParams.get('ex')).toBe('1');
+      expect(c.searchParams.get('xsig')).toBeTruthy();
+    }
+
+    // 2. Manifesto SEM token na URL principal, COM tokens no corpo: não armazena no edgeCache e retorna no-store + ex=1
+    const cleanBodyTokenUrl = 'https://cdn.clean.example.com/hls/body-tokens/master.m3u8';
+    const cleanBodySig = await createWorkerProxySignature(cleanBodyTokenUrl, exp, TEST_SECRET);
+    const cleanBodyReq = `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(cleanBodyTokenUrl)}&exp=${exp}&sig=${cleanBodySig}`;
+    const bodyTokenFetcher = vi.fn(async () =>
+      new Response('#EXTM3U\n#EXTINF:5.0,\nseg-1.ts?sig=inner99\n#EXTINF:5.0,\nseg-2.ts', {
+        status: 200,
+        headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+      })
+    );
+    const rBodyToken1 = await handleWorkerProxyRequest(new Request(cleanBodyReq), env, ctx, {
+      fetcher: bodyTokenFetcher,
+      edgeCache,
+      nowSeconds: () => now,
+    });
+    await Promise.all(pending.splice(0));
+    expect(rBodyToken1.headers.get('cache-control')).toBe('no-store');
+    expect(rBodyToken1.headers.get('x-hikari-source-expirable')).toBe('1');
+
+    // Repetição prova que não foi salvo no edgeCache
+    await handleWorkerProxyRequest(new Request(cleanBodyReq), env, ctx, {
+      fetcher: bodyTokenFetcher,
+      edgeCache,
+      nowSeconds: () => now + 1,
+    });
+    expect(bodyTokenFetcher).toHaveBeenCalledTimes(2);
+
+    // 3. Manifesto SEM token na URL principal, redirecionando para URL assinada: também não entra no edgeCache
+    const cleanRedirectUrl = 'https://cdn.clean.example.com/hls/redir/master.m3u8';
+    const cleanRedirectSig = await createWorkerProxySignature(cleanRedirectUrl, exp, TEST_SECRET);
+    const cleanRedirectReq = `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(cleanRedirectUrl)}&exp=${exp}&sig=${cleanRedirectSig}`;
+    const redirectFetcher = vi.fn(async (input: string) => {
+      if (input === cleanRedirectUrl) {
+        return new Response(null, {
+          status: 302,
+          headers: {
+            location: 'https://edge.clean.example.com/hls/master.m3u8?X-Amz-Expires=120&X-Amz-Signature=abc',
+          },
+        });
+      }
+      return new Response('#EXTM3U\n#EXTINF:5.0,\nseg-clean.ts\n#EXT-X-ENDLIST', {
+        status: 200,
+        headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+      });
+    });
+    const rRedir1 = await handleWorkerProxyRequest(new Request(cleanRedirectReq), env, ctx, {
+      fetcher: redirectFetcher,
+      edgeCache,
+      nowSeconds: () => now,
+    });
+    await Promise.all(pending.splice(0));
+    expect(rRedir1.headers.get('cache-control')).toBe('no-store');
+    expect(rRedir1.headers.get('x-hikari-source-expirable')).toBe('1');
+    const rRedirText = await rRedir1.text();
+    const rRedirChild = new URL(
+      `https://hikari-media-proxy.workers.dev${rRedirText.split('\n').find((l) => l.includes('seg-clean.ts'))!.trim()}`
+    );
+    expect(rRedirChild.searchParams.get('ex')).toBe('1');
+    expect(rRedirChild.searchParams.get('xsig')).toBeTruthy();
+
+    await handleWorkerProxyRequest(new Request(cleanRedirectReq), env, ctx, {
+      fetcher: redirectFetcher,
+      edgeCache,
+      nowSeconds: () => now + 1,
+    });
+    expect(redirectFetcher).toHaveBeenCalledTimes(4); // 2 hops x 2 requests (sem HIT no edgeCache)
+
+    // 4. Segmento derivado com TTL curto vs opaco e respeito ao Cache-Control da origem
+    const segTtlUrl = `https://cdn.signed.example.com/ep01/seg-ttl.ts?token=abc&expires=${now + 20}`;
+    const segTtlSig = await createWorkerProxySignature(segTtlUrl, exp, TEST_SECRET);
+    const segTtlRes = await handleWorkerProxyRequest(
+      new Request(
+        `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(segTtlUrl)}&exp=${exp}&sig=${segTtlSig}`
+      ),
+      env,
+      ctx,
+      {
+        edgeCache,
+        nowSeconds: () => now,
+        fetcher: async () =>
+          new Response(new Uint8Array([0x47, 0x40, 0x00, 0x10]), {
+            status: 200,
+            headers: { 'content-type': 'video/mp2t' },
+          }),
+      }
+    );
+    expect(segTtlRes.headers.get('cache-control')).toBe('private, max-age=15, must-revalidate');
+    expect(segTtlRes.headers.get('cdn-cache-control')).toBe('no-store');
+
+    const segChildInherited = childLinks.find((c) => c.searchParams.get('url')?.endsWith('/seg-001.ts'))!;
+    const segOpaqueRes = await handleWorkerProxyRequest(new Request(segChildInherited.toString()), env, ctx, {
+      edgeCache,
+      nowSeconds: () => now,
+      fetcher: async () =>
+        new Response(new Uint8Array([0x47, 0x40, 0x00, 0x11]), {
+          status: 200,
+          headers: { 'content-type': 'video/mp2t' },
+        }),
+    });
+    expect(segOpaqueRes.headers.get('cache-control')).toBe('no-store');
+
+    // Origem pública com Cache-Control: no-store não é cacheada no edgeCache nem ganha immutable
+    const publicNoStoreUrl = 'https://cdn-sv01.maximaimg.online/stream/b/ep01/seg-nostore.ts';
+    const publicNoStoreSig = await createWorkerProxySignature(publicNoStoreUrl, exp, TEST_SECRET);
+    const publicNoStoreReq = `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(publicNoStoreUrl)}&exp=${exp}&sig=${publicNoStoreSig}`;
+    const originNoStoreFetcher = vi.fn(async () =>
+      new Response(new Uint8Array([0x47, 0x40, 0x00, 0x12]), {
+        status: 200,
+        headers: {
+          'content-type': 'video/mp2t',
+          'cache-control': 'no-store',
+        },
+      })
+    );
+    const pubNs1 = await handleWorkerProxyRequest(new Request(publicNoStoreReq), env, ctx, {
+      fetcher: originNoStoreFetcher,
+      edgeCache,
+      nowSeconds: () => now,
+    });
+    await Promise.all(pending.splice(0));
+    expect(pubNs1.headers.get('cache-control')).toBe('no-store');
+    await handleWorkerProxyRequest(new Request(publicNoStoreReq), env, ctx, {
+      fetcher: originNoStoreFetcher,
+      edgeCache,
+      nowSeconds: () => now + 1,
+    });
+    expect(originNoStoreFetcher).toHaveBeenCalledTimes(2);
+
+    // 5. Falha na detecção de tokens opera fail-safe sem quebrar reprodução
+    const failSafeUrl = 'https://cdn.clean.example.com/hls/failsafe/seg.ts';
+    const failSafeSig = await createWorkerProxySignature(failSafeUrl, exp, TEST_SECRET);
+    const failSafeRes = await handleWorkerProxyRequest(
+      new Request(
+        `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(failSafeUrl)}&exp=${exp}&sig=${failSafeSig}`
+      ),
+      env,
+      ctx,
+      {
+        edgeCache,
+        nowSeconds: () => now,
+        detectExpirableTokens: () => {
+          throw new Error('boom');
+        },
+        fetcher: async () =>
+          new Response(new Uint8Array([0x47, 0x40, 0x00, 0x13]), {
+            status: 200,
+            headers: { 'content-type': 'video/mp2t' },
+          }),
+      }
+    );
+    expect(failSafeRes.status).toBe(200);
+    expect(failSafeRes.headers.get('cache-control')).toBe('no-store');
+    expect(failSafeRes.headers.get('x-hikari-source-expirable')).toBe('1');
   });
 });

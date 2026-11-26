@@ -21,6 +21,7 @@ import type {
 import { extractHlsVariantUrls } from '@/lib/proxy-signing';
 import {
   classifyEmbedHost,
+  describeExpirableHlsTokens,
   detectSourceKind,
   type ExplicitSourceKind,
   hasExpirableHlsTokens,
@@ -599,14 +600,10 @@ async function detectExpirableHlsSource(params: {
   const matchedTokens: string[] = [];
   const collectTokenMatches = (text: string | null | undefined) => {
     if (!text) return;
-    if (/x-amz-expires/i.test(text) && !matchedTokens.includes('X-Amz-Expires')) {
-      matchedTokens.push('X-Amz-Expires');
-    }
-    if (/(?:^|[?&#,;,\s"'])token=/i.test(text) && !matchedTokens.includes('token=')) {
-      matchedTokens.push('token=');
-    }
-    if (/(?:^|[?&#,;,\s"'])sig=/i.test(text) && !matchedTokens.includes('sig=')) {
-      matchedTokens.push('sig=');
+    for (const label of describeExpirableHlsTokens(text)) {
+      if (!matchedTokens.includes(label)) {
+        matchedTokens.push(label);
+      }
     }
   };
 

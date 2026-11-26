@@ -9,7 +9,8 @@ const MAX_PEEK_BYTES = 512;
 const MAX_URL_LENGTH = 8192;
 const MAX_HLS_REWRITE_DEPTH = 2;
 const SEGMENT_CACHE_TTL_SECONDS = 31536000; // 1 ano
-const EXPIRABLE_SEGMENT_CACHE_TTL_SECONDS = 30;
+const MAX_EXPIRABLE_BINARY_CACHE_SECONDS = 30;
+const EXPIRABLE_SAFETY_MARGIN_SECONDS = 5;
 const MANIFEST_CACHE_TTL_SECONDS = 5;
 const STABLE_SIGN_WINDOW_SECONDS = 60 * 60 * 24 * 7; // 7 dias (chave de cache estável)
 export const LEARNED_REFERER_TTL_SECONDS = 15 * 60; // 15 minutos
@@ -55,6 +56,7 @@ export interface WorkerFetchDeps {
   edgeCache?: Cache | null;
   nowSeconds?: () => number;
   learnedRefererStore?: WorkerLearnedRefererStore | null;
+  detectExpirableTokens?: (input: string) => boolean;
 }
 
 interface WorkerLearnedRefererEntry {
@@ -78,9 +80,154 @@ function getCorsHeaders(): Record<string, string> {
   };
 }
 
-function hasExpirableHlsTokens(input: string): boolean {
+const NAMED_EXPIRABLE_PARAM_RE =
+  /(?:^|[?&#,;,\s"'/~])(expires|exp|token|sig|signature|hash|auth|hmac|hdnea|hdnts|policy|key-pair-id|x-amz-expires|x-amz-date|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-expires|x-goog-date|x-goog-signature|x-goog-credential|bcdn_token)=[^\s"'<>&#,;]+/gi;
+
+const SHORT_QUERY_EXPIRABLE_PARAM_RE = /[?&](e|t)=[^&#\s"'<>]+/gi;
+
+const PATH_NAMED_EXPIRY_RE = /\/(?:expires|exp)\/\d{9,13}(?:\/|[?#]|$)/i;
+
+const PATH_NAMED_TOKEN_RE =
+  /\/(?:token|sig|signature|hmac|hash|auth)\/(?![^/\s"'?#]*\.(?:m3u8?|ts|m4s|mp4|m4v|webm|webp|key|aac|mp3|vtt|srt|png|jpg|jpeg)(?:[/?#]|$))[A-Za-z0-9._~-]{6,}(?:\/|[?#]|$)/i;
+
+const PATH_PAIRED_TOKEN_TS_RE =
+  /\/(?:[A-Za-z0-9_-]{16,}\/(?:1[5-9]\d{8}|2\d{9})|(?:1[5-9]\d{8}|2\d{9})\/[A-Za-z0-9_-]{16,})(?:\/|[?#]|$)/;
+
+const EMBEDDED_JWT_RE = /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/;
+
+export function hasExpirableHlsTokens(input: string): boolean {
   if (!input) return false;
-  return /(?:x-amz-expires|(?:^|[?&#,;,\s"'])token=|(?:^|[?&#,;,\s"'])sig=)/i.test(input);
+  try {
+    NAMED_EXPIRABLE_PARAM_RE.lastIndex = 0;
+    if (NAMED_EXPIRABLE_PARAM_RE.test(input)) return true;
+
+    SHORT_QUERY_EXPIRABLE_PARAM_RE.lastIndex = 0;
+    if (SHORT_QUERY_EXPIRABLE_PARAM_RE.test(input)) return true;
+
+    if (
+      PATH_NAMED_EXPIRY_RE.test(input) ||
+      PATH_NAMED_TOKEN_RE.test(input) ||
+      PATH_PAIRED_TOKEN_TS_RE.test(input) ||
+      EMBEDDED_JWT_RE.test(input)
+    ) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+function safeDetectExpirableWorker(
+  input: string,
+  detector: (value: string) => boolean = hasExpirableHlsTokens
+): boolean {
+  if (!input) return false;
+  try {
+    return Boolean(detector(input));
+  } catch {
+    return true;
+  }
+}
+
+function parseUnixEpochSeconds(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^\d{9,13}$/.test(trimmed)) return null;
+  const num = Number(trimmed);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return trimmed.length >= 12 ? Math.floor(num / 1000) : num;
+}
+
+function parseAmzIsoDateSeconds(raw: string): number | null {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/i.exec(raw.trim());
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const hour = Number(m[4]);
+  const min = Number(m[5]);
+  const sec = Number(m[6]);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || min > 59 || sec > 59) {
+    return null;
+  }
+  const ms = Date.UTC(year, month - 1, day, hour, min, sec);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
+function extractExpirableTokenRemainingSecondsWorker(
+  rawUrl: string,
+  nowSeconds = Math.floor(Date.now() / 1000)
+): number | null {
+  if (!rawUrl) return null;
+  try {
+    const parsed = new URL(rawUrl);
+    const expiries: number[] = [];
+    const paramsLower = new Map<string, string>();
+
+    for (const [k, v] of parsed.searchParams.entries()) {
+      paramsLower.set(k.toLowerCase(), v);
+    }
+
+    for (const key of ['expires', 'exp', 'e', 'x-goog-expires']) {
+      const val = paramsLower.get(key);
+      if (val) {
+        const ts = parseUnixEpochSeconds(val);
+        if (ts !== null) {
+          expiries.push(ts - nowSeconds);
+        }
+      }
+    }
+
+    for (const nestedKey of ['hdnea', 'hdnts']) {
+      const nestedVal = paramsLower.get(nestedKey);
+      if (nestedVal) {
+        const m = /(?:^|[~&])(?:exp|expires)=(\d{9,13})(?:$|[~&])/i.exec(nestedVal);
+        if (m) {
+          const ts = parseUnixEpochSeconds(m[1]);
+          if (ts !== null) {
+            expiries.push(ts - nowSeconds);
+          }
+        }
+      }
+    }
+
+    const amzDate = paramsLower.get('x-amz-date');
+    const amzExpires = paramsLower.get('x-amz-expires');
+    if (amzDate && amzExpires && /^\d+$/.test(amzExpires.trim())) {
+      const signedAt = parseAmzIsoDateSeconds(amzDate);
+      const ttl = Number(amzExpires.trim());
+      if (signedAt !== null && Number.isFinite(ttl) && ttl >= 0) {
+        expiries.push(signedAt + ttl - nowSeconds);
+      }
+    }
+
+    const pathNestedExp = /(?:^|[~/])(?:exp|expires)[=/](\d{9,13})(?:$|[~/?#])/i.exec(
+      parsed.pathname
+    );
+    if (pathNestedExp) {
+      const ts = parseUnixEpochSeconds(pathNestedExp[1]);
+      if (ts !== null) {
+        expiries.push(ts - nowSeconds);
+      }
+    }
+
+    const pathPaired = /\/(?:1[5-9]\d{8}|2\d{9})(?:\/|$)/.exec(parsed.pathname);
+    if (pathPaired && PATH_PAIRED_TOKEN_TS_RE.test(parsed.pathname)) {
+      const tsMatch = /(1[5-9]\d{8}|2\d{9})/.exec(pathPaired[0]);
+      if (tsMatch) {
+        const ts = parseUnixEpochSeconds(tsMatch[1]);
+        if (ts !== null) {
+          expiries.push(ts - nowSeconds);
+        }
+      }
+    }
+
+    if (expiries.length === 0) return null;
+    return Math.min(...expiries);
+  } catch {
+    return null;
+  }
 }
 
 function isMaximaimgHost(hostname: string): boolean {
@@ -397,6 +544,50 @@ export async function verifyWorkerProxyReferer(
     payload as unknown as BufferSource
   );
   return valid ? { valid: true, referer: refParam } : { valid: false, referer: null };
+}
+
+export async function createWorkerExpirableSignature(
+  targetUrl: string,
+  expUnixSeconds: number,
+  secret: string
+): Promise<string> {
+  const key = await importHmacKey(secret);
+  const payload = new TextEncoder().encode(`proxy-exp:${targetUrl}:${expUnixSeconds}:1`);
+  const sigBuf = await crypto.subtle.sign('HMAC', key, payload);
+  return bytesToBase64Url(new Uint8Array(sigBuf));
+}
+
+export async function verifyWorkerProxyExpirable(
+  targetUrl: string,
+  expParam: string | null,
+  expirableParam: string | null,
+  expirableSigParam: string | null,
+  secret: string,
+  nowSeconds = Math.floor(Date.now() / 1000)
+): Promise<{ valid: boolean; expirable: boolean }> {
+  if (expirableParam === null) {
+    return { valid: true, expirable: false };
+  }
+  if (expirableParam !== '1' || !expParam || !expirableSigParam) {
+    return { valid: false, expirable: false };
+  }
+  const exp = Number(expParam);
+  if (!Number.isInteger(exp) || exp < nowSeconds) {
+    return { valid: false, expirable: false };
+  }
+  const sigBytes = base64UrlToBytes(expirableSigParam);
+  if (!sigBytes || sigBytes.byteLength !== 32) {
+    return { valid: false, expirable: false };
+  }
+  const key = await importHmacKey(secret);
+  const payload = new TextEncoder().encode(`proxy-exp:${targetUrl}:${exp}:1`);
+  const valid = await crypto.subtle.verify(
+    'HMAC',
+    key,
+    sigBytes as unknown as BufferSource,
+    payload as unknown as BufferSource
+  );
+  return valid ? { valid: true, expirable: true } : { valid: false, expirable: false };
 }
 
 export function getStableSegmentExpiry(nowSeconds = Math.floor(Date.now() / 1000)): number {
@@ -900,19 +1091,108 @@ function resolveBinaryContentType(contentType: string, targetUrl?: URL): string 
   return contentType || 'application/octet-stream';
 }
 
+interface OriginCacheDirectives {
+  hasNoStore: boolean;
+  hasNoCache: boolean;
+  hasPrivate: boolean;
+  effectiveMaxAge: number | null;
+}
+
+function parseOriginCacheDirectivesWorker(upstream: Response): OriginCacheDirectives {
+  const cc = upstream.headers.get('cache-control') || '';
+  if (!cc.trim()) {
+    return { hasNoStore: false, hasNoCache: false, hasPrivate: false, effectiveMaxAge: null };
+  }
+  const hasNoStore = /\bno-store\b/i.test(cc);
+  const hasNoCache = /\bno-cache\b/i.test(cc);
+  const hasPrivate = /\bprivate\b/i.test(cc);
+
+  const ageCandidates: number[] = [];
+  const sMaxMatch = /\bs-maxage=(\d+)/i.exec(cc);
+  if (sMaxMatch) {
+    const val = Number(sMaxMatch[1]);
+    if (Number.isFinite(val)) ageCandidates.push(val);
+  }
+  const maxAgeMatch = /\bmax-age=(\d+)/i.exec(cc);
+  if (maxAgeMatch) {
+    const val = Number(maxAgeMatch[1]);
+    if (Number.isFinite(val)) ageCandidates.push(val);
+  }
+
+  return {
+    hasNoStore,
+    hasNoCache,
+    hasPrivate,
+    effectiveMaxAge: ageCandidates.length > 0 ? Math.min(...ageCandidates) : null,
+  };
+}
+
 function buildBinaryResponseHeaders(
   upstream: Response,
   contentType: string,
-  targetUrl?: URL
+  targetUrl?: URL,
+  inheritedExpirable = false,
+  nowSeconds = Math.floor(Date.now() / 1000),
+  sourceTargetUrl?: string,
+  detectExpirable: (input: string) => boolean = hasExpirableHlsTokens
 ): Headers {
   const outHeaders = new Headers(getCorsHeaders());
   outHeaders.set('Content-Type', resolveBinaryContentType(contentType, targetUrl));
-  const isExpirable = Boolean(targetUrl && hasExpirableHlsTokens(targetUrl.toString()));
-  const cacheHeader = isExpirable
-    ? `public, max-age=${EXPIRABLE_SEGMENT_CACHE_TTL_SECONDS}, must-revalidate`
-    : `public, max-age=${SEGMENT_CACHE_TTL_SECONDS}, immutable`;
+  const isExpirable =
+    inheritedExpirable ||
+    Boolean(sourceTargetUrl && safeDetectExpirableWorker(sourceTargetUrl, detectExpirable)) ||
+    Boolean(targetUrl && safeDetectExpirableWorker(targetUrl.toString(), detectExpirable));
+  const origin = parseOriginCacheDirectivesWorker(upstream);
+
+  let cacheHeader: string;
+  let cdnCacheHeader: string;
+
+  if (isExpirable) {
+    cdnCacheHeader = 'no-store';
+    if (origin.hasNoStore || origin.hasNoCache || origin.effectiveMaxAge === 0) {
+      cacheHeader = 'no-store';
+    } else {
+      const candidateRemaining =
+        (targetUrl
+          ? extractExpirableTokenRemainingSecondsWorker(targetUrl.toString(), nowSeconds)
+          : null) ??
+        (sourceTargetUrl
+          ? extractExpirableTokenRemainingSecondsWorker(sourceTargetUrl, nowSeconds)
+          : null);
+
+      if (candidateRemaining === null) {
+        cacheHeader = 'no-store';
+      } else {
+        const capped = Math.min(
+          MAX_EXPIRABLE_BINARY_CACHE_SECONDS,
+          Math.floor(candidateRemaining) - EXPIRABLE_SAFETY_MARGIN_SECONDS,
+          origin.effectiveMaxAge ?? MAX_EXPIRABLE_BINARY_CACHE_SECONDS
+        );
+        cacheHeader =
+          capped > 0 ? `private, max-age=${capped}, must-revalidate` : 'no-store';
+      }
+    }
+    outHeaders.set('X-Hikari-Source-Expirable', '1');
+  } else if (origin.hasNoStore) {
+    cacheHeader = 'no-store';
+    cdnCacheHeader = 'no-store';
+  } else if (origin.hasPrivate) {
+    const capped = origin.effectiveMaxAge !== null ? Math.min(300, origin.effectiveMaxAge) : 0;
+    cacheHeader = capped > 0 ? `private, max-age=${capped}, must-revalidate` : 'private, no-store';
+    cdnCacheHeader = 'no-store';
+  } else if (origin.hasNoCache || origin.effectiveMaxAge === 0) {
+    cacheHeader = 'no-cache, must-revalidate';
+    cdnCacheHeader = 'no-cache, must-revalidate';
+  } else if (origin.effectiveMaxAge !== null && origin.effectiveMaxAge < SEGMENT_CACHE_TTL_SECONDS) {
+    cacheHeader = `public, max-age=${origin.effectiveMaxAge}`;
+    cdnCacheHeader = `public, max-age=${origin.effectiveMaxAge}`;
+  } else {
+    cacheHeader = `public, max-age=${SEGMENT_CACHE_TTL_SECONDS}, immutable`;
+    cdnCacheHeader = `public, max-age=${SEGMENT_CACHE_TTL_SECONDS}, immutable`;
+  }
+
   outHeaders.set('Cache-Control', cacheHeader);
-  outHeaders.set('CDN-Cache-Control', cacheHeader);
+  outHeaders.set('CDN-Cache-Control', cdnCacheHeader);
   outHeaders.set('X-Content-Type-Options', 'nosniff');
 
   const passthroughHeaders = [
@@ -934,11 +1214,31 @@ function buildBinaryResponseHeaders(
 function buildManifestResponseHeaders(upstream: Response, isExpirable = false): Headers {
   const outHeaders = new Headers(getCorsHeaders());
   outHeaders.set('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
-  outHeaders.set('Cache-Control', `public, max-age=${MANIFEST_CACHE_TTL_SECONDS}`);
-  outHeaders.set('CDN-Cache-Control', `public, max-age=${MANIFEST_CACHE_TTL_SECONDS}, stale-while-revalidate=30`);
+  const origin = parseOriginCacheDirectivesWorker(upstream);
+
+  let cacheHeader = `public, max-age=${MANIFEST_CACHE_TTL_SECONDS}`;
+  let cdnCacheHeader = `public, max-age=${MANIFEST_CACHE_TTL_SECONDS}, stale-while-revalidate=30`;
+
   if (isExpirable) {
+    cacheHeader = 'no-store';
+    cdnCacheHeader = 'no-store';
     outHeaders.set('X-Hikari-Source-Expirable', '1');
+  } else if (origin.hasNoStore) {
+    cacheHeader = 'no-store';
+    cdnCacheHeader = 'no-store';
+  } else if (origin.hasPrivate) {
+    cacheHeader = 'private, no-cache';
+    cdnCacheHeader = 'no-store';
+  } else if (origin.hasNoCache || origin.effectiveMaxAge === 0) {
+    cacheHeader = 'no-cache, must-revalidate';
+    cdnCacheHeader = 'no-cache, must-revalidate';
+  } else if (origin.effectiveMaxAge !== null && origin.effectiveMaxAge < MANIFEST_CACHE_TTL_SECONDS) {
+    cacheHeader = `public, max-age=${origin.effectiveMaxAge}`;
+    cdnCacheHeader = `public, max-age=${origin.effectiveMaxAge}`;
   }
+
+  outHeaders.set('Cache-Control', cacheHeader);
+  outHeaders.set('CDN-Cache-Control', cdnCacheHeader);
 
   const cfStatus = upstream.headers.get('cf-cache-status');
   if (cfStatus) {
@@ -1222,6 +1522,8 @@ export async function handleWorkerProxyRequest(
   const depthSigParam = reqUrl.searchParams.get('dsig');
   const refParam = reqUrl.searchParams.get('ref');
   const refSigParam = reqUrl.searchParams.get('rsig');
+  const expirableParam = reqUrl.searchParams.get('ex');
+  const expirableSigParam = reqUrl.searchParams.get('xsig');
 
   const urlCheck = validateHttpUrl(rawTarget);
   if (!urlCheck.valid || !urlCheck.normalizedUrl) {
@@ -1233,6 +1535,7 @@ export async function handleWorkerProxyRequest(
 
   const nowSecondsFn = deps.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
   const nowSeconds = nowSecondsFn();
+  const detectExpirable = deps.detectExpirableTokens ?? hasExpirableHlsTokens;
   const signatureValid = await verifyWorkerProxySignature(
     urlCheck.normalizedUrl,
     exp,
@@ -1276,8 +1579,24 @@ export async function handleWorkerProxyRequest(
     });
   }
 
+  const expirableCheck = await verifyWorkerProxyExpirable(
+    urlCheck.normalizedUrl,
+    exp,
+    expirableParam,
+    expirableSigParam,
+    secret,
+    nowSeconds
+  );
+  if (!expirableCheck.valid) {
+    return new Response('Assinatura de expiração do proxy inválida.', {
+      status: 403,
+      headers: getCorsHeaders(),
+    });
+  }
+
   const normalizedTargetUrl = urlCheck.normalizedUrl;
-  const targetIsExpirable = hasExpirableHlsTokens(normalizedTargetUrl);
+  const targetIsExpirable =
+    expirableCheck.expirable || safeDetectExpirableWorker(normalizedTargetUrl, detectExpirable);
   const rangeHeader = request.headers.get('range');
   const edgeCache = deps.edgeCache !== undefined ? deps.edgeCache : getDefaultEdgeCache();
   const learnedStore =
@@ -1315,11 +1634,12 @@ export async function handleWorkerProxyRequest(
   try {
     const targetUrl = new URL(normalizedTargetUrl);
     const isLikelyManifest = shouldInspectForHlsManifest('', targetUrl);
-    const cfTtl = isLikelyManifest
-      ? MANIFEST_CACHE_TTL_SECONDS
-      : targetIsExpirable
-        ? EXPIRABLE_SEGMENT_CACHE_TTL_SECONDS
-        : SEGMENT_CACHE_TTL_SECONDS;
+    const cfProps: CloudflareCfProperties = targetIsExpirable
+      ? { cacheEverything: false, cacheTtl: 0 }
+      : {
+          cacheEverything: true,
+          cacheTtl: isLikelyManifest ? MANIFEST_CACHE_TTL_SECONDS : SEGMENT_CACHE_TTL_SECONDS,
+        };
 
     const {
       response: upstream,
@@ -1330,10 +1650,7 @@ export async function handleWorkerProxyRequest(
       targetUrl,
       request,
       env,
-      {
-        cacheEverything: true,
-        cacheTtl: cfTtl,
-      },
+      cfProps,
       fetcher,
       refCheck.referer,
       learnedStore
@@ -1356,31 +1673,59 @@ export async function handleWorkerProxyRequest(
         ? winningReferer
         : null;
 
-    const signChildUrl = async (resolvedUrl: string): Promise<string> => {
-      const childSig = await createWorkerProxySignature(resolvedUrl, stableExp, secret);
-      const childDepthSig = await createWorkerDepthSignature(resolvedUrl, stableExp, nextDepth, secret);
-      const params = new URLSearchParams({
-        url: resolvedUrl,
-        exp: String(stableExp),
-        sig: childSig,
-        d: String(nextDepth),
-        dsig: childDepthSig,
-      });
-      if (propagatedReferer) {
-        const childRefSig = await createWorkerRefererSignature(
-          resolvedUrl,
-          stableExp,
-          propagatedReferer,
-          secret
-        );
-        params.set('ref', propagatedReferer);
-        params.set('rsig', childRefSig);
-      }
-      return `${proxyPath}?${params.toString()}`;
+    const createSignChildUrl = (baseExpirable: boolean, onChildToken: () => void) => {
+      return async (resolvedUrl: string): Promise<string> => {
+        const childSig = await createWorkerProxySignature(resolvedUrl, stableExp, secret);
+        const childDepthSig = await createWorkerDepthSignature(resolvedUrl, stableExp, nextDepth, secret);
+        const childExpirable =
+          baseExpirable || safeDetectExpirableWorker(resolvedUrl, detectExpirable);
+        if (childExpirable) {
+          onChildToken();
+        }
+        const params = new URLSearchParams({
+          url: resolvedUrl,
+          exp: String(stableExp),
+          sig: childSig,
+          d: String(nextDepth),
+          dsig: childDepthSig,
+        });
+        if (propagatedReferer) {
+          const childRefSig = await createWorkerRefererSignature(
+            resolvedUrl,
+            stableExp,
+            propagatedReferer,
+            secret
+          );
+          params.set('ref', propagatedReferer);
+          params.set('rsig', childRefSig);
+        }
+        if (childExpirable) {
+          const childExpSig = await createWorkerExpirableSignature(resolvedUrl, stableExp, secret);
+          params.set('ex', '1');
+          params.set('xsig', childExpSig);
+        }
+        return `${proxyPath}?${params.toString()}`;
+      };
     };
 
-    const cacheIfEligible = (res: Response): Response => {
-      if (edgeCache && cacheKeyReq && res.status === 200) {
+    const isResponseCacheableForEdge = (res: Response, responseIsExpirable: boolean): boolean => {
+      if (responseIsExpirable || !edgeCache || !cacheKeyReq || res.status !== 200) {
+        return false;
+      }
+      const cc = (res.headers.get('cache-control') || '').toLowerCase();
+      if (
+        cc.includes('no-store') ||
+        cc.includes('private') ||
+        cc.includes('no-cache') ||
+        /\bmax-age=0\b/.test(cc)
+      ) {
+        return false;
+      }
+      return true;
+    };
+
+    const cacheIfEligible = (res: Response, responseIsExpirable: boolean): Response => {
+      if (edgeCache && cacheKeyReq && isResponseCacheableForEdge(res, responseIsExpirable)) {
         const putPromise = edgeCache.put(cacheKeyReq, res.clone()).catch(() => {});
         if (ctx) {
           ctx.waitUntil(putPromise);
@@ -1388,6 +1733,32 @@ export async function handleWorkerProxyRequest(
       }
       return res;
     };
+
+    const handleManifestBytes = async (text: string): Promise<Response> => {
+      const baseExpirable =
+        targetIsExpirable ||
+        safeDetectExpirableWorker(finalUrl, detectExpirable) ||
+        safeDetectExpirableWorker(text, detectExpirable);
+      let childTokenDetected = false;
+      const rewritten = await rewriteM3u8PlaylistAsync(
+        text,
+        finalUrl,
+        createSignChildUrl(baseExpirable, () => {
+          childTokenDetected = true;
+        })
+      );
+      const isExpirable = baseExpirable || childTokenDetected;
+      return cacheIfEligible(
+        new Response(rewritten, {
+          status: 200,
+          headers: buildManifestResponseHeaders(upstream, isExpirable),
+        }),
+        isExpirable
+      );
+    };
+
+    const binaryExpirable =
+      targetIsExpirable || safeDetectExpirableWorker(finalUrl, detectExpirable);
 
     if (
       request.method === 'GET' &&
@@ -1407,17 +1778,7 @@ export async function handleWorkerProxyRequest(
             );
           }
           const text = new TextDecoder('utf-8').decode(rawBytes);
-          const isExpirable =
-            targetIsExpirable ||
-            hasExpirableHlsTokens(finalUrl) ||
-            hasExpirableHlsTokens(text);
-          const rewritten = await rewriteM3u8PlaylistAsync(text, finalUrl, signChildUrl);
-          return cacheIfEligible(
-            new Response(rewritten, {
-              status: 200,
-              headers: buildManifestResponseHeaders(upstream, isExpirable),
-            })
-          );
+          return await handleManifestBytes(text);
         }
         if (isInvalidHtmlManifestResponse(rawBytes, contentType, finalParsed)) {
           return new Response('Origem retornou página HTML em vez de manifesto HLS válido.', {
@@ -1428,8 +1789,17 @@ export async function handleWorkerProxyRequest(
         return cacheIfEligible(
           new Response(rawBytes, {
             status: upstream.status,
-            headers: buildBinaryResponseHeaders(upstream, contentType, finalParsed),
-          })
+            headers: buildBinaryResponseHeaders(
+              upstream,
+              contentType,
+              finalParsed,
+              targetIsExpirable,
+              nowSeconds,
+              normalizedTargetUrl,
+              detectExpirable
+            ),
+          }),
+          binaryExpirable
         );
       }
 
@@ -1478,17 +1848,7 @@ export async function handleWorkerProxyRequest(
           }
         }
         const text = new TextDecoder('utf-8').decode(concatChunks(bufferedChunks));
-        const isExpirable =
-          targetIsExpirable ||
-          hasExpirableHlsTokens(finalUrl) ||
-          hasExpirableHlsTokens(text);
-        const rewritten = await rewriteM3u8PlaylistAsync(text, finalUrl, signChildUrl);
-        return cacheIfEligible(
-          new Response(rewritten, {
-            status: 200,
-            headers: buildManifestResponseHeaders(upstream, isExpirable),
-          })
-        );
+        return await handleManifestBytes(text);
       }
 
       if (isInvalidHtmlManifestResponse(initialBytes, contentType, finalParsed)) {
@@ -1503,7 +1863,15 @@ export async function handleWorkerProxyRequest(
         });
       }
 
-      const outHeaders = buildBinaryResponseHeaders(upstream, contentType, finalParsed);
+      const outHeaders = buildBinaryResponseHeaders(
+        upstream,
+        contentType,
+        finalParsed,
+        targetIsExpirable,
+        nowSeconds,
+        normalizedTargetUrl,
+        detectExpirable
+      );
       let chunkIndex = 0;
       const passthroughStream = new ReadableStream<Uint8Array>({
         async pull(controller) {
@@ -1539,16 +1907,26 @@ export async function handleWorkerProxyRequest(
         new Response(passthroughStream, {
           status: upstream.status,
           headers: outHeaders,
-        })
+        }),
+        binaryExpirable
       );
     }
 
-    const outHeaders = buildBinaryResponseHeaders(upstream, contentType, finalParsed);
+    const outHeaders = buildBinaryResponseHeaders(
+      upstream,
+      contentType,
+      finalParsed,
+      targetIsExpirable,
+      nowSeconds,
+      normalizedTargetUrl,
+      detectExpirable
+    );
     return cacheIfEligible(
       new Response(upstream.body, {
         status: upstream.status,
         headers: outHeaders,
-      })
+      }),
+      binaryExpirable
     );
   } catch (err) {
     const message =

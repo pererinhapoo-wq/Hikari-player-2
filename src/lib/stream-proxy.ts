@@ -3,12 +3,14 @@ import {
   MAX_HLS_REWRITE_DEPTH,
   rewriteM3u8Playlist,
   verifyProxyDepth,
+  verifyProxyExpirable,
   verifyProxyReferer,
   verifyProxySignature,
 } from '@/lib/proxy-signing';
 import { isAllowedProxyMediaUrl, safeFetchWithRedirects } from '@/lib/ssrf';
 import {
   DIRECT_MEDIA_HOSTS,
+  extractExpirableTokenRemainingSeconds,
   hasExpirableHlsTokens,
   isDirectMediaHost,
   isMaximaimgHost,
@@ -433,22 +435,134 @@ function resolveBinaryContentType(contentType: string, targetUrl?: URL): string 
   return contentType || 'application/octet-stream';
 }
 
+const MAX_EXPIRABLE_BINARY_CACHE_SECONDS = 30;
+const EXPIRABLE_SAFETY_MARGIN_SECONDS = 5;
+
+function safeDetectExpirable(
+  input: string,
+  detector: (value: string) => boolean = hasExpirableHlsTokens
+): boolean {
+  if (!input) return false;
+  try {
+    return Boolean(detector(input));
+  } catch {
+    // Falha na detecção de tokens não interrompe reprodução e assume política conservadora
+    return true;
+  }
+}
+
+interface OriginCacheDirectives {
+  hasNoStore: boolean;
+  hasNoCache: boolean;
+  hasPrivate: boolean;
+  effectiveMaxAge: number | null;
+}
+
+function parseOriginCacheDirectives(upstream: Response): OriginCacheDirectives {
+  const cc = upstream.headers.get('cache-control') || '';
+  if (!cc.trim()) {
+    return { hasNoStore: false, hasNoCache: false, hasPrivate: false, effectiveMaxAge: null };
+  }
+  const hasNoStore = /\bno-store\b/i.test(cc);
+  const hasNoCache = /\bno-cache\b/i.test(cc);
+  const hasPrivate = /\bprivate\b/i.test(cc);
+
+  const ageCandidates: number[] = [];
+  const sMaxMatch = /\bs-maxage=(\d+)/i.exec(cc);
+  if (sMaxMatch) {
+    const val = Number(sMaxMatch[1]);
+    if (Number.isFinite(val)) ageCandidates.push(val);
+  }
+  const maxAgeMatch = /\bmax-age=(\d+)/i.exec(cc);
+  if (maxAgeMatch) {
+    const val = Number(maxAgeMatch[1]);
+    if (Number.isFinite(val)) ageCandidates.push(val);
+  }
+
+  return {
+    hasNoStore,
+    hasNoCache,
+    hasPrivate,
+    effectiveMaxAge: ageCandidates.length > 0 ? Math.min(...ageCandidates) : null,
+  };
+}
+
 function buildBinaryResponseHeaders(
   upstream: Response,
   contentType: string,
-  targetUrl?: URL
+  targetUrl?: URL,
+  inheritedExpirable = false,
+  nowSeconds = Math.floor(Date.now() / 1000),
+  sourceTargetUrl?: string,
+  detectExpirable: (input: string) => boolean = hasExpirableHlsTokens
 ): Headers {
   const outHeaders = new Headers();
   outHeaders.set('Content-Type', resolveBinaryContentType(contentType, targetUrl));
-  const isExpirable = Boolean(targetUrl && hasExpirableHlsTokens(targetUrl.toString()));
-  const cacheControl = isExpirable
-    ? 'public, max-age=30, must-revalidate'
-    : 'public, max-age=31536000, immutable';
+  const isExpirable =
+    inheritedExpirable ||
+    Boolean(sourceTargetUrl && safeDetectExpirable(sourceTargetUrl, detectExpirable)) ||
+    Boolean(targetUrl && safeDetectExpirable(targetUrl.toString(), detectExpirable));
+  const origin = parseOriginCacheDirectives(upstream);
+
+  let cacheControl: string;
+  let cdnCacheControl: string;
+
+  if (isExpirable) {
+    cdnCacheControl = 'no-store';
+    if (origin.hasNoStore || origin.hasNoCache || origin.effectiveMaxAge === 0) {
+      cacheControl = 'no-store';
+    } else {
+      const candidateRemaining =
+        (targetUrl
+          ? extractExpirableTokenRemainingSeconds(targetUrl.toString(), nowSeconds)
+          : null) ??
+        (sourceTargetUrl
+          ? extractExpirableTokenRemainingSeconds(sourceTargetUrl, nowSeconds)
+          : null);
+
+      if (candidateRemaining === null) {
+        cacheControl = 'no-store';
+      } else {
+        const capped = Math.min(
+          MAX_EXPIRABLE_BINARY_CACHE_SECONDS,
+          Math.floor(candidateRemaining) - EXPIRABLE_SAFETY_MARGIN_SECONDS,
+          origin.effectiveMaxAge ?? MAX_EXPIRABLE_BINARY_CACHE_SECONDS
+        );
+        cacheControl =
+          capped > 0 ? `private, max-age=${capped}, must-revalidate` : 'no-store';
+      }
+    }
+  } else if (origin.hasNoStore) {
+    cacheControl = 'no-store';
+    cdnCacheControl = 'no-store';
+  } else if (origin.hasPrivate) {
+    const capped = origin.effectiveMaxAge !== null ? Math.min(300, origin.effectiveMaxAge) : 0;
+    cacheControl = capped > 0 ? `private, max-age=${capped}, must-revalidate` : 'private, no-store';
+    cdnCacheControl = 'no-store';
+  } else if (origin.hasNoCache || origin.effectiveMaxAge === 0) {
+    cacheControl = 'no-cache, must-revalidate';
+    cdnCacheControl = 'no-cache, must-revalidate';
+  } else if (origin.effectiveMaxAge !== null && origin.effectiveMaxAge < 31536000) {
+    cacheControl = `public, max-age=${origin.effectiveMaxAge}`;
+    cdnCacheControl = `public, max-age=${origin.effectiveMaxAge}`;
+  } else {
+    cacheControl = 'public, max-age=31536000, immutable';
+    cdnCacheControl = 'public, max-age=31536000, immutable';
+  }
+
   outHeaders.set('Cache-Control', cacheControl);
-  outHeaders.set('CDN-Cache-Control', cacheControl);
+  outHeaders.set('CDN-Cache-Control', cdnCacheControl);
   outHeaders.set('X-Content-Type-Options', 'nosniff');
   outHeaders.set('Access-Control-Allow-Origin', '*');
-  outHeaders.set('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Length, Content-Range');
+  if (isExpirable) {
+    outHeaders.set('X-Hikari-Source-Expirable', '1');
+    outHeaders.set(
+      'Access-Control-Expose-Headers',
+      'Accept-Ranges, Content-Length, Content-Range, X-Hikari-Source-Expirable'
+    );
+  } else {
+    outHeaders.set('Access-Control-Expose-Headers', 'Accept-Ranges, Content-Length, Content-Range');
+  }
 
   const passthroughHeaders = ['content-length', 'content-range', 'accept-ranges'];
   for (const h of passthroughHeaders) {
@@ -459,11 +573,33 @@ function buildBinaryResponseHeaders(
   return outHeaders;
 }
 
-function buildManifestResponseHeaders(isExpirable = false): Headers {
+function buildManifestResponseHeaders(upstream: Response, isExpirable = false): Headers {
   const outHeaders = new Headers();
   outHeaders.set('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
-  outHeaders.set('Cache-Control', 'public, max-age=5, stale-while-revalidate=30');
-  outHeaders.set('CDN-Cache-Control', 'public, max-age=5, stale-while-revalidate=30');
+  const origin = parseOriginCacheDirectives(upstream);
+
+  let cacheControl = 'public, max-age=5, stale-while-revalidate=30';
+  let cdnCacheControl = 'public, max-age=5, stale-while-revalidate=30';
+
+  if (isExpirable) {
+    cacheControl = 'no-store';
+    cdnCacheControl = 'no-store';
+  } else if (origin.hasNoStore) {
+    cacheControl = 'no-store';
+    cdnCacheControl = 'no-store';
+  } else if (origin.hasPrivate) {
+    cacheControl = 'private, no-cache';
+    cdnCacheControl = 'no-store';
+  } else if (origin.hasNoCache || origin.effectiveMaxAge === 0) {
+    cacheControl = 'no-cache, must-revalidate';
+    cdnCacheControl = 'no-cache, must-revalidate';
+  } else if (origin.effectiveMaxAge !== null && origin.effectiveMaxAge < 5) {
+    cacheControl = `public, max-age=${origin.effectiveMaxAge}`;
+    cdnCacheControl = `public, max-age=${origin.effectiveMaxAge}`;
+  }
+
+  outHeaders.set('Cache-Control', cacheControl);
+  outHeaders.set('CDN-Cache-Control', cdnCacheControl);
   outHeaders.set('Access-Control-Allow-Origin', '*');
   if (isExpirable) {
     outHeaders.set('X-Hikari-Source-Expirable', '1');
@@ -539,9 +675,42 @@ async function handleInspectedUpstreamResponse(
   contentType: string,
   depth: number,
   sourceTargetUrl: string,
-  propagatedReferer?: string | null
+  propagatedReferer?: string | null,
+  inheritedExpirable = false,
+  nowSeconds = Math.floor(Date.now() / 1000),
+  detectExpirable: (input: string) => boolean = hasExpirableHlsTokens
 ): Promise<Response> {
   const finalParsed = new URL(finalUrl);
+  const rewriteManifestResponse = (text: string): Response => {
+    const baseExpirable =
+      inheritedExpirable ||
+      safeDetectExpirable(sourceTargetUrl, detectExpirable) ||
+      safeDetectExpirable(finalUrl, detectExpirable) ||
+      safeDetectExpirable(text, detectExpirable);
+    let childTokenDetected = false;
+    const signNowSeconds = Math.floor(Date.now() / 1000);
+    const nextDepth = depth + 1;
+    const rewritten = rewriteM3u8Playlist(text, finalUrl, (resolved) => {
+      const childExpirable = baseExpirable || safeDetectExpirable(resolved, detectExpirable);
+      if (childExpirable) {
+        childTokenDetected = true;
+      }
+      return buildSignedProxyPath(
+        resolved,
+        undefined,
+        signNowSeconds,
+        nextDepth,
+        propagatedReferer,
+        childExpirable
+      );
+    });
+    const isExpirable = baseExpirable || childTokenDetected;
+    return new Response(rewritten, {
+      status: 200,
+      headers: buildManifestResponseHeaders(upstream, isExpirable),
+    });
+  };
+
   if (!upstream.body) {
     const rawBytes = new Uint8Array(await upstream.arrayBuffer());
     if (bytesStartWithExtM3u(rawBytes)) {
@@ -552,19 +721,7 @@ async function handleInspectedUpstreamResponse(
         );
       }
       const text = new TextDecoder('utf-8').decode(rawBytes);
-      const isExpirable =
-        hasExpirableHlsTokens(sourceTargetUrl) ||
-        hasExpirableHlsTokens(finalUrl) ||
-        hasExpirableHlsTokens(text);
-      const nowSeconds = Math.floor(Date.now() / 1000);
-      const nextDepth = depth + 1;
-      const rewritten = rewriteM3u8Playlist(text, finalUrl, (resolved) =>
-        buildSignedProxyPath(resolved, undefined, nowSeconds, nextDepth, propagatedReferer)
-      );
-      return new Response(rewritten, {
-        status: 200,
-        headers: buildManifestResponseHeaders(isExpirable),
-      });
+      return rewriteManifestResponse(text);
     }
 
     if (isInvalidHtmlManifestResponse(rawBytes, contentType, finalParsed)) {
@@ -574,7 +731,15 @@ async function handleInspectedUpstreamResponse(
       );
     }
 
-    const outHeaders = buildBinaryResponseHeaders(upstream, contentType, finalParsed);
+    const outHeaders = buildBinaryResponseHeaders(
+      upstream,
+      contentType,
+      finalParsed,
+      inheritedExpirable,
+      nowSeconds,
+      sourceTargetUrl,
+      detectExpirable
+    );
     return new Response(rawBytes, {
       status: upstream.status,
       headers: outHeaders,
@@ -625,19 +790,7 @@ async function handleInspectedUpstreamResponse(
     }
     const fullBytes = concatChunks(bufferedChunks);
     const text = new TextDecoder('utf-8').decode(fullBytes);
-    const isExpirable =
-      hasExpirableHlsTokens(sourceTargetUrl) ||
-      hasExpirableHlsTokens(finalUrl) ||
-      hasExpirableHlsTokens(text);
-    const nowSeconds = Math.floor(Date.now() / 1000);
-    const nextDepth = depth + 1;
-    const rewritten = rewriteM3u8Playlist(text, finalUrl, (resolved) =>
-      buildSignedProxyPath(resolved, undefined, nowSeconds, nextDepth, propagatedReferer)
-    );
-    return new Response(rewritten, {
-      status: 200,
-      headers: buildManifestResponseHeaders(isExpirable),
-    });
+    return rewriteManifestResponse(text);
   }
 
   if (isInvalidHtmlManifestResponse(initialBytes, contentType, finalParsed)) {
@@ -654,7 +807,15 @@ async function handleInspectedUpstreamResponse(
 
   // Não é manifesto #EXTM3U (ex.: segmento binário ou chave servido com Content-Type: text/plain):
   // retransmitir os bytes originais intactos via stream sem decodificação UTF-8.
-  const outHeaders = buildBinaryResponseHeaders(upstream, contentType, finalParsed);
+  const outHeaders = buildBinaryResponseHeaders(
+    upstream,
+    contentType,
+    finalParsed,
+    inheritedExpirable,
+    nowSeconds,
+    sourceTargetUrl,
+    detectExpirable
+  );
   let chunkIndex = 0;
 
   const passthroughStream = new ReadableStream<Uint8Array>({
@@ -697,6 +858,8 @@ export interface ProxyStreamDeps {
   fetchWithRedirects?: typeof safeFetchWithRedirects;
   learnedRefererStore?: LearnedRefererStore | null;
   nowMs?: () => number;
+  nowSeconds?: () => number;
+  detectExpirableTokens?: (input: string) => boolean;
 }
 
 async function cancelResponseBodySafely(res: Response): Promise<void> {
@@ -828,7 +991,12 @@ export async function handleProxyStreamRequest(
   deps: ProxyStreamDeps = {}
 ): Promise<Response> {
   const fetchWithRedirects = deps.fetchWithRedirects ?? safeFetchWithRedirects;
-  const nowMs = deps.nowMs ?? (() => Date.now());
+  const nowSecondsFn =
+    deps.nowSeconds ??
+    (deps.nowMs ? () => Math.floor(deps.nowMs!() / 1000) : () => Math.floor(Date.now() / 1000));
+  const nowSeconds = nowSecondsFn();
+  const nowMs = deps.nowMs ?? (() => nowSecondsFn() * 1000);
+  const detectExpirable = deps.detectExpirableTokens ?? hasExpirableHlsTokens;
   const learnedStore =
     deps.learnedRefererStore !== undefined
       ? deps.learnedRefererStore
@@ -841,6 +1009,8 @@ export async function handleProxyStreamRequest(
   const depthSigParam = reqUrl.searchParams.get('dsig');
   const refParam = reqUrl.searchParams.get('ref');
   const refSigParam = reqUrl.searchParams.get('rsig');
+  const expirableParam = reqUrl.searchParams.get('ex');
+  const expirableSigParam = reqUrl.searchParams.get('xsig');
 
   const urlCheck = validateHttpUrl(rawTarget, MAX_PROXY_URL_LENGTH);
   if (!urlCheck.valid || !urlCheck.normalizedUrl) {
@@ -869,6 +1039,16 @@ export async function handleProxyStreamRequest(
   );
   if (!refCheck.valid) {
     return buildProxyErrorResponse('Assinatura de Referer do proxy inválida.', 403);
+  }
+
+  const expirableCheck = verifyProxyExpirable(
+    urlCheck.normalizedUrl,
+    exp,
+    expirableParam,
+    expirableSigParam
+  );
+  if (!expirableCheck.valid) {
+    return buildProxyErrorResponse('Assinatura de expiração do proxy inválida.', 403);
   }
 
   try {
@@ -926,11 +1106,22 @@ export async function handleProxyStreamRequest(
         contentType,
         depthCheck.depth,
         targetUrl.toString(),
-        propagatedReferer
+        propagatedReferer,
+        expirableCheck.expirable,
+        nowSeconds,
+        detectExpirable
       );
     }
 
-    const outHeaders = buildBinaryResponseHeaders(upstream, contentType, finalParsed);
+    const outHeaders = buildBinaryResponseHeaders(
+      upstream,
+      contentType,
+      finalParsed,
+      expirableCheck.expirable,
+      nowSeconds,
+      targetUrl.toString(),
+      detectExpirable
+    );
     return new Response(upstream.body, {
       status: upstream.status,
       headers: outHeaders,

@@ -177,9 +177,189 @@ export function normalizeExplicitSourceKind(raw: unknown): ExplicitSourceKind | 
   return null;
 }
 
+const NAMED_EXPIRABLE_PARAM_RE =
+  /(?:^|[?&#,;,\s"'/~])(expires|exp|token|sig|signature|hash|auth|hmac|hdnea|hdnts|policy|key-pair-id|x-amz-expires|x-amz-date|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-expires|x-goog-date|x-goog-signature|x-goog-credential|bcdn_token)=[^\s"'<>&#,;]+/gi;
+
+const SHORT_QUERY_EXPIRABLE_PARAM_RE = /[?&](e|t)=[^&#\s"'<>]+/gi;
+
+const PATH_NAMED_EXPIRY_RE = /\/(?:expires|exp)\/\d{9,13}(?:\/|[?#]|$)/i;
+
+const PATH_NAMED_TOKEN_RE =
+  /\/(?:token|sig|signature|hmac|hash|auth)\/(?![^/\s"'?#]*\.(?:m3u8?|ts|m4s|mp4|m4v|webm|webp|key|aac|mp3|vtt|srt|png|jpg|jpeg)(?:[/?#]|$))[A-Za-z0-9._~-]{6,}(?:\/|[?#]|$)/i;
+
+const PATH_PAIRED_TOKEN_TS_RE =
+  /\/(?:[A-Za-z0-9_-]{16,}\/(?:1[5-9]\d{8}|2\d{9})|(?:1[5-9]\d{8}|2\d{9})\/[A-Za-z0-9_-]{16,})(?:\/|[?#]|$)/;
+
+const EMBEDDED_JWT_RE = /\beyJ[A-Za-z0-9_-]{8,}\.eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\b/;
+
 export function hasExpirableHlsTokens(input: string): boolean {
   if (!input) return false;
-  return /(?:x-amz-expires|token=|sig=)/i.test(input);
+  try {
+    NAMED_EXPIRABLE_PARAM_RE.lastIndex = 0;
+    if (NAMED_EXPIRABLE_PARAM_RE.test(input)) return true;
+
+    SHORT_QUERY_EXPIRABLE_PARAM_RE.lastIndex = 0;
+    if (SHORT_QUERY_EXPIRABLE_PARAM_RE.test(input)) return true;
+
+    if (
+      PATH_NAMED_EXPIRY_RE.test(input) ||
+      PATH_NAMED_TOKEN_RE.test(input) ||
+      PATH_PAIRED_TOKEN_TS_RE.test(input) ||
+      EMBEDDED_JWT_RE.test(input)
+    ) {
+      return true;
+    }
+
+    return false;
+  } catch {
+    return false;
+  }
+}
+
+export function describeExpirableHlsTokens(input: string): string[] {
+  if (!input) return [];
+  const matches: string[] = [];
+  const pushUnique = (label: string) => {
+    if (!matches.includes(label)) {
+      matches.push(label);
+    }
+  };
+
+  try {
+    NAMED_EXPIRABLE_PARAM_RE.lastIndex = 0;
+    let m: RegExpExecArray | null;
+    while ((m = NAMED_EXPIRABLE_PARAM_RE.exec(input)) !== null) {
+      const lower = (m[1] ?? '').toLowerCase();
+      if (lower === 'x-amz-expires') {
+        pushUnique('X-Amz-Expires');
+      } else if (lower) {
+        pushUnique(`${lower}=`);
+      }
+    }
+
+    SHORT_QUERY_EXPIRABLE_PARAM_RE.lastIndex = 0;
+    while ((m = SHORT_QUERY_EXPIRABLE_PARAM_RE.exec(input)) !== null) {
+      const lower = (m[1] ?? '').toLowerCase();
+      if (lower) {
+        pushUnique(`${lower}=`);
+      }
+    }
+
+    if (
+      PATH_NAMED_EXPIRY_RE.test(input) ||
+      PATH_NAMED_TOKEN_RE.test(input) ||
+      PATH_PAIRED_TOKEN_TS_RE.test(input)
+    ) {
+      pushUnique('assinatura no caminho');
+    }
+
+    if (EMBEDDED_JWT_RE.test(input)) {
+      pushUnique('jwt');
+    }
+  } catch {
+    return matches;
+  }
+
+  return matches;
+}
+
+function parseUnixEpochSeconds(raw: string): number | null {
+  const trimmed = raw.trim();
+  if (!/^\d{9,13}$/.test(trimmed)) return null;
+  const num = Number(trimmed);
+  if (!Number.isFinite(num) || num <= 0) return null;
+  return trimmed.length >= 12 ? Math.floor(num / 1000) : num;
+}
+
+function parseAmzIsoDateSeconds(raw: string): number | null {
+  const m = /^(\d{4})(\d{2})(\d{2})T(\d{2})(\d{2})(\d{2})Z$/i.exec(raw.trim());
+  if (!m) return null;
+  const year = Number(m[1]);
+  const month = Number(m[2]);
+  const day = Number(m[3]);
+  const hour = Number(m[4]);
+  const min = Number(m[5]);
+  const sec = Number(m[6]);
+  if (month < 1 || month > 12 || day < 1 || day > 31 || hour > 23 || min > 59 || sec > 59) {
+    return null;
+  }
+  const ms = Date.UTC(year, month - 1, day, hour, min, sec);
+  return Number.isFinite(ms) ? Math.floor(ms / 1000) : null;
+}
+
+export function extractExpirableTokenRemainingSeconds(
+  rawUrl: string,
+  nowSeconds = Math.floor(Date.now() / 1000)
+): number | null {
+  if (!rawUrl) return null;
+  try {
+    const parsed = new URL(rawUrl);
+    const expiries: number[] = [];
+    const paramsLower = new Map<string, string>();
+
+    for (const [k, v] of parsed.searchParams.entries()) {
+      paramsLower.set(k.toLowerCase(), v);
+    }
+
+    for (const key of ['expires', 'exp', 'e', 'x-goog-expires']) {
+      const val = paramsLower.get(key);
+      if (val) {
+        const ts = parseUnixEpochSeconds(val);
+        if (ts !== null) {
+          expiries.push(ts - nowSeconds);
+        }
+      }
+    }
+
+    for (const nestedKey of ['hdnea', 'hdnts']) {
+      const nestedVal = paramsLower.get(nestedKey);
+      if (nestedVal) {
+        const m = /(?:^|[~&])(?:exp|expires)=(\d{9,13})(?:$|[~&])/i.exec(nestedVal);
+        if (m) {
+          const ts = parseUnixEpochSeconds(m[1]);
+          if (ts !== null) {
+            expiries.push(ts - nowSeconds);
+          }
+        }
+      }
+    }
+
+    const amzDate = paramsLower.get('x-amz-date');
+    const amzExpires = paramsLower.get('x-amz-expires');
+    if (amzDate && amzExpires && /^\d+$/.test(amzExpires.trim())) {
+      const signedAt = parseAmzIsoDateSeconds(amzDate);
+      const ttl = Number(amzExpires.trim());
+      if (signedAt !== null && Number.isFinite(ttl) && ttl >= 0) {
+        expiries.push(signedAt + ttl - nowSeconds);
+      }
+    }
+
+    const pathNestedExp = /(?:^|[~/])(?:exp|expires)[=/](\d{9,13})(?:$|[~/?#])/i.exec(
+      parsed.pathname
+    );
+    if (pathNestedExp) {
+      const ts = parseUnixEpochSeconds(pathNestedExp[1]);
+      if (ts !== null) {
+        expiries.push(ts - nowSeconds);
+      }
+    }
+
+    const pathPaired = /\/(?:1[5-9]\d{8}|2\d{9})(?:\/|$)/.exec(parsed.pathname);
+    if (pathPaired && PATH_PAIRED_TOKEN_TS_RE.test(parsed.pathname)) {
+      const tsMatch = /(1[5-9]\d{8}|2\d{9})/.exec(pathPaired[0]);
+      if (tsMatch) {
+        const ts = parseUnixEpochSeconds(tsMatch[1]);
+        if (ts !== null) {
+          expiries.push(ts - nowSeconds);
+        }
+      }
+    }
+
+    if (expiries.length === 0) return null;
+    return Math.min(...expiries);
+  } catch {
+    return null;
+  }
 }
 
 export function isExpirableHlsSourceUrl(

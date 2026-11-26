@@ -62,12 +62,24 @@ export function createProxyRefererSignature(
     .digest('base64url');
 }
 
+export function createProxyExpirableSignature(
+  targetUrl: string,
+  expUnixSeconds: number
+): string {
+  const secret = getSessionSecret();
+  return crypto
+    .createHmac('sha256', secret)
+    .update(`proxy-exp:${targetUrl}:${expUnixSeconds}:1`)
+    .digest('base64url');
+}
+
 export function buildSignedProxyPath(
   targetUrl: string,
   ttlSeconds?: number,
   nowSeconds = Math.floor(Date.now() / 1000),
   depth = 0,
-  referer?: string | null
+  referer?: string | null,
+  expirable = false
 ): string {
   const exp =
     typeof ttlSeconds === 'number' && ttlSeconds < 0
@@ -87,6 +99,10 @@ export function buildSignedProxyPath(
   if (cleanRef) {
     params.set('ref', cleanRef);
     params.set('rsig', createProxyRefererSignature(targetUrl, exp, cleanRef));
+  }
+  if (expirable) {
+    params.set('ex', '1');
+    params.set('xsig', createProxyExpirableSignature(targetUrl, exp));
   }
   return `/api/proxy/stream?${params.toString()}`;
 }
@@ -151,6 +167,35 @@ export function verifyProxyReferer(
     return { valid: false, referer: null };
   }
   return { valid: true, referer: refParam };
+}
+
+export function verifyProxyExpirable(
+  targetUrl: string,
+  expParam: string | null,
+  expirableParam: string | null,
+  expirableSigParam: string | null,
+  nowSeconds = Math.floor(Date.now() / 1000)
+): { valid: boolean; expirable: boolean } {
+  if (expirableParam === null) {
+    return { valid: true, expirable: false };
+  }
+  if (expirableParam !== '1' || !expParam || !expirableSigParam) {
+    return { valid: false, expirable: false };
+  }
+  const exp = Number(expParam);
+  if (!Number.isInteger(exp) || exp < nowSeconds) {
+    return { valid: false, expirable: false };
+  }
+  const expected = createProxyExpirableSignature(targetUrl, exp);
+  const expectedBuf = Buffer.from(expected, 'utf8');
+  const receivedBuf = Buffer.from(expirableSigParam, 'utf8');
+  if (expectedBuf.length !== receivedBuf.length) {
+    return { valid: false, expirable: false };
+  }
+  if (!crypto.timingSafeEqual(expectedBuf, receivedBuf)) {
+    return { valid: false, expirable: false };
+  }
+  return { valid: true, expirable: true };
 }
 
 export function verifyProxyDepth(

@@ -8,6 +8,7 @@ import {
 } from '@/lib/hls-playback';
 import {
   buildSignedProxyPath,
+  createProxyExpirableSignature,
   createProxyRefererSignature,
   MAX_HLS_REWRITE_DEPTH,
   rewriteM3u8Playlist,
@@ -25,7 +26,10 @@ import {
 import type { PlayableSource } from '@/lib/types';
 import {
   collectEpisodeSources,
+  describeExpirableHlsTokens,
+  extractExpirableTokenRemainingSeconds,
   getNextFallbackSourceIndex,
+  hasExpirableHlsTokens,
   isExpirableHlsSourceUrl,
   normalizeVideoSource,
 } from '@/lib/video-sources';
@@ -1686,5 +1690,452 @@ describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () =
     );
     expect(r3.status).toBe(200);
     expect(seenRound3).toEqual(['https://www.anitube.biz/']);
+  });
+
+  it('29. amplia detecção de tokens expiráveis (query, CloudFront, AWS, Akamai, caminho e case-insensitive) sem falsos positivos', () => {
+    // 29a. Query params curtos/explícitos e assinaturas variadas
+    expect(hasExpirableHlsTokens('https://cdn.example.com/hls/master.m3u8?expires=1795003600')).toBe(true);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/hls/master.m3u8?exp=1795003600')).toBe(true);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/hls/master.m3u8?e=1795003600&h=abc')).toBe(true);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/hls/master.m3u8?t=1795003600&sig=xyz')).toBe(true);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/hls/master.m3u8?token=abc123')).toBe(true);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/hls/master.m3u8?sig=abc123')).toBe(true);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/hls/master.m3u8?signature=abc123')).toBe(true);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/hls/master.m3u8?hash=deadbeef')).toBe(true);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/hls/master.m3u8?auth=secret')).toBe(true);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/hls/master.m3u8?hmac=feedface')).toBe(true);
+
+    // 29b. Akamai hdnea, AWS, CloudFront, Google Cloud e variações de maiúsculas/minúsculas
+    expect(
+      hasExpirableHlsTokens('https://cdn.example.com/hls/master.m3u8?hdnea=st=1795000000~exp=1795003600~acl=/*~hmac=abcd')
+    ).toBe(true);
+    expect(
+      hasExpirableHlsTokens(
+        'https://bucket.s3.amazonaws.com/ep01/index.m3u8?X-Amz-Algorithm=AWS4-HMAC-SHA256&X-Amz-Date=20261126T000000Z&X-Amz-Expires=900&X-Amz-Signature=abcdef'
+      )
+    ).toBe(true);
+    expect(
+      hasExpirableHlsTokens(
+        'https://d111111abcdef8.cloudfront.net/ep01/index.m3u8?Policy=eyJT&Signature=abc~def&Key-Pair-Id=K123'
+      )
+    ).toBe(true);
+    expect(
+      hasExpirableHlsTokens('https://cdn.example.com/hls/master.m3u8?TOKEN=UPPER&EXPIRES=1795003600&x-amz-signature=low')
+    ).toBe(true);
+
+    // 29c. Assinaturas no caminho (path-based)
+    expect(hasExpirableHlsTokens('https://cdn.example.com/token/a1b2c3d4e5f6/hls/master.m3u8')).toBe(true);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/sig/mysecret99/seg-01.ts')).toBe(true);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/expires/1795003600/index.m3u8')).toBe(true);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/0123456789abcdef012345/1795003600/index.m3u8')).toBe(true);
+    expect(
+      hasExpirableHlsTokens('https://cdn.example.com/hdnea=exp=1795003600~hmac=deadbeef/master.m3u8')
+    ).toBe(true);
+    expect(
+      hasExpirableHlsTokens(
+        'https://cdn.example.com/eyJhbGciOiJIUzI1NiJ9.eyJleHAiOjE3OTUwMDM2MDB9.signaturePart123/master.m3u8'
+      )
+    ).toBe(true);
+
+    // 29d. ZERO falsos positivos em URLs públicas comuns, fragmentos #t=, caminhos /t/ ou /auth/index.m3u8
+    expect(hasExpirableHlsTokens('https://cdn.example.com/hls/index.m3u8?v=1&id=99&key=abc&lang=pt')).toBe(false);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/hls/index.m3u8#t=30')).toBe(false);
+    expect(
+      hasExpirableHlsTokens(
+        'https://cdn-s01.mywallpaper-4k-image.net/stream/sv/t/tsuihou-sareta-tensei-juu-kishi-wa-game-chishiki-de-musou-suru/21v2.mp4/index.m3u8'
+      )
+    ).toBe(false);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/auth/index.m3u8')).toBe(false);
+    expect(hasExpirableHlsTokens('https://cdn.example.com/token/index.m3u8')).toBe(false);
+    expect(hasExpirableHlsTokens('https://cdn-sv01.maximaimg.online/stream/b/bakemonogatari/02.mp4/index.m3u8')).toBe(
+      false
+    );
+
+    // 29e. Descrição e extração precisa de TTL restante
+    expect(describeExpirableHlsTokens('https://cdn.example.com/index.m3u8?Expires=1795003600&Token=abc')).toEqual([
+      'expires=',
+      'token=',
+    ]);
+    const now = 1_795_000_000;
+    expect(
+      extractExpirableTokenRemainingSeconds('https://cdn.example.com/seg.ts?expires=1795000120', now)
+    ).toBe(120);
+    expect(
+      extractExpirableTokenRemainingSeconds(
+        'https://cdn.example.com/seg.ts?hdnea=st=1794999000~exp=1795000045~hmac=abc',
+        now
+      )
+    ).toBe(45);
+    expect(
+      extractExpirableTokenRemainingSeconds(
+        'https://s3.amazonaws.com/seg.ts?X-Amz-Date=20261125T000000Z&X-Amz-Expires=600&X-Amz-Signature=abc',
+        Math.floor(Date.UTC(2026, 10, 25, 0, 5, 0) / 1000)
+      )
+    ).toBe(300);
+    expect(extractExpirableTokenRemainingSeconds('https://cdn.example.com/seg.ts?token=opaco', now)).toBeNull();
+  });
+
+  it('30. mantém cache eficiente para URLs públicas e aplica no-store + propagação ex/xsig assinada em manifestos expiraveis', async () => {
+    // 30a. Manifesto público sem tokens mantém Cache-Control público e filhos sem ex/xsig
+    const publicMaster = 'https://cdn-sv01.maximaimg.online/stream/b/bakemonogatari/02.mp4/index.m3u8?v=1';
+    const publicRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(publicMaster)}`),
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response('#EXTM3U\n#EXTINF:5.0,\nseg-001.ts\n#EXT-X-ENDLIST', {
+            status: 200,
+            headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+          }),
+        }),
+      }
+    );
+    expect(publicRes.status).toBe(200);
+    expect(publicRes.headers.get('cache-control')).toBe('public, max-age=5, stale-while-revalidate=30');
+    expect(publicRes.headers.get('cdn-cache-control')).toBe('public, max-age=5, stale-while-revalidate=30');
+    expect(publicRes.headers.get('x-hikari-source-expirable')).toBeNull();
+    const publicBody = await publicRes.text();
+    const publicChildUrl = new URL(
+      `http://localhost${publicBody.split('\n').find((l) => l.includes('seg-001.ts'))!.trim()}`
+    );
+    expect(publicChildUrl.searchParams.has('ex')).toBe(false);
+    expect(publicChildUrl.searchParams.has('xsig')).toBe(false);
+
+    // 30b. Manifesto expirável retorna no-store e propaga ex=1&xsig para variante, KEY, MAP e segmentos
+    const signedMaster = 'https://cdn.signed.example.com/ep01/master.m3u8?token=abc123&expires=1999999999';
+    const signedRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(signedMaster)}`),
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(
+            [
+              '#EXTM3U',
+              '#EXT-X-KEY:METHOD=AES-128,URI="keys/enc.key"',
+              '#EXT-X-MAP:URI="init.mp4"',
+              '#EXT-X-STREAM-INF:BANDWIDTH=1000000',
+              '720p/index.m3u8',
+              '#EXTINF:5.0,',
+              'seg-001.ts',
+            ].join('\n'),
+            {
+              status: 200,
+              headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+            }
+          ),
+        }),
+      }
+    );
+    expect(signedRes.status).toBe(200);
+    expect(signedRes.headers.get('cache-control')).toBe('no-store');
+    expect(signedRes.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(signedRes.headers.get('x-hikari-source-expirable')).toBe('1');
+
+    const signedBody = await signedRes.text();
+    const childUrls = (signedBody.match(/\/api\/proxy\/stream\?[^\s"']+/g) ?? []).map(
+      (p) => new URL(`http://localhost${p}`)
+    );
+    expect(childUrls).toHaveLength(4);
+    for (const childUrl of childUrls) {
+      expect(childUrl.searchParams.get('ex')).toBe('1');
+      expect(childUrl.searchParams.get('xsig')).toBeTruthy();
+    }
+
+    // 30c. ex/xsig adulterado é rejeitado com 403 antes de chamar upstream
+    const forgedFetcher = vi.fn();
+    const forgedChild = new URL(childUrls[0].toString());
+    forgedChild.searchParams.set('xsig', 'xsig-forjada');
+    const forgedRes = await handleProxyStreamRequest(new Request(forgedChild.toString()), {
+      fetchWithRedirects: forgedFetcher,
+    });
+    expect(forgedRes.status).toBe(403);
+    expect(forgedFetcher).not.toHaveBeenCalled();
+
+    const missingXsig = new URL(childUrls[0].toString());
+    missingXsig.searchParams.delete('xsig');
+    const missingXsigRes = await handleProxyStreamRequest(new Request(missingXsig.toString()), {
+      fetchWithRedirects: forgedFetcher,
+    });
+    expect(missingXsigRes.status).toBe(403);
+
+    const forgedExPayload = new URL(
+      `http://localhost${buildSignedProxyPath('https://cdn.signed.example.com/ep01/seg-001.ts', undefined, undefined, 1)}`
+    );
+    forgedExPayload.searchParams.set('ex', '1');
+    forgedExPayload.searchParams.set(
+      'xsig',
+      createProxyExpirableSignature(
+        'https://other.example.com/other.ts',
+        Number(forgedExPayload.searchParams.get('exp'))
+      )
+    );
+    const wrongTargetExRes = await handleProxyStreamRequest(
+      new Request(forgedExPayload.toString()),
+      { fetchWithRedirects: forgedFetcher }
+    );
+    expect(wrongTargetExRes.status).toBe(403);
+    expect(forgedFetcher).not.toHaveBeenCalled();
+  });
+
+  it('31. aplica política segura de cache em segmentos/recursos derivados (TTL calculável, fallback no-store e respeito ao Cache-Control da origem)', async () => {
+    const now = 1_795_000_000;
+    const tsBytes = new Uint8Array([0x47, 0x40, 0x00, 0x10]);
+
+    // 31a. Segmento derivado com ex=1 sem TTL determinável -> no-store
+    const inheritedSegPath = buildSignedProxyPath(
+      'https://cdn.signed.example.com/ep01/seg-001.ts',
+      undefined,
+      undefined,
+      1,
+      null,
+      true
+    );
+    const opaqueRes = await handleProxyStreamRequest(new Request(`http://localhost${inheritedSegPath}`), {
+      nowSeconds: () => now,
+      fetchWithRedirects: async (url) => ({
+        finalUrl: url,
+        response: new Response(tsBytes, {
+          status: 200,
+          headers: { 'content-type': 'video/mp2t' },
+        }),
+      }),
+    });
+    expect(opaqueRes.status).toBe(200);
+    expect(opaqueRes.headers.get('cache-control')).toBe('no-store');
+    expect(opaqueRes.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(opaqueRes.headers.get('x-hikari-source-expirable')).toBe('1');
+
+    // 31b. Segmento com TTL futuro longo (expires=now+120) -> limitado a private, max-age=30, must-revalidate + CDN no-store
+    const longTtlSeg = `https://cdn.signed.example.com/ep01/seg-002.ts?token=abc&expires=${now + 120}`;
+    const longTtlRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(longTtlSeg)}`),
+      {
+        nowSeconds: () => now,
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(tsBytes, {
+            status: 200,
+            headers: { 'content-type': 'video/mp2t' },
+          }),
+        }),
+      }
+    );
+    expect(longTtlRes.headers.get('cache-control')).toBe('private, max-age=30, must-revalidate');
+    expect(longTtlRes.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(longTtlRes.headers.get('x-hikari-source-expirable')).toBe('1');
+
+    // 31c. Segmento com TTL curto (expires=now+15) -> desconta margem 5s -> max-age=10
+    const shortTtlSeg = `https://cdn.signed.example.com/ep01/seg-003.ts?token=abc&expires=${now + 15}`;
+    const shortTtlRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(shortTtlSeg)}`),
+      {
+        nowSeconds: () => now,
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(tsBytes, {
+            status: 200,
+            headers: { 'content-type': 'video/mp2t' },
+          }),
+        }),
+      }
+    );
+    expect(shortTtlRes.headers.get('cache-control')).toBe('private, max-age=10, must-revalidate');
+
+    // 31d. Segmento com TTL já vencido ou <= 5s -> no-store
+    const expiredTtlSeg = `https://cdn.signed.example.com/ep01/seg-004.ts?token=abc&expires=${now + 3}`;
+    const expiredTtlRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(expiredTtlSeg)}`),
+      {
+        nowSeconds: () => now,
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(tsBytes, {
+            status: 200,
+            headers: { 'content-type': 'video/mp2t' },
+          }),
+        }),
+      }
+    );
+    expect(expiredTtlRes.headers.get('cache-control')).toBe('no-store');
+
+    // 31e. Respeita Cache-Control restritivo da origem em stream expirável (no-store e max-age menor)
+    const originNoStoreRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(longTtlSeg)}`),
+      {
+        nowSeconds: () => now,
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(tsBytes, {
+            status: 200,
+            headers: {
+              'content-type': 'video/mp2t',
+              'cache-control': 'private, no-store',
+            },
+          }),
+        }),
+      }
+    );
+    expect(originNoStoreRes.headers.get('cache-control')).toBe('no-store');
+
+    const originSmallerMaxAgeRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(longTtlSeg)}`),
+      {
+        nowSeconds: () => now,
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(tsBytes, {
+            status: 200,
+            headers: {
+              'content-type': 'video/mp2t',
+              'cache-control': 'public, max-age=8',
+            },
+          }),
+        }),
+      }
+    );
+    expect(originSmallerMaxAgeRes.headers.get('cache-control')).toBe('private, max-age=8, must-revalidate');
+    expect(originSmallerMaxAgeRes.headers.get('cdn-cache-control')).toBe('no-store');
+
+    // 31f. Respeita Cache-Control restritivo da origem também em stream público (sem sobrescrever com immutable)
+    const publicSeg = 'https://cdn-sv01.maximaimg.online/stream/b/bakemonogatari/02.mp4/seg-001.ts';
+    const publicOriginPrivateRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(publicSeg)}`),
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(tsBytes, {
+            status: 200,
+            headers: {
+              'content-type': 'video/mp2t',
+              'cache-control': 'private, max-age=60',
+            },
+          }),
+        }),
+      }
+    );
+    expect(publicOriginPrivateRes.headers.get('cache-control')).toBe('private, max-age=60, must-revalidate');
+    expect(publicOriginPrivateRes.headers.get('cdn-cache-control')).toBe('no-store');
+
+    const publicOriginDefaultRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(publicSeg)}`),
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(tsBytes, {
+            status: 200,
+            headers: { 'content-type': 'video/mp2t' },
+          }),
+        }),
+      }
+    );
+    expect(publicOriginDefaultRes.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
+  });
+
+  it('32. protege manifestos sem token na URL principal quando o corpo ou redirect final contém tokens expiráveis', async () => {
+    // 32a. URL limpa, porém o manifesto traz segmento/chave assinados no corpo
+    const cleanUrl = 'https://cdn.example.com/hls/clean/master.m3u8';
+    const bodyWithSignedChildren = [
+      '#EXTM3U',
+      '#EXT-X-KEY:METHOD=AES-128,URI="https://keys.example.com/enc.key?sig=k99"',
+      '#EXT-X-MAP:URI="init.mp4?auth=map99"',
+      '#EXTINF:5.0,',
+      'seg-001.ts?token=bodytok1&expires=1999999999',
+      '#EXTINF:5.0,',
+      'seg-002.ts',
+    ].join('\n');
+
+    const resBodyToken = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(cleanUrl)}`),
+      {
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(bodyWithSignedChildren, {
+            status: 200,
+            headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+          }),
+        }),
+      }
+    );
+    expect(resBodyToken.status).toBe(200);
+    expect(resBodyToken.headers.get('cache-control')).toBe('no-store');
+    expect(resBodyToken.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(resBodyToken.headers.get('x-hikari-source-expirable')).toBe('1');
+    const bodyTokenText = await resBodyToken.text();
+    const bodyChildren = (bodyTokenText.match(/\/api\/proxy\/stream\?[^\s"']+/g) ?? []).map(
+      (p) => new URL(`http://localhost${p}`)
+    );
+    const seg2Child = bodyChildren.find((u) => u.searchParams.get('url')?.endsWith('/seg-002.ts'));
+    expect(seg2Child?.searchParams.get('ex')).toBe('1');
+    expect(seg2Child?.searchParams.get('xsig')).toBeTruthy();
+
+    // 32b. URL limpa redireciona para URL assinada -> manifesto final e filhos sem token na querystring herdam proteção
+    const redirectOrigin = 'https://cdn.example.com/hls/redirect-clean/index.m3u8';
+    const signedRedirectTarget = 'https://edge09.example.com/hls/ep/index.m3u8?hdnea=exp=1999999999~hmac=abcdef';
+    const resRedirectToken = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(redirectOrigin)}`),
+      {
+        fetchWithRedirects: async () => ({
+          finalUrl: signedRedirectTarget,
+          response: new Response('#EXTM3U\n#EXTINF:5.0,\nseg-clean-name.ts\n#EXT-X-ENDLIST', {
+            status: 200,
+            headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+          }),
+        }),
+      }
+    );
+    expect(resRedirectToken.status).toBe(200);
+    expect(resRedirectToken.headers.get('cache-control')).toBe('no-store');
+    expect(resRedirectToken.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(resRedirectToken.headers.get('x-hikari-source-expirable')).toBe('1');
+    const redirectText = await resRedirectToken.text();
+    const redirectedSeg = new URL(
+      `http://localhost${redirectText.split('\n').find((l) => l.includes('seg-clean-name.ts'))!.trim()}`
+    );
+    expect(redirectedSeg.searchParams.get('ex')).toBe('1');
+    expect(redirectedSeg.searchParams.get('xsig')).toBeTruthy();
+  });
+
+  it('33. opera fail-safe caso a detecção de tokens lance exceção sem interromper reprodução nem aplicar cache indevido', async () => {
+    const throwingDetector = () => {
+      throw new Error('regex failure');
+    };
+
+    const manifestUrl = 'https://cdn.example.com/hls/master.m3u8';
+    const manifestRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(manifestUrl)}`),
+      {
+        detectExpirableTokens: throwingDetector,
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response('#EXTM3U\n#EXTINF:5.0,\nseg-001.ts\n#EXT-X-ENDLIST', {
+            status: 200,
+            headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+          }),
+        }),
+      }
+    );
+    expect(manifestRes.status).toBe(200);
+    expect(manifestRes.headers.get('cache-control')).toBe('no-store');
+    expect(manifestRes.headers.get('x-hikari-source-expirable')).toBe('1');
+
+    const segUrl = 'https://cdn.example.com/hls/seg-001.ts';
+    const segBytes = new Uint8Array([0x47, 0x40, 0x00, 0x77]);
+    const segRes = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(segUrl)}`),
+      {
+        detectExpirableTokens: throwingDetector,
+        fetchWithRedirects: async (url) => ({
+          finalUrl: url,
+          response: new Response(segBytes, {
+            status: 200,
+            headers: { 'content-type': 'video/mp2t' },
+          }),
+        }),
+      }
+    );
+    expect(segRes.status).toBe(200);
+    expect(segRes.headers.get('cache-control')).toBe('no-store');
+    expect(segRes.headers.get('x-hikari-source-expirable')).toBe('1');
+    expect(Array.from(new Uint8Array(await segRes.arrayBuffer()))).toEqual(Array.from(segBytes));
   });
 });
