@@ -944,6 +944,7 @@ async function fetchWith403RefererFallback(
     }
 
     lastResult = await fetchWithRedirects(targetUrl.toString(), {
+      method: incomingRequest.method,
       headers,
       timeoutMs: 30000,
     });

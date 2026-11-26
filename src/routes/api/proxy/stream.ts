@@ -5,6 +5,7 @@ export const Route = createFileRoute('/api/proxy/stream')({
   server: {
     handlers: {
       GET: async ({ request }) => handleProxyStreamRequest(request),
+      HEAD: async ({ request }) => handleProxyStreamRequest(request),
       OPTIONS: async () =>
         new Response(null, {
           status: 204,

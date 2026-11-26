@@ -199,6 +199,7 @@ export interface SafeFetchOptions {
   maxRedirects?: number;
   timeoutMs?: number;
   headers?: Record<string, string>;
+  method?: string;
 }
 
 export async function safeFetchWithRedirects(
@@ -207,16 +208,27 @@ export async function safeFetchWithRedirects(
 ): Promise<{ response: Response; finalUrl: string }> {
   const maxRedirects = options.maxRedirects ?? 5;
   const timeoutMs = options.timeoutMs ?? 15000;
+  const method = options.method ?? 'GET';
   let currentUrl = initialUrl;
 
   for (let hop = 0; hop <= maxRedirects; hop++) {
     const validatedUrl = await assertSafeExternalUrl(currentUrl);
-    const response = await fetch(validatedUrl.toString(), {
-      method: 'GET',
+    const fetchInit: RequestInit = {
+      method,
       redirect: 'manual',
       headers: options.headers,
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    };
+
+    let response: Response;
+    if (timeoutMs > 0) {
+      const fetchPromise = fetch(validatedUrl.toString(), fetchInit);
+      const timeoutPromise = new Promise<Response>((_, reject) =>
+        setTimeout(() => reject(new Error('Timeout na requisição externa.')), timeoutMs)
+      );
+      response = await Promise.race([fetchPromise, timeoutPromise]);
+    } else {
+      response = await fetch(validatedUrl.toString(), fetchInit);
+    }
 
     if (response.status >= 300 && response.status < 400) {
       const location = response.headers.get('location');
