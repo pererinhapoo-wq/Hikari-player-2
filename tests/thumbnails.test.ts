@@ -430,7 +430,7 @@ describe('M3U8 / HLS thumbnail resolution, proxy handling & error classification
     expect(mislabeledPlan.sourceKind).toBe('hls');
   });
 
-  it('preserves Vercel Blob MP4 highest priority over external M3U8 links', async () => {
+  it('garante que URL M3U8 atual no formulário prevalece sobre MP4 no Blob, e Blob é usado como fallback quando form é iframe', async () => {
     const blobMp4 =
       'https://q70piqtcusyiwtbz.public.blob.vercel-storage.com/mirrors/sem-anime/video-blob.mp4';
     const externalM3u8 =
@@ -443,7 +443,8 @@ describe('M3U8 / HLS thumbnail resolution, proxy handling & error classification
       is_mirror_2: true,
     });
 
-    const plan = await resolveThumbnailSourceForAdmin(
+    // 1. M3U8 no formulário prevalece sobre o MP4 do Blob cadastrado
+    const planFormM3u8 = await resolveThumbnailSourceForAdmin(
       { episodeId: ep.id, videoUrl: externalM3u8, sourceKind: 'hls' },
       {
         isDbConfigured: () => true,
@@ -452,10 +453,27 @@ describe('M3U8 / HLS thumbnail resolution, proxy handling & error classification
       }
     );
 
-    expect(plan.ok).toBe(true);
-    expect(plan.mode).toBe('direct');
-    expect(plan.blobPreferred).toBe(true);
-    expect(plan.directUrl).toBe(blobMp4);
+    expect(planFormM3u8.ok).toBe(true);
+    expect(planFormM3u8.mode).toBe('hls');
+    expect(planFormM3u8.sourceUrl).toBe(externalM3u8);
+    expect(planFormM3u8.sourceLabel).toBe('M3U8 externo');
+    expect(planFormM3u8.blobPreferred).toBe(false);
+
+    // 2. Fallback para Blob quando a URL atual do formulário é um iframe incompatível
+    const planFallbackBlob = await resolveThumbnailSourceForAdmin(
+      { episodeId: ep.id, videoUrl: 'https://anitube22.vip/embed/999', sourceKind: 'iframe' },
+      {
+        isDbConfigured: () => true,
+        getEpisodeById: async () => ep,
+        signProxyUrl: (u) => buildSignedProxyPath(u),
+      }
+    );
+
+    expect(planFallbackBlob.ok).toBe(true);
+    expect(planFallbackBlob.mode).toBe('direct');
+    expect(planFallbackBlob.blobPreferred).toBe(true);
+    expect(planFallbackBlob.directUrl).toBe(blobMp4);
+    expect(planFallbackBlob.sourceLabel).toContain('Vercel Blob');
   });
 
   it('selects optimal compatible variant from master M3U8 levels (smallest >= 360p H.264)', () => {

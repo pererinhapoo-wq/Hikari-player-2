@@ -89,13 +89,20 @@ export function formatThumbnailTimeLabel(seconds: number): string {
 function getCandidatePriorityScore(
   isBlob: boolean,
   kind: SourceKind,
-  requiresServerResolve: boolean
+  requiresServerResolve: boolean,
+  isFormSource: boolean
 ): number {
-  if (isBlob) return 0; // Always highest priority: Vercel Blob mirror
-  if (kind === 'mp4' || kind === 'webm') return 1;
-  if (kind === 'hls' && !requiresServerResolve) return 2;
-  if (kind === 'bunny' || requiresServerResolve) return 3;
-  return 4; // iframe embeds
+  if (isFormSource) {
+    if (kind === 'mp4' || kind === 'webm' || kind === 'hls' || kind === 'bunny') {
+      return 0; // Current form source has top priority when extractable
+    }
+    return 10; // Form source is an iframe embed that cannot extract frames directly
+  }
+  if (isBlob) return 1; // Existing episode Vercel Blob mirror
+  if (kind === 'mp4' || kind === 'webm') return 2;
+  if (kind === 'hls' && !requiresServerResolve) return 3;
+  if (kind === 'bunny' || requiresServerResolve) return 4;
+  return 11; // Other iframe embeds
 }
 
 export interface PickedThumbnailCandidate {
