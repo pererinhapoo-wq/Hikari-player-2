@@ -8,17 +8,20 @@ import {
 import { resolveProxyPlayUrl } from '@/lib/server-fns';
 import {
   type CfRequestInit,
+  clearWorkerLearnedRefererCache,
   createWorkerDepthSignature,
   createWorkerProxySignature,
   createWorkerRefererSignature,
   getStableSegmentExpiry,
   handleWorkerProxyRequest,
+  LEARNED_REFERER_TTL_SECONDS,
   resolveUpstreamReferer,
   resolveUpstreamRefererCandidates,
   verifyWorkerProxyReferer,
   verifyWorkerProxySignature,
   type WorkerEnv,
   type WorkerExecutionContext,
+  type WorkerLearnedRefererStore,
 } from '../worker/src/index';
 
 const TEST_SECRET = '0123456789abcdef0123456789abcdef';
@@ -90,6 +93,7 @@ describe('Cloudflare Worker Edge Proxy', () => {
 
   beforeEach(() => {
     process.env.PLAYER_SESSION_SECRET = TEST_SECRET;
+    clearWorkerLearnedRefererCache();
   });
 
   it('mantém interoperabilidade total de HMAC entre Vercel (Node crypto) e Worker (Web Crypto)', async () => {
@@ -659,5 +663,205 @@ describe('Cloudflare Worker Edge Proxy', () => {
     );
     expect(stdChild.searchParams.has('ref')).toBe(false);
     expect(stdChild.searchParams.has('rsig')).toBe(false);
+  });
+
+  it('mantém paridade no Worker: aprende Referer no edgeCache por host/ambiente com TTL 15m, isola Preview vs Production, invalida 403 e opera fail-open', async () => {
+    expect(LEARNED_REFERER_TTL_SECONDS).toBe(15 * 60);
+    const edgeCache = createMemoryEdgeCache();
+    let nowSec = 1_795_000_000;
+    const exp = 2_000_000_000;
+
+    const previewEnv: WorkerEnv = {
+      PLAYER_SESSION_SECRET: TEST_SECRET,
+      ENVIRONMENT: 'preview',
+    };
+    const prodEnv: WorkerEnv = {
+      PLAYER_SESSION_SECRET: TEST_SECRET,
+      ENVIRONMENT: 'production',
+    };
+
+    const seg1 = 'https://cdn-s03.mywallpaper-4k-image.net/stream/ep10/seg-001.webp';
+    const playlist2 = 'https://cdn-s03.mywallpaper-4k-image.net/stream/ep10/variant.m3u8';
+    const segOtherHost = 'https://cdn-other.mywallpaper-4k-image.net/stream/ep10/seg-001.webp';
+    const childUrl = 'https://edge-external.example.net/ep10/chunk.ts';
+
+    // Mywallpaper no Worker também inclui coempregos.com.br e alinha regras com stream-proxy
+    expect(resolveUpstreamRefererCandidates(new URL(seg1), previewEnv)).toEqual([
+      'https://www.anitube.biz/',
+      'https://api.anivideo.net/',
+      'https://www.coempregos.com.br/',
+      '',
+      'https://cdn-s03.mywallpaper-4k-image.net/',
+    ]);
+    expect(
+      resolveUpstreamReferer(new URL('https://hinatasoul.com/ep/1.m3u8'), previewEnv)
+    ).toBe('https://www.coempregos.com.br/');
+
+    const seenByUrl = new Map<string, Array<string | null>>();
+    const pendingWaitUntil: Promise<unknown>[] = [];
+    const ctx: WorkerExecutionContext = {
+      waitUntil(p) {
+        pendingWaitUntil.push(p);
+      },
+    };
+
+    let coempregosAllowed = true;
+    const fetcher = vi.fn(async (input: string, init?: CfRequestInit) => {
+      const ref = new Headers(init?.headers).get('referer');
+      const arr = seenByUrl.get(input) ?? [];
+      arr.push(ref);
+      seenByUrl.set(input, arr);
+
+      if (input === seg1 || input === playlist2) {
+        if (coempregosAllowed && ref === 'https://www.coempregos.com.br/') {
+          if (input === playlist2) {
+            return new Response(`#EXTM3U\n#EXTINF:5.0,\n${childUrl}\n#EXT-X-ENDLIST`, {
+              status: 200,
+              headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+            });
+          }
+          return new Response(new Uint8Array([0x47, 0x40, 0x00, 0x10]), {
+            status: 200,
+            headers: { 'content-type': 'image/webp' },
+          });
+        }
+        if (!coempregosAllowed && ref === 'https://www.anitube.biz/') {
+          return new Response(new Uint8Array([0x47, 0x40, 0x00, 0x11]), {
+            status: 200,
+            headers: { 'content-type': 'image/webp' },
+          });
+        }
+        return new Response('Forbidden', { status: 403 });
+      }
+
+      return new Response(new Uint8Array([0x47, 0x40, 0x00, 0x20]), {
+        status: 200,
+        headers: { 'content-type': 'image/webp' },
+      });
+    });
+
+    // 1. Primeira requisição em Preview descobre coempregos.com.br
+    const sig1 = await createWorkerProxySignature(seg1, exp, TEST_SECRET);
+    const r1 = await handleWorkerProxyRequest(
+      new Request(
+        `https://preview-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(seg1)}&exp=${exp}&sig=${sig1}`
+      ),
+      previewEnv,
+      ctx,
+      { fetcher, edgeCache, nowSeconds: () => nowSec }
+    );
+    await Promise.all(pendingWaitUntil.splice(0));
+    expect(r1.status).toBe(200);
+    expect(seenByUrl.get(seg1)).toEqual([
+      'https://www.anitube.biz/',
+      'https://api.anivideo.net/',
+      'https://www.coempregos.com.br/',
+    ]);
+
+    // 2. Segunda requisição no mesmo host em Preview reutiliza coempregos sem 403 prévio e propaga ref/rsig
+    const sigPl2 = await createWorkerProxySignature(playlist2, exp, TEST_SECRET);
+    const r2 = await handleWorkerProxyRequest(
+      new Request(
+        `https://preview-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(playlist2)}&exp=${exp}&sig=${sigPl2}`
+      ),
+      previewEnv,
+      ctx,
+      { fetcher, edgeCache, nowSeconds: () => nowSec }
+    );
+    expect(r2.status).toBe(200);
+    expect(seenByUrl.get(playlist2)).toEqual(['https://www.coempregos.com.br/']);
+    const pl2Body = await r2.text();
+    const childPath = pl2Body.split('\n').find((l) => l.includes(encodeURIComponent(childUrl)))!.trim();
+    const parsedChild = new URL(`https://preview-proxy.workers.dev${childPath}`);
+    expect(parsedChild.searchParams.get('ref')).toBe('https://www.coempregos.com.br/');
+    expect(parsedChild.searchParams.get('rsig')).toBeTruthy();
+
+    // 3. Outro host NÃO herda Referer aprendido
+    const sigOther = await createWorkerProxySignature(segOtherHost, exp, TEST_SECRET);
+    await handleWorkerProxyRequest(
+      new Request(
+        `https://preview-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(segOtherHost)}&exp=${exp}&sig=${sigOther}`
+      ),
+      previewEnv,
+      ctx,
+      { fetcher, edgeCache, nowSeconds: () => nowSec }
+    );
+    expect(seenByUrl.get(segOtherHost)).toEqual(['https://www.anitube.biz/']);
+
+    // 4. Ambiente Production NÃO herda Referer aprendido no Preview para o mesmo host
+    const segProdSameHost = 'https://cdn-s03.mywallpaper-4k-image.net/stream/ep10/seg-prod-check.webp';
+    const sigProdSameHost = await createWorkerProxySignature(segProdSameHost, exp, TEST_SECRET);
+    const prodFetcher = vi.fn(async (_input: string, init?: CfRequestInit) => {
+      const ref = new Headers(init?.headers).get('referer');
+      const arr = seenByUrl.get(segProdSameHost) ?? [];
+      arr.push(ref);
+      seenByUrl.set(segProdSameHost, arr);
+      return new Response(new Uint8Array([0x47, 0x40, 0x00, 0x15]), {
+        status: 200,
+        headers: { 'content-type': 'image/webp' },
+      });
+    });
+    const rProd = await handleWorkerProxyRequest(
+      new Request(
+        `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(segProdSameHost)}&exp=${exp}&sig=${sigProdSameHost}`
+      ),
+      prodEnv,
+      ctx,
+      { fetcher: prodFetcher, edgeCache, nowSeconds: () => nowSec }
+    );
+    expect(rProd.status).toBe(200);
+    expect(seenByUrl.get(segProdSameHost)).toEqual(['https://www.anitube.biz/']);
+
+    // 5. Após TTL expirar (15m + 1s), Preview volta à ordem padrão no mesmo host
+    nowSec += LEARNED_REFERER_TTL_SECONDS + 1;
+    const segAfterExpiry = 'https://cdn-s03.mywallpaper-4k-image.net/stream/ep10/seg-after-expiry.webp';
+    const sigAfterExpiry = await createWorkerProxySignature(segAfterExpiry, exp, TEST_SECRET);
+    coempregosAllowed = false;
+    const expiryFetcher = vi.fn(async (_input: string, init?: CfRequestInit) => {
+      const ref = new Headers(init?.headers).get('referer');
+      const arr = seenByUrl.get(segAfterExpiry) ?? [];
+      arr.push(ref);
+      seenByUrl.set(segAfterExpiry, arr);
+      if (ref === 'https://www.anitube.biz/') {
+        return new Response(new Uint8Array([0x47, 0x40, 0x00, 0x16]), {
+          status: 200,
+          headers: { 'content-type': 'image/webp' },
+        });
+      }
+      return new Response('Forbidden', { status: 403 });
+    });
+    const rExpired = await handleWorkerProxyRequest(
+      new Request(
+        `https://preview-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(segAfterExpiry)}&exp=${exp}&sig=${sigAfterExpiry}`
+      ),
+      previewEnv,
+      ctx,
+      { fetcher: expiryFetcher, edgeCache, nowSeconds: () => nowSec }
+    );
+    await Promise.all(pendingWaitUntil.splice(0));
+    expect(rExpired.status).toBe(200);
+    expect(seenByUrl.get(segAfterExpiry)).toEqual(['https://www.anitube.biz/']);
+
+    // 6. Store com erro em get/set/delete opera fail-open
+    const brokenStore: WorkerLearnedRefererStore = {
+      async get() {
+        throw new Error('kv read failed');
+      },
+      async set() {
+        throw new Error('kv write failed');
+      },
+      async delete() {
+        throw new Error('kv delete failed');
+      },
+    };
+    const rFailOpen = await handleWorkerProxyRequest(
+      new Request(
+        `https://preview-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(seg1)}&exp=${exp}&sig=${sig1}`
+      ),
+      previewEnv,
+      ctx,
+      { fetcher, edgeCache: null, learnedRefererStore: brokenStore, nowSeconds: () => nowSec }
+    );
+    expect(rFailOpen.status).toBe(200);
   });
 });

@@ -24,8 +24,90 @@ export const BROWSER_UA =
 export const DEFAULT_ANITUBE_BIZ_REFERER = 'https://www.anitube.biz/';
 export const LEGACY_MAXIMAIMG_REFERER = 'https://api.anivideo.net/';
 export const DEFAULT_COEMPREGOS_REFERER = 'https://www.coempregos.com.br/';
+export const LEARNED_REFERER_TTL_SECONDS = 15 * 60; // 15 minutos
+const MAX_LEARNED_REFERER_ENTRIES = 256;
 const EXTM3U_BYTES = [0x23, 0x45, 0x58, 0x54, 0x4d, 0x33, 0x55] as const; // "#EXTM3U"
 const MAX_PEEK_BYTES = 512;
+
+export interface LearnedRefererStore {
+  get(key: string): Promise<string | null> | string | null;
+  set(key: string, value: string, ttlSeconds: number): Promise<void> | void;
+  delete(key: string): Promise<void> | void;
+}
+
+interface LearnedRefererEntry {
+  referer: string;
+  expiresAtMs: number;
+}
+
+const learnedRefererMemory = new Map<string, LearnedRefererEntry>();
+
+export function clearLearnedRefererCache(): void {
+  learnedRefererMemory.clear();
+}
+
+function resolveRefererCacheEnvScope(): string {
+  const vercelEnv = process.env.VERCEL_ENV?.trim().toLowerCase();
+  if (vercelEnv) {
+    if (vercelEnv === 'preview') {
+      const vercelUrl = process.env.VERCEL_URL?.trim().toLowerCase();
+      return vercelUrl ? `preview:${vercelUrl}` : 'preview';
+    }
+    return vercelEnv;
+  }
+  const nodeEnv = process.env.NODE_ENV?.trim().toLowerCase();
+  return nodeEnv || 'default';
+}
+
+function buildLearnedRefererKey(envScope: string, hostname: string): string {
+  return `${envScope}|${hostname}`;
+}
+
+function normalizeStoredReferer(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined) return null;
+  if (raw === '') return '';
+  const check = validateHttpUrl(raw);
+  if (check.valid && check.normalizedUrl) {
+    return check.normalizedUrl;
+  }
+  return null;
+}
+
+function createMemoryLearnedRefererStore(nowMs: () => number): LearnedRefererStore {
+  return {
+    get(key: string): string | null {
+      const entry = learnedRefererMemory.get(key);
+      if (!entry) return null;
+      if (entry.expiresAtMs <= nowMs()) {
+        learnedRefererMemory.delete(key);
+        return null;
+      }
+      const normalized = normalizeStoredReferer(entry.referer);
+      if (normalized === null) {
+        learnedRefererMemory.delete(key);
+        return null;
+      }
+      return normalized;
+    },
+    set(key: string, value: string, ttlSeconds: number): void {
+      const normalized = normalizeStoredReferer(value);
+      if (normalized === null || ttlSeconds <= 0) return;
+      if (!learnedRefererMemory.has(key) && learnedRefererMemory.size >= MAX_LEARNED_REFERER_ENTRIES) {
+        const oldestKey = learnedRefererMemory.keys().next().value;
+        if (oldestKey !== undefined) {
+          learnedRefererMemory.delete(oldestKey);
+        }
+      }
+      learnedRefererMemory.set(key, {
+        referer: normalized,
+        expiresAtMs: nowMs() + ttlSeconds * 1000,
+      });
+    },
+    delete(key: string): void {
+      learnedRefererMemory.delete(key);
+    },
+  };
+}
 
 export function isMywallpaperHost(hostname: string): boolean {
   const lower = hostname.toLowerCase().replace(/\.+$/, '');
@@ -57,11 +139,11 @@ function matchesRefererPattern(hostname: string, pattern: string): number {
   return -1;
 }
 
-export function resolveUpstreamReferer(
+function resolveUpstreamRefererMatch(
   targetUrl: URL,
   refererMapJson = process.env.PLAYER_REFERER_MAP,
   maximaimgReferer = process.env.PLAYER_MAXIMAIMG_REFERER
-): string {
+): { primary: string; matchedRule: boolean } {
   const hostname = targetUrl.hostname.toLowerCase().replace(/\.+$/, '');
 
   const rules = new Map<string, string>([
@@ -111,21 +193,30 @@ export function resolveUpstreamReferer(
   }
 
   if (bestReferer !== null) {
-    return bestReferer;
+    return { primary: bestReferer, matchedRule: true };
   }
 
   if (isCdnSubdomainHost(hostname)) {
-    return DEFAULT_ANITUBE_BIZ_REFERER;
+    return { primary: DEFAULT_ANITUBE_BIZ_REFERER, matchedRule: false };
   }
 
-  return `${targetUrl.origin}/`;
+  return { primary: `${targetUrl.origin}/`, matchedRule: false };
+}
+
+export function resolveUpstreamReferer(
+  targetUrl: URL,
+  refererMapJson = process.env.PLAYER_REFERER_MAP,
+  maximaimgReferer = process.env.PLAYER_MAXIMAIMG_REFERER
+): string {
+  return resolveUpstreamRefererMatch(targetUrl, refererMapJson, maximaimgReferer).primary;
 }
 
 export function resolveUpstreamRefererCandidates(
   targetUrl: URL,
   refererMapJson = process.env.PLAYER_REFERER_MAP,
   maximaimgReferer = process.env.PLAYER_MAXIMAIMG_REFERER,
-  customReferer?: string | null
+  customReferer?: string | null,
+  learnedReferer?: string | null
 ): string[] {
   const candidates: string[] = [];
   const pushUnique = (value: string) => {
@@ -141,11 +232,22 @@ export function resolveUpstreamRefererCandidates(
     }
   }
 
-  const primary = resolveUpstreamReferer(targetUrl, refererMapJson, maximaimgReferer);
-  pushUnique(primary);
-
   const hostname = targetUrl.hostname.toLowerCase().replace(/\.+$/, '');
   const hostOrigin = `${targetUrl.origin}/`;
+
+  if (!isMaximaimgHost(hostname) && learnedReferer !== undefined && learnedReferer !== null) {
+    const normalizedLearned = normalizeStoredReferer(learnedReferer);
+    if (normalizedLearned !== null) {
+      pushUnique(normalizedLearned);
+    }
+  }
+
+  const { primary, matchedRule } = resolveUpstreamRefererMatch(
+    targetUrl,
+    refererMapJson,
+    maximaimgReferer
+  );
+  pushUnique(primary);
 
   if (isMaximaimgHost(hostname)) {
     pushUnique(DEFAULT_ANITUBE_BIZ_REFERER);
@@ -158,12 +260,13 @@ export function resolveUpstreamRefererCandidates(
   if (isMywallpaperHost(hostname)) {
     pushUnique(DEFAULT_ANITUBE_BIZ_REFERER);
     pushUnique(LEGACY_MAXIMAIMG_REFERER);
+    pushUnique(DEFAULT_COEMPREGOS_REFERER);
     pushUnique('');
     pushUnique(hostOrigin);
     return candidates;
   }
 
-  if (isCdnSubdomainHost(hostname)) {
+  if (isCdnSubdomainHost(hostname) || matchedRule) {
     pushUnique(DEFAULT_ANITUBE_BIZ_REFERER);
     pushUnique(LEGACY_MAXIMAIMG_REFERER);
     pushUnique(DEFAULT_COEMPREGOS_REFERER);
@@ -592,6 +695,8 @@ async function handleInspectedUpstreamResponse(
 
 export interface ProxyStreamDeps {
   fetchWithRedirects?: typeof safeFetchWithRedirects;
+  learnedRefererStore?: LearnedRefererStore | null;
+  nowMs?: () => number;
 }
 
 async function cancelResponseBodySafely(res: Response): Promise<void> {
@@ -607,7 +712,8 @@ async function fetchWith403RefererFallback(
   targetUrl: URL,
   incomingRequest: Request,
   fetchWithRedirects: typeof safeFetchWithRedirects,
-  customReferer?: string | null
+  customReferer?: string | null,
+  learnedStore?: LearnedRefererStore | null
 ): Promise<{
   response: Response;
   finalUrl: string;
@@ -615,11 +721,35 @@ async function fetchWith403RefererFallback(
   usedFallback: boolean;
 }> {
   const baseHeaders = getUpstreamHeaders(targetUrl, incomingRequest, customReferer);
+  const hostname = targetUrl.hostname.toLowerCase().replace(/\.+$/, '');
+  const allowLearnedCache = !isMaximaimgHost(hostname) && Boolean(learnedStore);
+  const cacheKey = buildLearnedRefererKey(resolveRefererCacheEnvScope(), hostname);
+
+  let learnedReferer: string | null = null;
+  if (allowLearnedCache && learnedStore) {
+    try {
+      const rawLearned = await learnedStore.get(cacheKey);
+      if (rawLearned !== null && rawLearned !== undefined) {
+        const normalized = normalizeStoredReferer(rawLearned);
+        if (normalized !== null) {
+          learnedReferer = normalized;
+        } else {
+          await learnedStore.delete(cacheKey);
+        }
+      }
+    } catch {
+      // Fail-open: erro no cache temporário nunca interrompe reprodução
+      learnedReferer = null;
+    }
+  }
+
+  const { primary } = resolveUpstreamRefererMatch(targetUrl);
   const refererCandidates = resolveUpstreamRefererCandidates(
     targetUrl,
     undefined,
     undefined,
-    customReferer
+    customReferer,
+    allowLearnedCache ? learnedReferer : null
   );
 
   let lastResult: { response: Response; finalUrl: string } | null = null;
@@ -643,11 +773,46 @@ async function fetchWith403RefererFallback(
     });
 
     if (lastResult.response.status !== 403) {
+      const usedFallback =
+        (!customReferer && candidateRef !== primary) ||
+        (Boolean(customReferer) && i > 0);
+
+      if (
+        allowLearnedCache &&
+        learnedStore &&
+        (lastResult.response.ok || lastResult.response.status === 206)
+      ) {
+        try {
+          if (
+            candidateRef !== primary &&
+            candidateRef !== learnedReferer &&
+            (!customReferer || i > 0)
+          ) {
+            const validToStore = normalizeStoredReferer(candidateRef);
+            if (validToStore !== null) {
+              await learnedStore.set(cacheKey, validToStore, LEARNED_REFERER_TTL_SECONDS);
+            }
+          } else if (candidateRef === primary && learnedReferer !== null && !customReferer) {
+            await learnedStore.delete(cacheKey);
+          }
+        } catch {
+          // Fail-open ao atualizar ou invalidar cache temporário
+        }
+      }
+
       return {
         ...lastResult,
         winningReferer: candidateRef,
-        usedFallback: i > 0,
+        usedFallback,
       };
+    }
+  }
+
+  if (allowLearnedCache && learnedStore && learnedReferer !== null) {
+    try {
+      await learnedStore.delete(cacheKey);
+    } catch {
+      // Fail-open ao invalidar cache após 403 em todos os candidatos
     }
   }
 
@@ -663,6 +828,11 @@ export async function handleProxyStreamRequest(
   deps: ProxyStreamDeps = {}
 ): Promise<Response> {
   const fetchWithRedirects = deps.fetchWithRedirects ?? safeFetchWithRedirects;
+  const nowMs = deps.nowMs ?? (() => Date.now());
+  const learnedStore =
+    deps.learnedRefererStore !== undefined
+      ? deps.learnedRefererStore
+      : createMemoryLearnedRefererStore(nowMs);
   const reqUrl = new URL(request.url);
   const rawTarget = reqUrl.searchParams.get('url') ?? '';
   const exp = reqUrl.searchParams.get('exp');
@@ -720,7 +890,8 @@ export async function handleProxyStreamRequest(
       targetUrl,
       request,
       fetchWithRedirects,
-      refCheck.referer
+      refCheck.referer,
+      learnedStore
     );
 
     if (!upstream.ok && upstream.status !== 206) {

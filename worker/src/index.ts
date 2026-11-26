@@ -12,6 +12,8 @@ const SEGMENT_CACHE_TTL_SECONDS = 31536000; // 1 ano
 const EXPIRABLE_SEGMENT_CACHE_TTL_SECONDS = 30;
 const MANIFEST_CACHE_TTL_SECONDS = 5;
 const STABLE_SIGN_WINDOW_SECONDS = 60 * 60 * 24 * 7; // 7 dias (chave de cache estável)
+export const LEARNED_REFERER_TTL_SECONDS = 15 * 60; // 15 minutos
+const MAX_LEARNED_REFERER_ENTRIES = 256;
 
 const BLOCKED_HOSTNAMES = new Set([
   'localhost',
@@ -26,6 +28,7 @@ export interface WorkerEnv {
   PLAYER_SESSION_SECRET: string;
   PLAYER_MAXIMAIMG_REFERER?: string;
   PLAYER_REFERER_MAP?: string;
+  ENVIRONMENT?: string;
 }
 
 export interface WorkerExecutionContext {
@@ -41,10 +44,28 @@ export type CfRequestInit = RequestInit & {
   cf?: CloudflareCfProperties;
 };
 
+export interface WorkerLearnedRefererStore {
+  get(key: string): Promise<string | null> | string | null;
+  set(key: string, value: string, ttlSeconds: number): Promise<void> | void;
+  delete(key: string): Promise<void> | void;
+}
+
 export interface WorkerFetchDeps {
   fetcher?: (input: string, init?: CfRequestInit) => Promise<Response>;
   edgeCache?: Cache | null;
   nowSeconds?: () => number;
+  learnedRefererStore?: WorkerLearnedRefererStore | null;
+}
+
+interface WorkerLearnedRefererEntry {
+  referer: string;
+  expiresAtMs: number;
+}
+
+const workerLearnedRefererMemory = new Map<string, WorkerLearnedRefererEntry>();
+
+export function clearWorkerLearnedRefererCache(): void {
+  workerLearnedRefererMemory.clear();
 }
 
 function getCorsHeaders(): Record<string, string> {
@@ -382,11 +403,167 @@ export function getStableSegmentExpiry(nowSeconds = Math.floor(Date.now() / 1000
   return (Math.floor(nowSeconds / STABLE_SIGN_WINDOW_SECONDS) + 2) * STABLE_SIGN_WINDOW_SECONDS;
 }
 
-export function resolveUpstreamReferer(targetUrl: URL, env: WorkerEnv): string {
+function normalizeWorkerStoredReferer(raw: string | null | undefined): string | null {
+  if (raw === null || raw === undefined) return null;
+  if (raw === '') return '';
+  const check = validateHttpUrl(raw);
+  if (check.valid && check.normalizedUrl) {
+    return check.normalizedUrl;
+  }
+  return null;
+}
+
+function resolveWorkerRefererCacheEnvScope(request: Request, env: WorkerEnv): string {
+  const envTag = env.ENVIRONMENT?.trim().toLowerCase() || 'default';
+  try {
+    const workerHost = new URL(request.url).hostname.toLowerCase();
+    return `${envTag}:${workerHost}`;
+  } catch {
+    return envTag;
+  }
+}
+
+function buildWorkerLearnedRefererKey(envScope: string, hostname: string): string {
+  return `${envScope}|${hostname}`;
+}
+
+function parseWorkerLearnedRefererKey(key: string): { envScope: string; hostname: string } {
+  const sep = key.indexOf('|');
+  if (sep === -1) return { envScope: 'default', hostname: key };
+  return { envScope: key.slice(0, sep), hostname: key.slice(sep + 1) };
+}
+
+function buildWorkerLearnedRefererCacheRequest(key: string): Request {
+  const { envScope, hostname } = parseWorkerLearnedRefererKey(key);
+  const cacheUrl = new URL('https://hikari-learned-referer.internal/v1');
+  cacheUrl.searchParams.set('env', envScope);
+  cacheUrl.searchParams.set('host', hostname);
+  return new Request(cacheUrl.toString(), { method: 'GET' });
+}
+
+function createWorkerMemoryLearnedRefererStore(nowSeconds: () => number): WorkerLearnedRefererStore {
+  return {
+    get(key: string): string | null {
+      const entry = workerLearnedRefererMemory.get(key);
+      if (!entry) return null;
+      if (entry.expiresAtMs <= nowSeconds() * 1000) {
+        workerLearnedRefererMemory.delete(key);
+        return null;
+      }
+      const normalized = normalizeWorkerStoredReferer(entry.referer);
+      if (normalized === null) {
+        workerLearnedRefererMemory.delete(key);
+        return null;
+      }
+      return normalized;
+    },
+    set(key: string, value: string, ttlSeconds: number): void {
+      const normalized = normalizeWorkerStoredReferer(value);
+      if (normalized === null || ttlSeconds <= 0) return;
+      if (!workerLearnedRefererMemory.has(key) && workerLearnedRefererMemory.size >= MAX_LEARNED_REFERER_ENTRIES) {
+        const oldestKey = workerLearnedRefererMemory.keys().next().value;
+        if (oldestKey !== undefined) {
+          workerLearnedRefererMemory.delete(oldestKey);
+        }
+      }
+      workerLearnedRefererMemory.set(key, {
+        referer: normalized,
+        expiresAtMs: nowSeconds() * 1000 + ttlSeconds * 1000,
+      });
+    },
+    delete(key: string): void {
+      workerLearnedRefererMemory.delete(key);
+    },
+  };
+}
+
+function createWorkerEdgeLearnedRefererStore(
+  edgeCache: Cache,
+  nowSeconds: () => number,
+  ctx?: WorkerExecutionContext
+): WorkerLearnedRefererStore {
+  return {
+    async get(key: string): Promise<string | null> {
+      const cacheReq = buildWorkerLearnedRefererCacheRequest(key);
+      const cached = await edgeCache.match(cacheReq);
+      if (!cached) return null;
+      const payload = (await cached.json()) as { referer?: unknown; expiresAtMs?: unknown };
+      if (
+        !payload ||
+        typeof payload.expiresAtMs !== 'number' ||
+        payload.expiresAtMs <= nowSeconds() * 1000 ||
+        typeof payload.referer !== 'string'
+      ) {
+        const delPromise = edgeCache.delete(cacheReq).catch(() => {});
+        if (ctx) {
+          ctx.waitUntil(delPromise);
+        } else {
+          await delPromise;
+        }
+        return null;
+      }
+      const normalized = normalizeWorkerStoredReferer(payload.referer);
+      if (normalized === null) {
+        const delPromise = edgeCache.delete(cacheReq).catch(() => {});
+        if (ctx) {
+          ctx.waitUntil(delPromise);
+        } else {
+          await delPromise;
+        }
+        return null;
+      }
+      return normalized;
+    },
+    async set(key: string, value: string, ttlSeconds: number): Promise<void> {
+      const normalized = normalizeWorkerStoredReferer(value);
+      if (normalized === null || ttlSeconds <= 0) return;
+      const cacheReq = buildWorkerLearnedRefererCacheRequest(key);
+      const res = new Response(
+        JSON.stringify({
+          referer: normalized,
+          expiresAtMs: nowSeconds() * 1000 + ttlSeconds * 1000,
+        }),
+        {
+          status: 200,
+          headers: {
+            'Content-Type': 'application/json',
+            'Cache-Control': `public, max-age=${ttlSeconds}`,
+          },
+        }
+      );
+      const putPromise = edgeCache.put(cacheReq, res).catch(() => {});
+      if (ctx) {
+        ctx.waitUntil(putPromise);
+      } else {
+        await putPromise;
+      }
+    },
+    async delete(key: string): Promise<void> {
+      const cacheReq = buildWorkerLearnedRefererCacheRequest(key);
+      const delPromise = edgeCache.delete(cacheReq).catch(() => {});
+      if (ctx) {
+        ctx.waitUntil(delPromise);
+      } else {
+        await delPromise;
+      }
+    },
+  };
+}
+
+function resolveUpstreamRefererMatch(
+  targetUrl: URL,
+  env: WorkerEnv
+): { primary: string; matchedRule: boolean } {
   const hostname = targetUrl.hostname.toLowerCase().replace(/\.+$/, '');
   const rules = new Map<string, string>([
     ['maximaimg.online', env.PLAYER_MAXIMAIMG_REFERER?.trim() || DEFAULT_MAXIMAIMG_REFERER],
     ['mywallpaper-4k-image.net', DEFAULT_MAXIMAIMG_REFERER],
+    ['public.blob.vercel-storage.com', ''],
+    ['anitube22.vip', DEFAULT_COEMPREGOS_REFERER],
+    ['anitube.biz', DEFAULT_COEMPREGOS_REFERER],
+    ['anitube.zip', DEFAULT_COEMPREGOS_REFERER],
+    ['anitube.ninja', DEFAULT_COEMPREGOS_REFERER],
+    ['hinatasoul.com', DEFAULT_COEMPREGOS_REFERER],
   ]);
 
   const rawMap = env.PLAYER_REFERER_MAP?.trim();
@@ -425,20 +602,25 @@ export function resolveUpstreamReferer(targetUrl: URL, env: WorkerEnv): string {
   }
 
   if (bestReferer !== null) {
-    return bestReferer;
+    return { primary: bestReferer, matchedRule: true };
   }
 
   if (isCdnSubdomainHost(hostname)) {
-    return DEFAULT_MAXIMAIMG_REFERER;
+    return { primary: DEFAULT_MAXIMAIMG_REFERER, matchedRule: false };
   }
 
-  return `${targetUrl.origin}/`;
+  return { primary: `${targetUrl.origin}/`, matchedRule: false };
+}
+
+export function resolveUpstreamReferer(targetUrl: URL, env: WorkerEnv): string {
+  return resolveUpstreamRefererMatch(targetUrl, env).primary;
 }
 
 export function resolveUpstreamRefererCandidates(
   targetUrl: URL,
   env: WorkerEnv,
-  customReferer?: string | null
+  customReferer?: string | null,
+  learnedReferer?: string | null
 ): string[] {
   const candidates: string[] = [];
   const pushUnique = (value: string) => {
@@ -454,11 +636,18 @@ export function resolveUpstreamRefererCandidates(
     }
   }
 
-  const primary = resolveUpstreamReferer(targetUrl, env);
-  pushUnique(primary);
-
   const hostname = targetUrl.hostname.toLowerCase().replace(/\.+$/, '');
   const hostOrigin = `${targetUrl.origin}/`;
+
+  if (!isMaximaimgHost(hostname) && learnedReferer !== undefined && learnedReferer !== null) {
+    const normalizedLearned = normalizeWorkerStoredReferer(learnedReferer);
+    if (normalizedLearned !== null) {
+      pushUnique(normalizedLearned);
+    }
+  }
+
+  const { primary, matchedRule } = resolveUpstreamRefererMatch(targetUrl, env);
+  pushUnique(primary);
 
   if (isMaximaimgHost(hostname)) {
     pushUnique(DEFAULT_MAXIMAIMG_REFERER);
@@ -471,12 +660,13 @@ export function resolveUpstreamRefererCandidates(
   if (isMywallpaperHost(hostname)) {
     pushUnique(DEFAULT_MAXIMAIMG_REFERER);
     pushUnique(LEGACY_MAXIMAIMG_REFERER);
+    pushUnique(DEFAULT_COEMPREGOS_REFERER);
     pushUnique('');
     pushUnique(hostOrigin);
     return candidates;
   }
 
-  if (isCdnSubdomainHost(hostname)) {
+  if (isCdnSubdomainHost(hostname) || matchedRule) {
     pushUnique(DEFAULT_MAXIMAIMG_REFERER);
     pushUnique(LEGACY_MAXIMAIMG_REFERER);
     pushUnique(DEFAULT_COEMPREGOS_REFERER);
@@ -809,7 +999,8 @@ async function fetchWith403RefererFallbackWorker(
   env: WorkerEnv,
   cf: CloudflareCfProperties,
   fetcher: (input: string, init?: CfRequestInit) => Promise<Response>,
-  customReferer?: string | null
+  customReferer?: string | null,
+  learnedStore?: WorkerLearnedRefererStore | null
 ): Promise<{
   response: Response;
   finalUrl: string;
@@ -817,7 +1008,38 @@ async function fetchWith403RefererFallbackWorker(
   usedFallback: boolean;
 }> {
   const baseHeaders = getUpstreamHeaders(targetUrl, incomingRequest, env, customReferer);
-  const refererCandidates = resolveUpstreamRefererCandidates(targetUrl, env, customReferer);
+  const hostname = targetUrl.hostname.toLowerCase().replace(/\.+$/, '');
+  const allowLearnedCache = !isMaximaimgHost(hostname) && Boolean(learnedStore);
+  const cacheKey = buildWorkerLearnedRefererKey(
+    resolveWorkerRefererCacheEnvScope(incomingRequest, env),
+    hostname
+  );
+
+  let learnedReferer: string | null = null;
+  if (allowLearnedCache && learnedStore) {
+    try {
+      const rawLearned = await learnedStore.get(cacheKey);
+      if (rawLearned !== null && rawLearned !== undefined) {
+        const normalized = normalizeWorkerStoredReferer(rawLearned);
+        if (normalized !== null) {
+          learnedReferer = normalized;
+        } else {
+          await learnedStore.delete(cacheKey);
+        }
+      }
+    } catch {
+      // Fail-open: erro no cache temporário nunca bloqueia reprodução
+      learnedReferer = null;
+    }
+  }
+
+  const { primary } = resolveUpstreamRefererMatch(targetUrl, env);
+  const refererCandidates = resolveUpstreamRefererCandidates(
+    targetUrl,
+    env,
+    customReferer,
+    allowLearnedCache ? learnedReferer : null
+  );
 
   let lastResult: { response: Response; finalUrl: string } | null = null;
 
@@ -845,11 +1067,46 @@ async function fetchWith403RefererFallbackWorker(
     );
 
     if (lastResult.response.status !== 403) {
+      const usedFallback =
+        (!customReferer && candidateRef !== primary) ||
+        (Boolean(customReferer) && i > 0);
+
+      if (
+        allowLearnedCache &&
+        learnedStore &&
+        (lastResult.response.ok || lastResult.response.status === 206)
+      ) {
+        try {
+          if (
+            candidateRef !== primary &&
+            candidateRef !== learnedReferer &&
+            (!customReferer || i > 0)
+          ) {
+            const validToStore = normalizeWorkerStoredReferer(candidateRef);
+            if (validToStore !== null) {
+              await learnedStore.set(cacheKey, validToStore, LEARNED_REFERER_TTL_SECONDS);
+            }
+          } else if (candidateRef === primary && learnedReferer !== null && !customReferer) {
+            await learnedStore.delete(cacheKey);
+          }
+        } catch {
+          // Fail-open ao atualizar ou invalidar cache temporário
+        }
+      }
+
       return {
         ...lastResult,
         winningReferer: candidateRef,
-        usedFallback: i > 0,
+        usedFallback,
       };
+    }
+  }
+
+  if (allowLearnedCache && learnedStore && learnedReferer !== null) {
+    try {
+      await learnedStore.delete(cacheKey);
+    } catch {
+      // Fail-open ao invalidar cache após 403 em todos os candidatos
     }
   }
 
@@ -974,7 +1231,8 @@ export async function handleWorkerProxyRequest(
     });
   }
 
-  const nowSeconds = deps.nowSeconds ? deps.nowSeconds() : Math.floor(Date.now() / 1000);
+  const nowSecondsFn = deps.nowSeconds ?? (() => Math.floor(Date.now() / 1000));
+  const nowSeconds = nowSecondsFn();
   const signatureValid = await verifyWorkerProxySignature(
     urlCheck.normalizedUrl,
     exp,
@@ -1022,6 +1280,12 @@ export async function handleWorkerProxyRequest(
   const targetIsExpirable = hasExpirableHlsTokens(normalizedTargetUrl);
   const rangeHeader = request.headers.get('range');
   const edgeCache = deps.edgeCache !== undefined ? deps.edgeCache : getDefaultEdgeCache();
+  const learnedStore =
+    deps.learnedRefererStore !== undefined
+      ? deps.learnedRefererStore
+      : edgeCache
+        ? createWorkerEdgeLearnedRefererStore(edgeCache, nowSecondsFn, ctx)
+        : createWorkerMemoryLearnedRefererStore(nowSecondsFn);
   const cacheKeyReq = !rangeHeader && request.method === 'GET' && !targetIsExpirable && !refCheck.referer
     ? buildStableEdgeCacheRequest(normalizedTargetUrl, depthCheck.depth)
     : null;
@@ -1071,7 +1335,8 @@ export async function handleWorkerProxyRequest(
         cacheTtl: cfTtl,
       },
       fetcher,
-      refCheck.referer
+      refCheck.referer,
+      learnedStore
     );
 
     if (!upstream.ok && upstream.status !== 206) {

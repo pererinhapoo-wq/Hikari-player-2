@@ -14,8 +14,11 @@ import {
 } from '@/lib/proxy-signing';
 import { diagnoseEpisodeSources, diagnoseVideoSource } from '@/lib/source-diagnostics';
 import {
+  clearLearnedRefererCache,
   getUpstreamHeaders,
   handleProxyStreamRequest,
+  LEARNED_REFERER_TTL_SECONDS,
+  type LearnedRefererStore,
   resolveUpstreamReferer,
   resolveUpstreamRefererCandidates,
 } from '@/lib/stream-proxy';
@@ -42,6 +45,7 @@ function toPlayable(rawUrl: string, slot: 1 | 2 | 3 | 4 | 5): PlayableSource {
 describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () => {
   beforeEach(() => {
     process.env.PLAYER_SESSION_SECRET = '0123456789abcdef0123456789abcdef';
+    clearLearnedRefererCache();
   });
 
   it('1. identifica corretamente o endereço Maximaimg (mesmo contendo /01.mp4/ no caminho) como HLS', () => {
@@ -1326,5 +1330,361 @@ describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () =
     expect(r3.status).toBe(403);
 
     expect(upstreamMock).not.toHaveBeenCalled();
+  });
+
+  it('25. inclui coempregos.com.br no fallback do Mywallpaper, amplia fallbacks de provedores mapeados e preserva ordem exata do Maximaimg', async () => {
+    // Mywallpaper: tenta anitube.biz -> api.anivideo.net -> coempregos.com.br
+    const mywUrl = new URL('https://cdn-s01.mywallpaper-4k-image.net/stream/ep01/index.m3u8');
+    expect(resolveUpstreamRefererCandidates(mywUrl)).toEqual([
+      'https://www.anitube.biz/',
+      'https://api.anivideo.net/',
+      'https://www.coempregos.com.br/',
+      '',
+      'https://cdn-s01.mywallpaper-4k-image.net/',
+    ]);
+
+    const mywStream = 'https://cdn-s01.mywallpaper-4k-image.net/stream/ep01/seg-001.webp';
+    const seenMywRefs: Array<string | undefined> = [];
+    const resMyw = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(mywStream)}`),
+      {
+        fetchWithRedirects: async (url, opts) => {
+          const ref = opts?.headers?.['Referer'];
+          seenMywRefs.push(ref);
+          if (ref === 'https://www.coempregos.com.br/') {
+            return {
+              finalUrl: url,
+              response: new Response(new Uint8Array([0x47, 0x40, 0x00, 0x11]), {
+                status: 200,
+                headers: { 'content-type': 'image/webp' },
+              }),
+            };
+          }
+          return { finalUrl: url, response: new Response('Forbidden', { status: 403 }) };
+        },
+      }
+    );
+    expect(resMyw.status).toBe(200);
+    expect(seenMywRefs).toEqual([
+      'https://www.anitube.biz/',
+      'https://api.anivideo.net/',
+      'https://www.coempregos.com.br/',
+    ]);
+
+    // Provedor configurado em regra ganha fallback completo seguro após o primário
+    const hinataUrl = new URL('https://hinatasoul.com/videos/ep01.m3u8');
+    expect(resolveUpstreamRefererCandidates(hinataUrl)).toEqual([
+      'https://www.coempregos.com.br/',
+      'https://www.anitube.biz/',
+      'https://api.anivideo.net/',
+      'https://hinatasoul.com/',
+      '',
+    ]);
+
+    // Maximaimg mantém exatamente a mesma ordem e não altera ordem mesmo se learnedReferer for passado
+    const maximaUrl = new URL('https://cdn-sv01.maximaimg.online/stream/b/bakemonogatari/01.mp4/index.m3u8');
+    expect(
+      resolveUpstreamRefererCandidates(maximaUrl, undefined, undefined, undefined, 'https://www.coempregos.com.br/')
+    ).toEqual([
+      'https://www.anitube.biz/',
+      'https://api.anivideo.net/',
+      'https://cdn-sv01.maximaimg.online/',
+      '',
+    ]);
+  });
+
+  it('26. aprende e reutiliza temporariamente Referer vencedor por host evitando 403 repetido e mantendo propagação ref/rsig', async () => {
+    const seg1 = 'https://cdn-s02.mywallpaper-4k-image.net/stream/ep01/seg-001.webp';
+    const playlist2 = 'https://cdn-s02.mywallpaper-4k-image.net/stream/ep02/master.m3u8';
+    const childOnOtherHost = 'https://edge99.othercdn.example.net/ep02/seg-001.ts';
+
+    const seenByUrl = new Map<string, Array<string | undefined>>();
+    const mockFetch = async (url: string, opts?: { headers?: Record<string, string> }) => {
+      const ref = opts?.headers?.['Referer'];
+      const arr = seenByUrl.get(url) ?? [];
+      arr.push(ref);
+      seenByUrl.set(url, arr);
+
+      if (ref !== 'https://www.coempregos.com.br/') {
+        return { finalUrl: url, response: new Response('Forbidden', { status: 403 }) };
+      }
+      if (url === playlist2) {
+        return {
+          finalUrl: url,
+          response: new Response(`#EXTM3U\n#EXTINF:5.0,\n${childOnOtherHost}\n#EXT-X-ENDLIST`, {
+            status: 200,
+            headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+          }),
+        };
+      }
+      return {
+        finalUrl: url,
+        response: new Response(new Uint8Array([0x47, 0x40, 0x00, 0x22]), {
+          status: 200,
+          headers: { 'content-type': 'image/webp' },
+        }),
+      };
+    };
+
+    // 1ª requisição descobre que coempregos funciona após fallback 403
+    const r1 = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(seg1)}`),
+      { fetchWithRedirects: mockFetch }
+    );
+    expect(r1.status).toBe(200);
+    expect(seenByUrl.get(seg1)).toEqual([
+      'https://www.anitube.biz/',
+      'https://api.anivideo.net/',
+      'https://www.coempregos.com.br/',
+    ]);
+
+    // 2ª requisição no mesmo host reutiliza coempregos logo na 1ª tentativa (zero 403) e propaga ref/rsig aos filhos
+    const r2 = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(playlist2)}`),
+      { fetchWithRedirects: mockFetch }
+    );
+    expect(r2.status).toBe(200);
+    expect(seenByUrl.get(playlist2)).toEqual(['https://www.coempregos.com.br/']);
+
+    const playlist2Body = await r2.text();
+    const childPath = playlist2Body.split('\n').find((l) => l.includes(encodeURIComponent(childOnOtherHost)))!.trim();
+    const childUrl = new URL(`http://localhost${childPath}`);
+    expect(childUrl.searchParams.get('ref')).toBe('https://www.coempregos.com.br/');
+    expect(childUrl.searchParams.get('rsig')).toBeTruthy();
+  });
+
+  it('27. isola Referer aprendido entre hosts diferentes e entre Preview vs Production e expira após TTL de 15 min', async () => {
+    expect(LEARNED_REFERER_TTL_SECONDS).toBe(15 * 60);
+    let currentNowMs = 1_795_000_000_000;
+    const origVercelEnv = process.env.VERCEL_ENV;
+    const origVercelUrl = process.env.VERCEL_URL;
+
+    try {
+      process.env.VERCEL_ENV = 'preview';
+      process.env.VERCEL_URL = 'hikari-git-etapa2.vercel.app';
+
+      const hostAUrl = 'https://cdn-a.mywallpaper-4k-image.net/stream/ep1/seg-1.webp';
+      const hostBUrl = 'https://cdn-b.mywallpaper-4k-image.net/stream/ep1/seg-1.webp';
+
+      const seenHostA: Array<string | undefined> = [];
+      const seenHostB: Array<string | undefined> = [];
+
+      // Host A aprende api.anivideo.net no ambiente Preview
+      await handleProxyStreamRequest(
+        new Request(`http://localhost${buildSignedProxyPath(hostAUrl)}`),
+        {
+          nowMs: () => currentNowMs,
+          fetchWithRedirects: async (url, opts) => {
+            const ref = opts?.headers?.['Referer'];
+            seenHostA.push(ref);
+            if (ref === 'https://api.anivideo.net/') {
+              return {
+                finalUrl: url,
+                response: new Response(new Uint8Array([0x47, 0x40, 0x00, 0x01]), {
+                  status: 200,
+                  headers: { 'content-type': 'image/webp' },
+                }),
+              };
+            }
+            return { finalUrl: url, response: new Response('Forbidden', { status: 403 }) };
+          },
+        }
+      );
+      expect(seenHostA).toEqual(['https://www.anitube.biz/', 'https://api.anivideo.net/']);
+
+      // Host B NÃO reaproveita Referer aprendido do Host A (tenta padrão primeiro)
+      await handleProxyStreamRequest(
+        new Request(`http://localhost${buildSignedProxyPath(hostBUrl)}`),
+        {
+          nowMs: () => currentNowMs,
+          fetchWithRedirects: async (url, opts) => {
+            seenHostB.push(opts?.headers?.['Referer']);
+            return {
+              finalUrl: url,
+              response: new Response(new Uint8Array([0x47, 0x40, 0x00, 0x02]), {
+                status: 200,
+                headers: { 'content-type': 'image/webp' },
+              }),
+            };
+          },
+        }
+      );
+      expect(seenHostB).toEqual(['https://www.anitube.biz/']);
+
+      // Mudando para Production, o aprendizado feito em Preview NÃO vaza para o Host A em Production
+      process.env.VERCEL_ENV = 'production';
+      delete process.env.VERCEL_URL;
+      const seenProdHostA: Array<string | undefined> = [];
+      await handleProxyStreamRequest(
+        new Request(`http://localhost${buildSignedProxyPath(hostAUrl)}`),
+        {
+          nowMs: () => currentNowMs,
+          fetchWithRedirects: async (url, opts) => {
+            seenProdHostA.push(opts?.headers?.['Referer']);
+            return {
+              finalUrl: url,
+              response: new Response(new Uint8Array([0x47, 0x40, 0x00, 0x03]), {
+                status: 200,
+                headers: { 'content-type': 'image/webp' },
+              }),
+            };
+          },
+        }
+      );
+      expect(seenProdHostA).toEqual(['https://www.anitube.biz/']);
+
+      // Voltando para Preview antes do TTL: ainda usa api.anivideo.net
+      process.env.VERCEL_ENV = 'preview';
+      process.env.VERCEL_URL = 'hikari-git-etapa2.vercel.app';
+      const seenPreviewBeforeExpiry: Array<string | undefined> = [];
+      await handleProxyStreamRequest(
+        new Request(`http://localhost${buildSignedProxyPath(hostAUrl)}`),
+        {
+          nowMs: () => currentNowMs + 60_000,
+          fetchWithRedirects: async (url, opts) => {
+            seenPreviewBeforeExpiry.push(opts?.headers?.['Referer']);
+            return {
+              finalUrl: url,
+              response: new Response(new Uint8Array([0x47, 0x40, 0x00, 0x04]), {
+                status: 200,
+                headers: { 'content-type': 'image/webp' },
+              }),
+            };
+          },
+        }
+      );
+      expect(seenPreviewBeforeExpiry).toEqual(['https://api.anivideo.net/']);
+
+      // Após expirar TTL (15 min + 1s): volta à ordem padrão normal
+      currentNowMs += LEARNED_REFERER_TTL_SECONDS * 1000 + 1000;
+      const seenPreviewAfterExpiry: Array<string | undefined> = [];
+      await handleProxyStreamRequest(
+        new Request(`http://localhost${buildSignedProxyPath(hostAUrl)}`),
+        {
+          nowMs: () => currentNowMs,
+          fetchWithRedirects: async (url, opts) => {
+            seenPreviewAfterExpiry.push(opts?.headers?.['Referer']);
+            return {
+              finalUrl: url,
+              response: new Response(new Uint8Array([0x47, 0x40, 0x00, 0x05]), {
+                status: 200,
+                headers: { 'content-type': 'image/webp' },
+              }),
+            };
+          },
+        }
+      );
+      expect(seenPreviewAfterExpiry).toEqual(['https://www.anitube.biz/']);
+    } finally {
+      if (origVercelEnv === undefined) delete process.env.VERCEL_ENV;
+      else process.env.VERCEL_ENV = origVercelEnv;
+      if (origVercelUrl === undefined) delete process.env.VERCEL_URL;
+      else process.env.VERCEL_URL = origVercelUrl;
+    }
+  });
+
+  it('28. opera fail-open se store de Referer falhar e invalida Referer aprendido quando passa a retornar 403', async () => {
+    const targetUrl = 'https://cdn-s05.mywallpaper-4k-image.net/stream/ep1/seg-001.webp';
+
+    // 28a. Store com falha em get/set/delete nunca interrompe a reprodução
+    const brokenStore: LearnedRefererStore = {
+      async get() {
+        throw new Error('storage read failed');
+      },
+      async set() {
+        throw new Error('storage write failed');
+      },
+      async delete() {
+        throw new Error('storage delete failed');
+      },
+    };
+
+    const resFailOpen = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(targetUrl)}`),
+      {
+        learnedRefererStore: brokenStore,
+        fetchWithRedirects: async (url, opts) => {
+          if (opts?.headers?.['Referer'] === 'https://api.anivideo.net/') {
+            return {
+              finalUrl: url,
+              response: new Response(new Uint8Array([0x47, 0x40, 0x00, 0x08]), {
+                status: 200,
+                headers: { 'content-type': 'image/webp' },
+              }),
+            };
+          }
+          return { finalUrl: url, response: new Response('Forbidden', { status: 403 }) };
+        },
+      }
+    );
+    expect(resFailOpen.status).toBe(200);
+
+    // 28b. Se Referer aprendido passa a devolver 403 e o padrão volta a funcionar, cache é invalidado
+    let allowLearned = true;
+    const seenRound2: Array<string | undefined> = [];
+    const seenRound3: Array<string | undefined> = [];
+
+    // Round 1: aprende api.anivideo.net
+    const r1 = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(targetUrl)}`),
+      {
+        fetchWithRedirects: async (url, opts) => {
+          if (opts?.headers?.['Referer'] === 'https://api.anivideo.net/') {
+            return {
+              finalUrl: url,
+              response: new Response(new Uint8Array([0x47, 0x40, 0x00, 0x09]), {
+                status: 200,
+                headers: { 'content-type': 'image/webp' },
+              }),
+            };
+          }
+          return { finalUrl: url, response: new Response('Forbidden', { status: 403 }) };
+        },
+      }
+    );
+    expect(r1.status).toBe(200);
+
+    // Round 2: api.anivideo.net falha com 403 e anitube.biz (padrão) volta a responder 200
+    allowLearned = false;
+    const r2 = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(targetUrl)}`),
+      {
+        fetchWithRedirects: async (url, opts) => {
+          const ref = opts?.headers?.['Referer'];
+          seenRound2.push(ref);
+          if (!allowLearned && ref === 'https://www.anitube.biz/') {
+            return {
+              finalUrl: url,
+              response: new Response(new Uint8Array([0x47, 0x40, 0x00, 0x0a]), {
+                status: 200,
+                headers: { 'content-type': 'image/webp' },
+              }),
+            };
+          }
+          return { finalUrl: url, response: new Response('Forbidden', { status: 403 }) };
+        },
+      }
+    );
+    expect(r2.status).toBe(200);
+    expect(seenRound2).toEqual(['https://api.anivideo.net/', 'https://www.anitube.biz/']);
+
+    // Round 3: cache foi limpo, portanto volta a tentar anitube.biz diretamente em 1 tentativa
+    const r3 = await handleProxyStreamRequest(
+      new Request(`http://localhost${buildSignedProxyPath(targetUrl)}`),
+      {
+        fetchWithRedirects: async (url, opts) => {
+          seenRound3.push(opts?.headers?.['Referer']);
+          return {
+            finalUrl: url,
+            response: new Response(new Uint8Array([0x47, 0x40, 0x00, 0x0b]), {
+              status: 200,
+              headers: { 'content-type': 'image/webp' },
+            }),
+          };
+        },
+      }
+    );
+    expect(r3.status).toBe(200);
+    expect(seenRound3).toEqual(['https://www.anitube.biz/']);
   });
 });
