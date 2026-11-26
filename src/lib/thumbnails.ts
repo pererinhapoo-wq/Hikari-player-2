@@ -158,6 +158,17 @@ export async function resolveThumbnailSourceForAdmin(
 ): Promise<ThumbnailSourcePlan> {
   const candidateSources: ThumbnailSourceInput[] = [];
 
+  const formVideoUrl = input.videoUrl?.trim();
+  if (formVideoUrl) {
+    candidateSources.push({
+      slot: 1,
+      url: formVideoUrl,
+      kind: input.sourceKind || null,
+      isMirror: isVercelBlobUrl(formVideoUrl),
+      isFormSource: true,
+    });
+  }
+
   const episodeId = input.episodeId?.trim();
   const dbReady = deps.isDbConfigured ? deps.isDbConfigured() : isDatabaseConfigured();
   if (episodeId && dbReady) {
@@ -170,16 +181,6 @@ export async function resolveThumbnailSourceForAdmin(
     } catch {
       // Continua usando a URL informada no formulário caso o lookup falhe
     }
-  }
-
-  const formVideoUrl = input.videoUrl?.trim();
-  if (formVideoUrl) {
-    candidateSources.push({
-      slot: 1,
-      url: formVideoUrl,
-      kind: input.sourceKind || null,
-      isMirror: isVercelBlobUrl(formVideoUrl),
-    });
   }
 
   const picked = pickBestThumbnailCandidate(candidateSources);

@@ -16,6 +16,7 @@ export interface ThumbnailSourceInput {
   url: string;
   kind?: ExplicitSourceKind | string | null;
   isMirror?: boolean | null;
+  isFormSource?: boolean | null;
 }
 
 export interface ThumbnailSourcePlan {
@@ -111,9 +112,10 @@ export interface PickedThumbnailCandidate {
 function isExplicitHlsPlaylistUrl(rawUrl: string): boolean {
   try {
     const parsed = new URL(rawUrl);
-    return /\.(m3u8|m3u)$/i.test(parsed.pathname);
+    const path = parsed.pathname.toLowerCase();
+    return /\.(m3u8|m3u)$/i.test(path) || path.includes('/index.m3u8') || path.includes('/index.m3u');
   } catch {
-    return /\.(m3u8|m3u)(?:[?#]|$)/i.test(rawUrl);
+    return /\.(m3u8|m3u)(?:[?#]|$)/i.test(rawUrl) || rawUrl.includes('/index.m3u8');
   }
 }
 
@@ -146,8 +148,23 @@ export function pickBestThumbnailCandidate(
     const score = getCandidatePriorityScore(
       isBlob,
       effectiveKind,
-      normalized.requiresServerResolve
+      normalized.requiresServerResolve,
+      Boolean(entry.isFormSource)
     );
+
+    const formatLabel = isBlob
+      ? effectiveKind === 'mp4'
+        ? 'MP4 Vercel Blob'
+        : effectiveKind === 'hls'
+          ? 'HLS Vercel Blob'
+          : `${effectiveKind.toUpperCase()} Vercel Blob`
+      : effectiveKind === 'hls'
+        ? (normalized.rawUrl.includes('.m3u8') ? 'M3U8 externo' : 'HLS externo')
+        : effectiveKind === 'mp4'
+          ? 'MP4 externo'
+          : effectiveKind === 'webm'
+            ? 'WebM'
+            : normalized.formatLabel;
 
     candidates.push({
       score,
@@ -157,11 +174,7 @@ export function pickBestThumbnailCandidate(
         rawUrl: normalized.rawUrl,
         resolvedUrl: normalized.resolvedUrl,
         kind: effectiveKind,
-        formatLabel: isBlob
-          ? `${effectiveKind.toUpperCase()} · Vercel Blob`
-          : effectiveKind === 'hls' && normalized.kind !== 'hls'
-            ? 'HLS'
-            : normalized.formatLabel,
+        formatLabel,
         isBlob,
         requiresServerResolve: normalized.requiresServerResolve,
         embedMode: classifyEmbedHost(normalized.resolvedUrl),

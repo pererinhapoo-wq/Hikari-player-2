@@ -402,7 +402,7 @@ export function detectSourceKind(
     if (isLikelyHtmlPage(parsed)) {
       return 'iframe';
     }
-    if (/\.m3u8$/i.test(path) || /\.m3u$/i.test(path)) {
+    if (/\.m3u8$/i.test(path) || /\.m3u$/i.test(path) || path.includes('/index.m3u8') || path.includes('/index.m3u')) {
       return 'hls';
     }
     if (/\.(mp4|m4v|webm)$/i.test(path)) {

@@ -2453,11 +2453,13 @@ function AdminPage() {
                             <span>Gerar thumbnails do vídeo</span>
                           </div>
                           <p className="mt-0.5 text-[11px] text-slate-400">
-                            {hasBlobThumbnailSource
-                              ? 'Prioridade automática: usando o vídeo armazenado no Vercel Blob.'
-                              : hasAnyThumbnailSource
-                                ? 'Captura ~6 momentos do vídeo para você escolher a capa manualmente.'
-                                : 'Informe a URL do vídeo (ou gere a cópia no Vercel Blob) para extrair opções de capa.'}
+                            {thumbSourceInfo
+                              ? `Fonte usada: ${thumbSourceInfo.label}.`
+                              : hasBlobThumbnailSource
+                                ? 'Prioridade automática: usando o vídeo armazenado no Vercel Blob.'
+                                : hasAnyThumbnailSource
+                                  ? 'Captura ~6 momentos do vídeo para você escolher a capa manualmente.'
+                                  : 'Informe a URL do vídeo (ou gere a cópia no Vercel Blob) para extrair opções de capa.'}
                           </p>
                         </div>
 

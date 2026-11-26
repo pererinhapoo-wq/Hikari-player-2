@@ -203,6 +203,94 @@ describe('pickBestThumbnailCandidate & resolveThumbnailSourceForAdmin', () => {
     expect(picked?.kind).toBe('mp4');
     expect(picked?.slot).toBe(2);
   });
+
+  it('1. URL M3U8 atual no formulário prevalece sobre MP4 antigo no Blob', async () => {
+    const blobMp4 = 'https://q70piqtcusyiwtbz.public.blob.vercel-storage.com/mirrors/ep01.mp4';
+    const m3u8Form = 'https://cdn-s01.mywallpaper-4k-image.net/stream/sv/t/tsuihou/21v2.mp4/index.m3u8';
+    const ep = makeEpisode({
+      video_url: blobMp4,
+      source_kind: 'mp4',
+      is_mirror: true,
+    });
+
+    const plan = await resolveThumbnailSourceForAdmin(
+      {
+        episodeId: ep.id,
+        videoUrl: m3u8Form,
+        sourceKind: 'hls',
+      },
+      {
+        isDbConfigured: () => true,
+        getEpisodeById: async () => ep,
+        signProxyUrl: (u) => `/proxy?u=${encodeURIComponent(u)}`,
+      }
+    );
+
+    expect(plan.ok).toBe(true);
+    expect(plan.mode).toBe('hls');
+    expect(plan.sourceUrl).toBe(m3u8Form);
+    expect(plan.blobPreferred).toBe(false);
+    expect(plan.sourceLabel).toBe('M3U8 externo');
+  });
+
+  it('2. URL MP4 atual no formulário continua funcionando', async () => {
+    const mp4Form = 'https://cdn.example.com/videos/current.mp4';
+    const plan = await resolveThumbnailSourceForAdmin(
+      { videoUrl: mp4Form },
+      { signProxyUrl: (u) => `/proxy?u=${encodeURIComponent(u)}` }
+    );
+    expect(plan.ok).toBe(true);
+    expect(plan.mode).toBe('direct');
+    expect(plan.sourceKind).toBe('mp4');
+    expect(plan.sourceUrl).toBe(mp4Form);
+    expect(plan.sourceLabel).toBe('MP4 externo');
+  });
+
+  it('3. URL WebM atual não é substituída por outra fonte', async () => {
+    const webmForm = 'https://cdn.example.com/videos/current.webm';
+    const plan = await resolveThumbnailSourceForAdmin(
+      { videoUrl: webmForm },
+      { signProxyUrl: (u) => `/proxy?u=${encodeURIComponent(u)}` }
+    );
+    expect(plan.ok).toBe(true);
+    expect(plan.mode).toBe('direct');
+    expect(plan.sourceKind).toBe('webm');
+    expect(plan.sourceUrl).toBe(webmForm);
+    expect(plan.sourceLabel).toBe('WebM');
+  });
+
+  it('4. Alterar o endereço no formulário altera a fonte enviada à extração e 5. Identificação corresponde à fonte', async () => {
+    const planA = await resolveThumbnailSourceForAdmin(
+      { videoUrl: 'https://cdn.example.com/ep1.mp4' },
+      { signProxyUrl: (u) => `/proxy?u=${encodeURIComponent(u)}` }
+    );
+    expect(planA.sourceUrl).toContain('ep1.mp4');
+    expect(planA.sourceLabel).toBe('MP4 externo');
+
+    const planB = await resolveThumbnailSourceForAdmin(
+      { videoUrl: 'https://cdn.example.com/ep2.m3u8' },
+      { signProxyUrl: (u) => `/proxy?u=${encodeURIComponent(u)}` }
+    );
+    expect(planB.sourceUrl).toContain('ep2.m3u8');
+    expect(planB.sourceLabel).toBe('M3U8 externo');
+  });
+
+  it('6. Dados antigos do episódio não sobrescrevem a URL atual do formulário', async () => {
+    const oldBlob = 'https://q70piqtcusyiwtbz.public.blob.vercel-storage.com/old.mp4';
+    const newM3u8 = 'https://cdn.example.com/new/index.m3u8';
+    const ep = makeEpisode({ video_url: oldBlob, is_mirror: true });
+
+    const plan = await resolveThumbnailSourceForAdmin(
+      { episodeId: ep.id, videoUrl: newM3u8, sourceKind: 'hls' },
+      {
+        isDbConfigured: () => true,
+        getEpisodeById: async () => ep,
+        signProxyUrl: (u) => `/proxy?u=${encodeURIComponent(u)}`,
+      }
+    );
+    expect(plan.sourceUrl).toBe(newM3u8);
+    expect(plan.mode).toBe('hls');
+  });
 });
 
 describe('image magic bytes & pathname helpers', () => {
