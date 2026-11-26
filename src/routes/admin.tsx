@@ -69,6 +69,7 @@ import {
   adminLoginFn,
   adminLogoutFn,
   adminProcessBatchItemFn,
+  adminResolveR2SourceFn,
   adminResolveThumbnailSourceFn,
   adminTestEpisodeSourcesFn,
   adminTestSourceFn,
@@ -99,7 +100,12 @@ import {
   type R2SourceInspection,
   validateHttpUrl,
 } from '@/lib/video-sources';
-import { extractPrefixFromPlayerricasName, isR2SignedUrl } from '@/lib/r2-resolver';
+import {
+  applyResolvedR2Candidate,
+  type ControlledR2ResolutionResult,
+  extractPrefixFromPlayerricasName,
+  isR2SignedUrl,
+} from '@/lib/r2-resolver';
 
 export const Route = createFileRoute('/admin')({
   loader: async () => {
@@ -323,6 +329,12 @@ function AdminPage() {
   const [slotTesting, setSlotTesting] = useState(false);
   const [slotReport, setSlotReport] = useState<SourceTestReport | null>(null);
   const [slotTestError, setSlotTestError] = useState<string | null>(null);
+
+  // Controlled R2 resolution state (never auto-replaces form.video_url)
+  const [r2ResolveBusy, setR2ResolveBusy] = useState(false);
+  const [r2ResolveResult, setR2ResolveResult] = useState<ControlledR2ResolutionResult | null>(null);
+  const [r2ResolveError, setR2ResolveError] = useState<string | null>(null);
+  const [r2AppliedNotice, setR2AppliedNotice] = useState<string | null>(null);
 
   const [episodeTests, setEpisodeTests] = useState<Record<string, SourceTestReport[]>>({});
   const [episodeTestingId, setEpisodeTestingId] = useState<string | null>(null);
@@ -593,6 +605,10 @@ function AdminPage() {
     setSlotTesting(false);
     setSlotReport(null);
     setSlotTestError(null);
+    setR2ResolveBusy(false);
+    setR2ResolveResult(null);
+    setR2ResolveError(null);
+    setR2AppliedNotice(null);
     setFormSiteUrl('');
     setFormSiteImportBusy(false);
     setFormSiteImportError(null);
@@ -679,6 +695,54 @@ function AdminPage() {
     } finally {
       setSlotTesting(false);
     }
+  };
+
+  const handleAttemptControlledR2Resolution = async () => {
+    const trimmed = form.video_url.trim();
+    if (!trimmed) return;
+    setR2ResolveBusy(true);
+    setR2ResolveError(null);
+    setR2ResolveResult(null);
+    setR2AppliedNotice(null);
+    try {
+      const res = await adminResolveR2SourceFn({ data: { url: trimmed } });
+      if (!res.ok) {
+        setR2ResolveError(res.error);
+        return;
+      }
+      setR2ResolveResult(res.resolution);
+    } catch (err) {
+      setR2ResolveError(
+        err instanceof Error ? err.message : 'Falha ao tentar resolver o link R2.'
+      );
+    } finally {
+      setR2ResolveBusy(false);
+    }
+  };
+
+  const handleConfirmApplyR2Candidate = () => {
+    const applied = applyResolvedR2Candidate(
+      { video_url: form.video_url, source_kind: form.source_kind },
+      r2ResolveResult,
+      true
+    );
+    if (!applied.applied) return;
+    setForm((prev) => ({
+      ...prev,
+      video_url: applied.video_url,
+      source_kind: applied.source_kind,
+    }));
+    setR2AppliedNotice(
+      `Fonte aplicada ao formulário (${r2ResolveResult?.matchedPrefix ?? 'playerricas'} · ${applied.source_kind || 'auto'}). Clique em Salvar para gravar no episódio.`
+    );
+    setR2ResolveResult(null);
+    setSlotReport(null);
+  };
+
+  const handleDiscardR2Candidate = () => {
+    setR2ResolveResult(null);
+    setR2ResolveError(null);
+    setR2AppliedNotice(null);
   };
 
   const handleImportSiteIntoForm = async () => {
@@ -2173,6 +2237,23 @@ function AdminPage() {
                           <span className="text-[11px] text-rose-400">URL inválida</span>
                         ) : null}
 
+                        {primarySourceInfo?.r2Inspection.isR2 && primarySourceInfo.check.valid && (
+                          <button
+                            type="button"
+                            disabled={r2ResolveBusy}
+                            onClick={() => void handleAttemptControlledR2Resolution()}
+                            title="Tenta localizar uma fonte reproduzível em playerricas.php sem alterar a URL atual automaticamente"
+                            className="h-7 px-2.5 rounded-md border border-amber-500/40 bg-amber-950/30 hover:bg-amber-950/60 disabled:opacity-40 text-[11px] font-medium text-amber-200 inline-flex items-center gap-1 cursor-pointer whitespace-nowrap"
+                          >
+                            {r2ResolveBusy ? (
+                              <Loader2 className="w-3 h-3 animate-spin" />
+                            ) : (
+                              <Globe className="w-3 h-3" />
+                            )}
+                            {r2ResolveBusy ? 'Resolvendo R2...' : 'Tentar resolver R2'}
+                          </button>
+                        )}
+
                         {primarySourceInfo?.trimmed && (
                           <button
                             type="button"
@@ -2195,7 +2276,14 @@ function AdminPage() {
                         type="url"
                         required
                         value={form.video_url}
-                        onChange={(e) => setForm({ ...form, video_url: e.target.value })}
+                        onChange={(e) => {
+                          setForm({ ...form, video_url: e.target.value });
+                          if (r2ResolveResult || r2ResolveError || r2AppliedNotice) {
+                            setR2ResolveResult(null);
+                            setR2ResolveError(null);
+                            setR2AppliedNotice(null);
+                          }
+                        }}
                         placeholder="https://.../playerricas.php?... ou https://.../index.m3u8"
                         className="flex-1 min-w-0 h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500"
                       />
@@ -2303,6 +2391,111 @@ function AdminPage() {
                           </div>
                         )}
                     </div>
+
+                    {r2ResolveError && (
+                      <div
+                        role="alert"
+                        className="rounded-lg border border-rose-500/35 bg-rose-950/30 px-3 py-2 text-xs text-rose-200"
+                      >
+                        {r2ResolveError}
+                      </div>
+                    )}
+
+                    {r2AppliedNotice && (
+                      <div
+                        role="status"
+                        className="rounded-lg border border-emerald-500/35 bg-emerald-950/30 px-3 py-2 text-xs text-emerald-200"
+                      >
+                        {r2AppliedNotice}
+                      </div>
+                    )}
+
+                    {r2ResolveResult && (
+                      <div className="rounded-lg bg-[#090B10] border border-white/15 p-3 text-xs space-y-2">
+                        <div className="flex items-center justify-between gap-2">
+                          <span
+                            className={`font-semibold ${
+                              r2ResolveResult.found ? 'text-emerald-300' : 'text-amber-300'
+                            }`}
+                          >
+                            {r2ResolveResult.found
+                              ? `Candidata encontrada via playerricas (${r2ResolveResult.matchedPrefix})`
+                              : 'Resolução R2 sem fonte válida confirmada'}
+                          </span>
+                          <button
+                            type="button"
+                            onClick={handleDiscardR2Candidate}
+                            className="text-[11px] text-slate-400 hover:text-slate-200 cursor-pointer"
+                          >
+                            Fechar
+                          </button>
+                        </div>
+
+                        <p className="text-[11px] text-slate-300 leading-snug">
+                          {r2ResolveResult.message}
+                        </p>
+
+                        {r2ResolveResult.originalUrlStatus.checked &&
+                          r2ResolveResult.originalUrlStatus.message && (
+                            <p className="text-[11px] font-mono text-slate-300">
+                              URL original: {r2ResolveResult.originalUrlStatus.message}
+                            </p>
+                          )}
+
+                        {r2ResolveResult.attempts.length > 0 && (
+                          <div className="flex flex-wrap gap-1.5">
+                            {r2ResolveResult.attempts.map((attempt) => (
+                              <span
+                                key={attempt.prefix}
+                                title={attempt.reason}
+                                className={`px-1.5 py-0.5 rounded border text-[10px] font-mono ${
+                                  attempt.valid
+                                    ? 'border-emerald-500/40 bg-emerald-950/40 text-emerald-300'
+                                    : 'border-white/10 bg-white/5 text-slate-400'
+                                }`}
+                              >
+                                {attempt.prefix}:{' '}
+                                {attempt.status !== null ? `HTTP ${attempt.status}` : 'erro/timeout'}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+
+                        {r2ResolveResult.found && r2ResolveResult.resolvedUrl && (
+                          <div className="space-y-2 pt-1 border-t border-white/10">
+                            <div className="text-[11px] text-slate-300">
+                              Tipo detectado:{' '}
+                              <span className="font-mono text-emerald-300">
+                                {r2ResolveResult.detectedKind ?? 'iframe'}
+                              </span>
+                              {r2ResolveResult.validationDetail
+                                ? ` · ${r2ResolveResult.validationDetail}`
+                                : ''}
+                            </div>
+                            <div className="p-2 rounded bg-black/40 border border-white/10 text-[11px] font-mono text-slate-200 break-all">
+                              {r2ResolveResult.resolvedUrl}
+                            </div>
+                            <div className="flex flex-wrap items-center gap-2">
+                              <button
+                                type="button"
+                                onClick={handleConfirmApplyR2Candidate}
+                                className="h-7 px-3 rounded-md bg-emerald-600 hover:bg-emerald-500 text-white text-[11px] font-medium inline-flex items-center gap-1 cursor-pointer"
+                              >
+                                <Check className="w-3.5 h-3.5" />
+                                Aplicar fonte resolvida
+                              </button>
+                              <button
+                                type="button"
+                                onClick={handleDiscardR2Candidate}
+                                className="h-7 px-3 rounded-md border border-white/15 bg-white/5 hover:bg-white/10 text-slate-200 text-[11px] font-medium cursor-pointer"
+                              >
+                                Manter URL atual
+                              </button>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
 
                     {slotTestError && (
                       <p className="text-xs text-rose-400" role="alert">

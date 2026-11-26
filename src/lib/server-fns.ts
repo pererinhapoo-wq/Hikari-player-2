@@ -48,12 +48,18 @@ import {
   createProxySignature,
   getStableProxyExpiry,
 } from '@/lib/proxy-signing';
+import {
+  attemptControlledR2Resolution,
+  type ControlledR2ResolutionDeps,
+  type ControlledR2ResolutionResult,
+} from '@/lib/r2-resolver';
 import { importSourceFromEpisodePage, type SiteImportDeps } from '@/lib/site-import';
 import {
   diagnoseEpisodeSources,
   diagnoseVideoSource,
   type SourceTestInput,
 } from '@/lib/source-diagnostics';
+import { assertSafeExternalUrl } from '@/lib/ssrf';
 import { resolveUpstreamReferer } from '@/lib/stream-proxy';
 import type {
   AdminDashboardState,
@@ -755,4 +761,41 @@ export const adminImportFromSiteFn = createServerFn({ method: 'POST' })
       };
     }
   });
+
+export async function processControlledR2ResolutionServer(
+  input: { url: string },
+  deps: ControlledR2ResolutionDeps = {}
+): Promise<ControlledR2ResolutionResult> {
+  return await attemptControlledR2Resolution(input.url, {
+    ...deps,
+    assertSafeUrl: deps.assertSafeUrl ?? assertSafeExternalUrl,
+  });
+}
+
+export const adminResolveR2SourceFn = createServerFn({ method: 'POST' })
+  .validator((data: { url?: string }) => ({
+    url: typeof data?.url === 'string' ? data.url : '',
+  }))
+  .handler(
+    async ({
+      data,
+    }): Promise<
+      { ok: true; resolution: ControlledR2ResolutionResult } | { ok: false; error: string }
+    > => {
+      try {
+        requireAdminSession();
+        const resolution = await processControlledR2ResolutionServer({ url: data.url });
+        return { ok: true, resolution };
+      } catch (err) {
+        return {
+          ok: false,
+          error:
+            err instanceof Error
+              ? err.message
+              : 'Falha ao executar resolução controlada do link R2 no servidor.',
+        };
+      }
+    }
+  );
+
 
