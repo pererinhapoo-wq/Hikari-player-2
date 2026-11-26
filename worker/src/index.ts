@@ -1,11 +1,14 @@
 const BROWSER_UA =
   'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36';
 
-const DEFAULT_MAXIMAIMG_REFERER = 'https://api.anivideo.net/';
+const DEFAULT_MAXIMAIMG_REFERER = 'https://www.anitube.biz/';
+const LEGACY_MAXIMAIMG_REFERER = 'https://api.anivideo.net/';
 const EXTM3U_BYTES = [0x23, 0x45, 0x58, 0x54, 0x4d, 0x33, 0x55] as const; // "#EXTM3U"
 const MAX_PEEK_BYTES = 512;
-const MAX_URL_LENGTH = 2048;
+const MAX_URL_LENGTH = 8192;
+const MAX_HLS_REWRITE_DEPTH = 2;
 const SEGMENT_CACHE_TTL_SECONDS = 31536000; // 1 ano
+const EXPIRABLE_SEGMENT_CACHE_TTL_SECONDS = 30;
 const MANIFEST_CACHE_TTL_SECONDS = 5;
 const STABLE_SIGN_WINDOW_SECONDS = 60 * 60 * 24 * 7; // 7 dias (chave de cache estável)
 
@@ -48,13 +51,24 @@ function getCorsHeaders(): Record<string, string> {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'GET, HEAD, OPTIONS',
     'Access-Control-Allow-Headers': 'Range, Accept, Content-Type',
-    'Access-Control-Expose-Headers': 'Accept-Ranges, Content-Length, Content-Range, CF-Cache-Status',
+    'Access-Control-Expose-Headers':
+      'Accept-Ranges, Content-Length, Content-Range, CF-Cache-Status, X-Hikari-Source-Expirable',
   };
 }
 
+function hasExpirableHlsTokens(input: string): boolean {
+  if (!input) return false;
+  return /(?:x-amz-expires|(?:^|[?&#,;,\s"'])token=|(?:^|[?&#,;,\s"'])sig=)/i.test(input);
+}
+
 function isMaximaimgHost(hostname: string): boolean {
-  const lower = hostname.toLowerCase();
+  const lower = hostname.toLowerCase().replace(/\.+$/, '');
   return lower === 'maximaimg.online' || lower.endsWith('.maximaimg.online');
+}
+
+function isMywallpaperHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase().replace(/\.+$/, '');
+  return lower === 'mywallpaper-4k-image.net' || lower.endsWith('.mywallpaper-4k-image.net');
 }
 
 function validateHttpUrl(raw: string): { valid: boolean; normalizedUrl?: string } {
@@ -225,6 +239,105 @@ export async function verifyWorkerProxySignature(
   );
 }
 
+export async function createWorkerDepthSignature(
+  targetUrl: string,
+  expUnixSeconds: number,
+  depth: number,
+  secret: string
+): Promise<string> {
+  const key = await importHmacKey(secret);
+  const payload = new TextEncoder().encode(`proxy-depth:${targetUrl}:${expUnixSeconds}:${depth}`);
+  const sigBuf = await crypto.subtle.sign('HMAC', key, payload);
+  return bytesToBase64Url(new Uint8Array(sigBuf));
+}
+
+export async function verifyWorkerProxyDepth(
+  targetUrl: string,
+  expParam: string | null,
+  depthParam: string | null,
+  depthSigParam: string | null,
+  secret: string
+): Promise<{ valid: boolean; depth: number; fromPlaylist: boolean }> {
+  if (depthParam === null) {
+    return { valid: true, depth: 0, fromPlaylist: false };
+  }
+  if (!expParam || !depthSigParam) {
+    return { valid: false, depth: 0, fromPlaylist: false };
+  }
+  const exp = Number(expParam);
+  const depth = Number(depthParam);
+  if (
+    !Number.isInteger(exp) ||
+    !Number.isInteger(depth) ||
+    depth < 1 ||
+    depth > MAX_HLS_REWRITE_DEPTH + 1
+  ) {
+    return { valid: false, depth: 0, fromPlaylist: false };
+  }
+
+  const sigBytes = base64UrlToBytes(depthSigParam);
+  if (!sigBytes || sigBytes.byteLength !== 32) {
+    return { valid: false, depth: 0, fromPlaylist: false };
+  }
+
+  const key = await importHmacKey(secret);
+  const payload = new TextEncoder().encode(`proxy-depth:${targetUrl}:${exp}:${depth}`);
+  const valid = await crypto.subtle.verify(
+    'HMAC',
+    key,
+    sigBytes as unknown as BufferSource,
+    payload as unknown as BufferSource
+  );
+
+  return valid
+    ? { valid: true, depth, fromPlaylist: true }
+    : { valid: false, depth: 0, fromPlaylist: false };
+}
+
+export async function createWorkerRefererSignature(
+  targetUrl: string,
+  expUnixSeconds: number,
+  referer: string,
+  secret: string
+): Promise<string> {
+  const key = await importHmacKey(secret);
+  const payload = new TextEncoder().encode(`proxy-ref:${targetUrl}:${expUnixSeconds}:${referer}`);
+  const sigBuf = await crypto.subtle.sign('HMAC', key, payload);
+  return bytesToBase64Url(new Uint8Array(sigBuf));
+}
+
+export async function verifyWorkerProxyReferer(
+  targetUrl: string,
+  expParam: string | null,
+  refParam: string | null,
+  refSigParam: string | null,
+  secret: string
+): Promise<{ valid: boolean; referer: string | null }> {
+  if (refParam === null) {
+    return { valid: true, referer: null };
+  }
+  if (!expParam || !refSigParam || !refParam.trim()) {
+    return { valid: false, referer: null };
+  }
+  const exp = Number(expParam);
+  if (!Number.isInteger(exp)) {
+    return { valid: false, referer: null };
+  }
+  const sigBytes = base64UrlToBytes(refSigParam);
+  if (!sigBytes || sigBytes.byteLength !== 32) {
+    return { valid: false, referer: null };
+  }
+  const key = await importHmacKey(secret);
+  const payload = new TextEncoder().encode(`proxy-ref:${targetUrl}:${exp}:${refParam}`);
+  const valid = await crypto.subtle.verify(
+    'HMAC',
+    key,
+    sigBytes as unknown as BufferSource,
+    payload as unknown as BufferSource
+  );
+  return valid ? { valid: true, referer: refParam } : { valid: false, referer: null };
+}
+
 export function getStableSegmentExpiry(nowSeconds = Math.floor(Date.now() / 1000)): number {
   return (Math.floor(nowSeconds / STABLE_SIGN_WINDOW_SECONDS) + 2) * STABLE_SIGN_WINDOW_SECONDS;
 }
@@ -233,7 +346,7 @@ export function resolveUpstreamReferer(targetUrl: URL, env: WorkerEnv): string {
   const hostname = targetUrl.hostname.toLowerCase();
   const rules = new Map<string, string>([
     ['maximaimg.online', env.PLAYER_MAXIMAIMG_REFERER?.trim() || DEFAULT_MAXIMAIMG_REFERER],
-    ['mywallpaper-4k-image.net', ''],
+    ['mywallpaper-4k-image.net', DEFAULT_MAXIMAIMG_REFERER],
   ]);
 
   const rawMap = env.PLAYER_REFERER_MAP?.trim();
@@ -279,16 +392,68 @@ export function resolveUpstreamReferer(targetUrl: URL, env: WorkerEnv): string {
   return `${targetUrl.origin}/`;
 }
 
+export function resolveUpstreamRefererCandidates(
+  targetUrl: URL,
+  env: WorkerEnv,
+  customReferer?: string | null
+): string[] {
+  const candidates: string[] = [];
+  const pushUnique = (value: string) => {
+    if (!candidates.includes(value)) {
+      candidates.push(value);
+    }
+  };
+
+  if (customReferer && customReferer.trim()) {
+    const check = validateHttpUrl(customReferer);
+    if (check.valid && check.normalizedUrl) {
+      pushUnique(check.normalizedUrl);
+    }
+  }
+
+  const primary = resolveUpstreamReferer(targetUrl, env);
+  pushUnique(primary);
+
+  const hostname = targetUrl.hostname.toLowerCase();
+  const hostOrigin = `${targetUrl.origin}/`;
+
+  if (isMaximaimgHost(hostname)) {
+    pushUnique(DEFAULT_MAXIMAIMG_REFERER);
+    pushUnique(LEGACY_MAXIMAIMG_REFERER);
+    pushUnique(hostOrigin);
+    pushUnique('');
+    return candidates;
+  }
+
+  if (isMywallpaperHost(hostname)) {
+    pushUnique(DEFAULT_MAXIMAIMG_REFERER);
+    pushUnique('');
+    pushUnique(hostOrigin);
+    return candidates;
+  }
+
+  pushUnique(hostOrigin);
+  pushUnique('');
+  return candidates;
+}
+
 export function getUpstreamHeaders(
   targetUrl: URL,
   incomingRequest: Request,
-  env: WorkerEnv
+  env: WorkerEnv,
+  customReferer?: string | null
 ): Headers {
   const headers = new Headers();
   headers.set('User-Agent', BROWSER_UA);
   headers.set('Accept', '*/*');
 
-  const referer = resolveUpstreamReferer(targetUrl, env);
+  let referer = resolveUpstreamReferer(targetUrl, env);
+  if (customReferer && customReferer.trim()) {
+    const check = validateHttpUrl(customReferer);
+    if (check.valid && check.normalizedUrl) {
+      referer = check.normalizedUrl;
+    }
+  }
   if (referer) {
     headers.set('Referer', referer);
   }
@@ -303,7 +468,11 @@ export function getUpstreamHeaders(
   return headers;
 }
 
-export function shouldInspectForHlsManifest(contentType: string, targetUrl: URL): boolean {
+export function shouldInspectForHlsManifest(
+  contentType: string,
+  targetUrl: URL,
+  fromPlaylist = false
+): boolean {
   const lowerCt = contentType.toLowerCase();
   const lowerPath = targetUrl.pathname.toLowerCase();
   if (lowerCt.includes('mpegurl') || lowerCt.includes('m3u8')) {
@@ -314,16 +483,28 @@ export function shouldInspectForHlsManifest(contentType: string, targetUrl: URL)
     lowerPath.endsWith('.ts') ||
     lowerPath.endsWith('.m4s') ||
     lowerPath.endsWith('.mp4') ||
+    lowerPath.endsWith('.m4v') ||
     lowerPath.endsWith('.webm') ||
-    lowerPath.endsWith('.aac')
+    lowerPath.endsWith('.aac') ||
+    lowerPath.endsWith('.mp3') ||
+    lowerPath.endsWith('.vtt') ||
+    lowerPath.endsWith('.srt') ||
+    lowerPath.endsWith('.png') ||
+    lowerPath.endsWith('.jpg') ||
+    lowerPath.endsWith('.jpeg') ||
+    lowerPath.endsWith('.gif') ||
+    lowerPath.endsWith('.key')
   ) {
     return false;
   }
-  return (
+  if (
     lowerCt.includes('text/') ||
     lowerPath.endsWith('.m3u8') ||
     lowerPath.endsWith('.m3u')
-  );
+  ) {
+    return true;
+  }
+  return fromPlaylist;
 }
 
 function bytesStartWithExtM3u(bytes: Uint8Array): boolean {
@@ -383,6 +564,16 @@ function concatChunks(chunks: Uint8Array[]): Uint8Array {
   return merged;
 }
 
+function isPassthroughUriScheme(trimmedUri: string): boolean {
+  const lower = trimmedUri.toLowerCase();
+  return (
+    lower.startsWith('data:') ||
+    lower.startsWith('skd:') ||
+    lower.startsWith('blob:') ||
+    lower.startsWith('javascript:')
+  );
+}
+
 async function rewriteM3u8PlaylistAsync(
   playlistContent: string,
   baseUrl: string,
@@ -393,7 +584,7 @@ async function rewriteM3u8PlaylistAsync(
 
   const resolveAndSign = async (rawUri: string): Promise<string> => {
     const trimmed = rawUri.trim();
-    if (!trimmed || trimmed.startsWith('data:') || trimmed.startsWith('skd:')) {
+    if (!trimmed || isPassthroughUriScheme(trimmed)) {
       return rawUri;
     }
     const absolute = new URL(trimmed, baseUrl).toString();
@@ -413,19 +604,31 @@ async function rewriteM3u8PlaylistAsync(
     }
 
     if (trimmed.startsWith('#')) {
-      const regex = /URI=(["'])([^"']+)\1/gi;
+      if (/^#EXT-X-PREFETCH:/i.test(trimmed)) {
+        const rawPrefetchUri = trimmed.slice('#EXT-X-PREFETCH:'.length).trim();
+        try {
+          const proxied = await resolveAndSign(rawPrefetchUri);
+          output.push(`#EXT-X-PREFETCH:${proxied}`);
+        } catch {
+          output.push(line);
+        }
+        continue;
+      }
+
+      const regex = /URI\s*=\s*(?:(["'])([^"']+)\1|([^,\s]+))/gi;
       let lastIndex = 0;
       let rebuilt = '';
       let match: RegExpExecArray | null;
       while ((match = regex.exec(line)) !== null) {
         rebuilt += line.slice(lastIndex, match.index);
         const quote = match[1];
-        const uriValue = match[2];
+        const uriValue = match[2] ?? match[3] ?? '';
+        const outQuote = quote ?? '"';
         try {
           const proxied = await resolveAndSign(uriValue);
-          rebuilt += `URI=${quote}${proxied}${quote}`;
+          rebuilt += `URI=${outQuote}${proxied}${outQuote}`;
         } catch {
-          rebuilt += `URI=${quote}${uriValue}${quote}`;
+          rebuilt += quote ? `URI=${quote}${uriValue}${quote}` : `URI=${uriValue}`;
         }
         lastIndex = regex.lastIndex;
       }
@@ -461,8 +664,12 @@ function buildBinaryResponseHeaders(
 ): Headers {
   const outHeaders = new Headers(getCorsHeaders());
   outHeaders.set('Content-Type', resolveBinaryContentType(contentType, targetUrl));
-  outHeaders.set('Cache-Control', `public, max-age=${SEGMENT_CACHE_TTL_SECONDS}, immutable`);
-  outHeaders.set('CDN-Cache-Control', `public, max-age=${SEGMENT_CACHE_TTL_SECONDS}, immutable`);
+  const isExpirable = Boolean(targetUrl && hasExpirableHlsTokens(targetUrl.toString()));
+  const cacheHeader = isExpirable
+    ? `public, max-age=${EXPIRABLE_SEGMENT_CACHE_TTL_SECONDS}, must-revalidate`
+    : `public, max-age=${SEGMENT_CACHE_TTL_SECONDS}, immutable`;
+  outHeaders.set('Cache-Control', cacheHeader);
+  outHeaders.set('CDN-Cache-Control', cacheHeader);
   outHeaders.set('X-Content-Type-Options', 'nosniff');
 
   const passthroughHeaders = [
@@ -481,11 +688,14 @@ function buildBinaryResponseHeaders(
   return outHeaders;
 }
 
-function buildManifestResponseHeaders(upstream: Response): Headers {
+function buildManifestResponseHeaders(upstream: Response, isExpirable = false): Headers {
   const outHeaders = new Headers(getCorsHeaders());
   outHeaders.set('Content-Type', 'application/vnd.apple.mpegurl; charset=utf-8');
   outHeaders.set('Cache-Control', `public, max-age=${MANIFEST_CACHE_TTL_SECONDS}`);
   outHeaders.set('CDN-Cache-Control', `public, max-age=${MANIFEST_CACHE_TTL_SECONDS}, stale-while-revalidate=30`);
+  if (isExpirable) {
+    outHeaders.set('X-Hikari-Source-Expirable', '1');
+  }
 
   const cfStatus = upstream.headers.get('cf-cache-status');
   if (cfStatus) {
@@ -531,9 +741,65 @@ async function fetchWithRedirectsSafe(
   throw new Error('Falha ao seguir redirecionamentos.');
 }
 
-function buildStableEdgeCacheRequest(targetUrl: string): Request {
+async function cancelResponseBodySafely(res: Response): Promise<void> {
+  if (!res.body) return;
+  try {
+    await res.body.cancel();
+  } catch {
+    // Ignorar erro ao descartar corpo anterior
+  }
+}
+
+async function fetchWith403RefererFallbackWorker(
+  targetUrl: URL,
+  incomingRequest: Request,
+  env: WorkerEnv,
+  cf: CloudflareCfProperties,
+  fetcher: (input: string, init?: CfRequestInit) => Promise<Response>,
+  customReferer?: string | null
+): Promise<{ response: Response; finalUrl: string }> {
+  const baseHeaders = getUpstreamHeaders(targetUrl, incomingRequest, env, customReferer);
+  const refererCandidates = resolveUpstreamRefererCandidates(targetUrl, env, customReferer);
+
+  let lastResult: { response: Response; finalUrl: string } | null = null;
+
+  for (let i = 0; i < refererCandidates.length; i++) {
+    const candidateRef = refererCandidates[i];
+    const headers = new Headers(baseHeaders);
+    if (candidateRef) {
+      headers.set('Referer', candidateRef);
+    } else {
+      headers.delete('Referer');
+    }
+
+    if (lastResult) {
+      await cancelResponseBodySafely(lastResult.response);
+    }
+
+    lastResult = await fetchWithRedirectsSafe(
+      targetUrl.toString(),
+      {
+        method: incomingRequest.method,
+        headers,
+        cf,
+      },
+      fetcher
+    );
+
+    if (lastResult.response.status !== 403) {
+      return lastResult;
+    }
+  }
+
+  return lastResult!;
+}
+
+function buildStableEdgeCacheRequest(targetUrl: string, depth = 0): Request {
   const cacheUrl = new URL('https://hikari-edge-cache.internal/v1');
   cacheUrl.searchParams.set('url', targetUrl);
+  if (depth > 0) {
+    cacheUrl.searchParams.set('d', String(depth));
+  }
   return new Request(cacheUrl.toString(), { method: 'GET' });
 }
 
@@ -546,11 +812,24 @@ function getDefaultEdgeCache(): Cache | null {
   }
 }
 
+function looksLikeBinaryMediaPrefix(bytes: Uint8Array): boolean {
+  if (bytes.length === 0) return false;
+  if (bytes[0] === 0x47) return true;
+  for (let i = 0; i < Math.min(bytes.length, 64); i++) {
+    if (bytes[i] === 0x00) return true;
+  }
+  return false;
+}
+
 function isInvalidHtmlManifestResponse(
   bytes: Uint8Array,
   contentType: string,
   targetUrl: URL
 ): boolean {
+  if (looksLikeBinaryMediaPrefix(bytes)) {
+    return false;
+  }
+
   const lowerCt = contentType.toLowerCase();
   const lowerPath = targetUrl.pathname.toLowerCase();
   const isManifestTarget =
@@ -616,6 +895,10 @@ export async function handleWorkerProxyRequest(
   const rawTarget = reqUrl.searchParams.get('url') ?? '';
   const exp = reqUrl.searchParams.get('exp');
   const sig = reqUrl.searchParams.get('sig');
+  const depthParam = reqUrl.searchParams.get('d');
+  const depthSigParam = reqUrl.searchParams.get('dsig');
+  const refParam = reqUrl.searchParams.get('ref');
+  const refSigParam = reqUrl.searchParams.get('rsig');
 
   const urlCheck = validateHttpUrl(rawTarget);
   if (!urlCheck.valid || !urlCheck.normalizedUrl) {
@@ -640,11 +923,40 @@ export async function handleWorkerProxyRequest(
     });
   }
 
+  const depthCheck = await verifyWorkerProxyDepth(
+    urlCheck.normalizedUrl,
+    exp,
+    depthParam,
+    depthSigParam,
+    secret
+  );
+  if (!depthCheck.valid) {
+    return new Response('Assinatura de profundidade do proxy inválida.', {
+      status: 403,
+      headers: getCorsHeaders(),
+    });
+  }
+
+  const refCheck = await verifyWorkerProxyReferer(
+    urlCheck.normalizedUrl,
+    exp,
+    refParam,
+    refSigParam,
+    secret
+  );
+  if (!refCheck.valid) {
+    return new Response('Assinatura de Referer do proxy inválida.', {
+      status: 403,
+      headers: getCorsHeaders(),
+    });
+  }
+
   const normalizedTargetUrl = urlCheck.normalizedUrl;
+  const targetIsExpirable = hasExpirableHlsTokens(normalizedTargetUrl);
   const rangeHeader = request.headers.get('range');
   const edgeCache = deps.edgeCache !== undefined ? deps.edgeCache : getDefaultEdgeCache();
-  const cacheKeyReq = !rangeHeader && request.method === 'GET'
-    ? buildStableEdgeCacheRequest(normalizedTargetUrl)
+  const cacheKeyReq = !rangeHeader && request.method === 'GET' && !targetIsExpirable && !refCheck.referer
+    ? buildStableEdgeCacheRequest(normalizedTargetUrl, depthCheck.depth)
     : null;
 
   if (edgeCache && cacheKeyReq) {
@@ -671,21 +983,23 @@ export async function handleWorkerProxyRequest(
 
   try {
     const targetUrl = new URL(normalizedTargetUrl);
-    const upstreamHeaders = getUpstreamHeaders(targetUrl, request, env);
     const isLikelyManifest = shouldInspectForHlsManifest('', targetUrl);
-    const cfTtl = isLikelyManifest ? MANIFEST_CACHE_TTL_SECONDS : SEGMENT_CACHE_TTL_SECONDS;
+    const cfTtl = isLikelyManifest
+      ? MANIFEST_CACHE_TTL_SECONDS
+      : targetIsExpirable
+        ? EXPIRABLE_SEGMENT_CACHE_TTL_SECONDS
+        : SEGMENT_CACHE_TTL_SECONDS;
 
-    const { response: upstream, finalUrl } = await fetchWithRedirectsSafe(
-      targetUrl.toString(),
+    const { response: upstream, finalUrl } = await fetchWith403RefererFallbackWorker(
+      targetUrl,
+      request,
+      env,
       {
-        method: request.method,
-        headers: upstreamHeaders,
-        cf: {
-          cacheEverything: true,
-          cacheTtl: cfTtl,
-        },
+        cacheEverything: true,
+        cacheTtl: cfTtl,
       },
-      fetcher
+      fetcher,
+      refCheck.referer
     );
 
     if (!upstream.ok && upstream.status !== 206) {
@@ -699,13 +1013,17 @@ export async function handleWorkerProxyRequest(
     const finalParsed = new URL(finalUrl);
     const proxyPath = reqUrl.pathname || '/api/proxy/stream';
     const stableExp = getStableSegmentExpiry(nowSeconds);
+    const nextDepth = depthCheck.depth + 1;
 
     const signChildUrl = async (resolvedUrl: string): Promise<string> => {
       const childSig = await createWorkerProxySignature(resolvedUrl, stableExp, secret);
+      const childDepthSig = await createWorkerDepthSignature(resolvedUrl, stableExp, nextDepth, secret);
       const params = new URLSearchParams({
         url: resolvedUrl,
         exp: String(stableExp),
         sig: childSig,
+        d: String(nextDepth),
+        dsig: childDepthSig,
       });
       return `${proxyPath}?${params.toString()}`;
     };
@@ -720,16 +1038,33 @@ export async function handleWorkerProxyRequest(
       return res;
     };
 
-    if (request.method === 'GET' && upstream.status !== 206 && shouldInspectForHlsManifest(contentType, finalParsed)) {
+    if (
+      request.method === 'GET' &&
+      upstream.status !== 206 &&
+      shouldInspectForHlsManifest(contentType, finalParsed, depthCheck.fromPlaylist)
+    ) {
       if (!upstream.body) {
         const rawBytes = new Uint8Array(await upstream.arrayBuffer());
         if (bytesStartWithExtM3u(rawBytes)) {
+          if (depthCheck.depth > MAX_HLS_REWRITE_DEPTH) {
+            return new Response(
+              `Profundidade máxima de playlist HLS (${MAX_HLS_REWRITE_DEPTH}) excedida.`,
+              {
+                status: 502,
+                headers: getCorsHeaders(),
+              }
+            );
+          }
           const text = new TextDecoder('utf-8').decode(rawBytes);
+          const isExpirable =
+            targetIsExpirable ||
+            hasExpirableHlsTokens(finalUrl) ||
+            hasExpirableHlsTokens(text);
           const rewritten = await rewriteM3u8PlaylistAsync(text, finalUrl, signChildUrl);
           return cacheIfEligible(
             new Response(rewritten, {
               status: 200,
-              headers: buildManifestResponseHeaders(upstream),
+              headers: buildManifestResponseHeaders(upstream, isExpirable),
             })
           );
         }
@@ -767,6 +1102,20 @@ export async function handleWorkerProxyRequest(
 
       const initialBytes = concatChunks(bufferedChunks);
       if (bytesStartWithExtM3u(initialBytes)) {
+        if (depthCheck.depth > MAX_HLS_REWRITE_DEPTH) {
+          try {
+            await reader.cancel();
+          } catch {
+            // Ignorar erro ao cancelar leitura excedente
+          }
+          return new Response(
+            `Profundidade máxima de playlist HLS (${MAX_HLS_REWRITE_DEPTH}) excedida.`,
+            {
+              status: 502,
+              headers: getCorsHeaders(),
+            }
+          );
+        }
         while (!streamEnded) {
           const { done, value } = await reader.read();
           if (done) {
@@ -778,11 +1127,15 @@ export async function handleWorkerProxyRequest(
           }
         }
         const text = new TextDecoder('utf-8').decode(concatChunks(bufferedChunks));
+        const isExpirable =
+          targetIsExpirable ||
+          hasExpirableHlsTokens(finalUrl) ||
+          hasExpirableHlsTokens(text);
         const rewritten = await rewriteM3u8PlaylistAsync(text, finalUrl, signChildUrl);
         return cacheIfEligible(
           new Response(rewritten, {
             status: 200,
-            headers: buildManifestResponseHeaders(upstream),
+            headers: buildManifestResponseHeaders(upstream, isExpirable),
           })
         );
       }

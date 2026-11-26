@@ -5,7 +5,11 @@ import {
   resolveEmbedProxy,
 } from '@/lib/embed-proxy';
 import { safeFetchWithRedirects } from '@/lib/ssrf';
-import { BROWSER_UA, resolveUpstreamReferer } from '@/lib/stream-proxy';
+import {
+  BROWSER_UA,
+  resolveUpstreamReferer,
+  resolveUpstreamRefererCandidates,
+} from '@/lib/stream-proxy';
 import type {
   EmbedAuthStrategy,
   EmbedHostDiagnostic,
@@ -14,10 +18,12 @@ import type {
   SourceTestReport,
   SourceTestVerdict,
 } from '@/lib/types';
+import { extractHlsVariantUrls } from '@/lib/proxy-signing';
 import {
   classifyEmbedHost,
   detectSourceKind,
   type ExplicitSourceKind,
+  hasExpirableHlsTokens,
   isVercelBlobUrl,
   validateHttpUrl,
 } from '@/lib/video-sources';
@@ -30,6 +36,7 @@ export interface SourceTestInput {
   label?: string;
   url: string;
   kind?: ExplicitSourceKind | '' | null;
+  sourceReferer?: string | null;
   isMirror?: boolean;
   originalContentLength?: number | null;
   originalUrl?: string | null;
@@ -46,6 +53,8 @@ interface InternalAttemptResult {
   cspHeader: string | null;
   xFrameOptions: string | null;
   cloudflareBlocked: boolean;
+  finalUrl: string | null;
+  manifestText: string | null;
 }
 
 function extractFrameAncestorsDirective(cspHeader: string | null): string | null {
@@ -59,9 +68,12 @@ function extractFrameAncestorsDirective(cspHeader: string | null): string | null
   return null;
 }
 
-async function readFirstLineSafely(response: Response, contentType: string | null): Promise<string | null> {
+async function read200InspectionSafely(
+  response: Response,
+  contentType: string | null
+): Promise<{ firstLine: string | null; manifestText: string | null }> {
   if (response.status !== 200) {
-    return null;
+    return { firstLine: null, manifestText: null };
   }
 
   const lowerCt = (contentType ?? '').toLowerCase();
@@ -73,11 +85,11 @@ async function readFirstLineSafely(response: Response, contentType: string | nul
 
   try {
     let bytes: Uint8Array;
+    const MAX_BYTES = 65_536;
     if (response.body) {
       const reader = response.body.getReader();
       const chunks: Uint8Array[] = [];
       let total = 0;
-      const MAX_BYTES = 4096;
       while (total < MAX_BYTES) {
         const { done, value } = await reader.read();
         if (done) break;
@@ -99,21 +111,27 @@ async function readFirstLineSafely(response: Response, contentType: string | nul
       }
     } else {
       const buf = new Uint8Array(await response.arrayBuffer());
-      bytes = buf.slice(0, 4096);
+      bytes = buf.slice(0, MAX_BYTES);
     }
 
     if (bytes.byteLength === 0) {
-      return null;
+      return { firstLine: null, manifestText: null };
     }
 
     // Se contém NUL byte ou sync MPEG-TS sem #EXTM3U, trata como binário
     if (isLikelyBinary && bytes[0] !== 0x23) {
-      return `(binário: ${contentType || 'application/octet-stream'})`;
+      return {
+        firstLine: `(binário: ${contentType || 'application/octet-stream'})`,
+        manifestText: null,
+      };
     }
 
     const decoded = new TextDecoder('utf-8', { fatal: false }).decode(bytes);
     if (decoded.includes('\u0000')) {
-      return `(binário: ${contentType || 'application/octet-stream'})`;
+      return {
+        firstLine: `(binário: ${contentType || 'application/octet-stream'})`,
+        manifestText: null,
+      };
     }
 
     const firstLine = decoded
@@ -121,10 +139,16 @@ async function readFirstLineSafely(response: Response, contentType: string | nul
       .map((line) => line.replace(/^\uFEFF/, '').trim())
       .find((line) => line.length > 0);
 
-    if (!firstLine) return null;
-    return firstLine.length > 160 ? `${firstLine.slice(0, 157)}...` : firstLine;
+    const normalizedTrimmed = decoded.replace(/^\uFEFF/, '').trimStart();
+    const manifestText = normalizedTrimmed.startsWith('#EXTM3U') ? decoded : null;
+
+    if (!firstLine) return { firstLine: null, manifestText };
+    return {
+      firstLine: firstLine.length > 160 ? `${firstLine.slice(0, 157)}...` : firstLine,
+      manifestText,
+    };
   } catch {
-    return null;
+    return { firstLine: null, manifestText: null };
   }
 }
 
@@ -216,7 +240,7 @@ async function runSingleAttempt(
   fetchWithRedirects: typeof safeFetchWithRedirects
 ): Promise<InternalAttemptResult> {
   try {
-    const { response } = await fetchWithRedirects(url, {
+    const { response, finalUrl } = await fetchWithRedirects(url, {
       headers,
       timeoutMs: 12000,
     });
@@ -226,10 +250,13 @@ async function runSingleAttempt(
     const cspHeader = response.headers.get('content-security-policy');
     const xFrameOptions = response.headers.get('x-frame-options');
     let firstLine: string | null = null;
+    let manifestText: string | null = null;
     let cloudflareBlocked = false;
 
     if (response.status === 200) {
-      firstLine = await readFirstLineSafely(response, contentType);
+      const inspected = await read200InspectionSafely(response, contentType);
+      firstLine = inspected.firstLine;
+      manifestText = inspected.manifestText;
     } else {
       const errSnippet = await readTextSnippetSafely(response, contentType);
       if (errSnippet && isCloudflareBlockedBody(errSnippet)) {
@@ -251,6 +278,8 @@ async function runSingleAttempt(
       cspHeader,
       xFrameOptions,
       cloudflareBlocked,
+      finalUrl,
+      manifestText,
     };
   } catch (err) {
     return {
@@ -268,6 +297,8 @@ async function runSingleAttempt(
       cspHeader: null,
       xFrameOptions: null,
       cloudflareBlocked: false,
+      finalUrl: null,
+      manifestText: null,
     };
   }
 }
@@ -548,6 +579,98 @@ export function classifySourceDiagnostic(
   };
 }
 
+async function detectExpirableHlsSource(params: {
+  detectedKind: ExplicitSourceKind;
+  targetUrl: string;
+  withHeadersRes: InternalAttemptResult;
+  noHeadersRes: InternalAttemptResult;
+  fetchWithRedirects: typeof safeFetchWithRedirects;
+}): Promise<{ isExpirable: boolean; expirableReason: string | null }> {
+  const manifestText = params.withHeadersRes.manifestText ?? params.noHeadersRes.manifestText;
+  const manifestBaseUrl =
+    (params.withHeadersRes.manifestText ? params.withHeadersRes.finalUrl : params.noHeadersRes.finalUrl) ??
+    params.targetUrl;
+
+  const isHls = params.detectedKind === 'hls' || Boolean(manifestText);
+  if (!isHls) {
+    return { isExpirable: false, expirableReason: null };
+  }
+
+  const matchedTokens: string[] = [];
+  const collectTokenMatches = (text: string | null | undefined) => {
+    if (!text) return;
+    if (/x-amz-expires/i.test(text) && !matchedTokens.includes('X-Amz-Expires')) {
+      matchedTokens.push('X-Amz-Expires');
+    }
+    if (/(?:^|[?&#,;,\s"'])token=/i.test(text) && !matchedTokens.includes('token=')) {
+      matchedTokens.push('token=');
+    }
+    if (/(?:^|[?&#,;,\s"'])sig=/i.test(text) && !matchedTokens.includes('sig=')) {
+      matchedTokens.push('sig=');
+    }
+  };
+
+  if (
+    hasExpirableHlsTokens(params.targetUrl) ||
+    hasExpirableHlsTokens(params.withHeadersRes.finalUrl ?? '') ||
+    hasExpirableHlsTokens(params.noHeadersRes.finalUrl ?? '')
+  ) {
+    collectTokenMatches(params.targetUrl);
+    collectTokenMatches(params.withHeadersRes.finalUrl);
+    collectTokenMatches(params.noHeadersRes.finalUrl);
+  }
+
+  if (manifestText && hasExpirableHlsTokens(manifestText)) {
+    collectTokenMatches(manifestText);
+  }
+
+  if (matchedTokens.length === 0 && manifestText) {
+    const variantUrls = extractHlsVariantUrls(manifestText, manifestBaseUrl);
+    if (variantUrls.length > 0) {
+      const firstVariantUrl = variantUrls[0];
+      if (hasExpirableHlsTokens(firstVariantUrl)) {
+        collectTokenMatches(firstVariantUrl);
+      } else {
+        try {
+          const parsedVar = new URL(firstVariantUrl);
+          const varHeaders: Record<string, string> = {
+            'User-Agent': BROWSER_UA,
+            Accept: '*/*',
+          };
+          const varReferer = resolveUpstreamReferer(parsedVar);
+          if (varReferer) {
+            varHeaders['Referer'] = varReferer;
+          }
+          const varAttempt = await runSingleAttempt(
+            firstVariantUrl,
+            varHeaders,
+            varReferer || null,
+            params.fetchWithRedirects
+          );
+          if (
+            hasExpirableHlsTokens(varAttempt.finalUrl ?? '') ||
+            hasExpirableHlsTokens(varAttempt.manifestText ?? '')
+          ) {
+            collectTokenMatches(varAttempt.finalUrl);
+            collectTokenMatches(varAttempt.manifestText);
+          }
+        } catch {
+          // Sonda auxiliar de variante não deve interromper o diagnóstico principal
+        }
+      }
+    }
+  }
+
+  if (matchedTokens.length === 0) {
+    return { isExpirable: false, expirableReason: null };
+  }
+
+  return {
+    isExpirable: true,
+    expirableReason: `Fonte HLS expirável (${matchedTokens.join(', ')}): pode parar de reproduzir após o vencimento do link.`,
+  };
+}
+
 export async function diagnoseVideoSource(
   input: SourceTestInput,
   deps: SourceDiagnosticsDeps = {}
@@ -561,7 +684,7 @@ export async function diagnoseVideoSource(
   } catch {
     // let validateHttpUrl handle error if resolution fails
   }
-  const urlCheck = validateHttpUrl(effectiveUrl);
+  const urlCheck = validateHttpUrl(effectiveUrl, 8192);
   const detectedKind = detectSourceKind(effectiveUrl, input.kind);
 
   if (!urlCheck.valid || !urlCheck.normalizedUrl) {
@@ -589,7 +712,12 @@ export async function diagnoseVideoSource(
   }
 
   const targetUrl = new URL(urlCheck.normalizedUrl);
-  const mappedReferer = resolveUpstreamReferer(targetUrl);
+  const refererCandidates = resolveUpstreamRefererCandidates(
+    targetUrl,
+    undefined,
+    undefined,
+    input.sourceReferer
+  );
 
   const noHeadersRes = await runSingleAttempt(
     targetUrl.toString(),
@@ -598,20 +726,45 @@ export async function diagnoseVideoSource(
     fetchWithRedirects
   );
 
-  const proxyHeaders: Record<string, string> = {
-    'User-Agent': BROWSER_UA,
-    Accept: '*/*',
+  const tryWithReferer = async (ref: string): Promise<InternalAttemptResult> => {
+    const proxyHeaders: Record<string, string> = {
+      'User-Agent': BROWSER_UA,
+      Accept: '*/*',
+    };
+    if (ref) {
+      proxyHeaders['Referer'] = ref;
+    }
+    return await runSingleAttempt(
+      targetUrl.toString(),
+      proxyHeaders,
+      ref || null,
+      fetchWithRedirects
+    );
   };
-  if (mappedReferer) {
-    proxyHeaders['Referer'] = mappedReferer;
-  }
 
-  const withHeadersRes = await runSingleAttempt(
-    targetUrl.toString(),
-    proxyHeaders,
-    mappedReferer || null,
-    fetchWithRedirects
-  );
+  let withHeadersRes = await tryWithReferer(refererCandidates[0] ?? '');
+
+  if (
+    detectedKind !== 'iframe' &&
+    !isVercelBlobUrl(targetUrl.toString()) &&
+    (withHeadersRes.diagnostic.status === 403 || withHeadersRes.diagnostic.status === 404)
+  ) {
+    for (let i = 1; i < refererCandidates.length; i++) {
+      const candidateAttempt = await tryWithReferer(refererCandidates[i]);
+      if (candidateAttempt.diagnostic.ok) {
+        withHeadersRes = candidateAttempt;
+        break;
+      }
+      if (
+        candidateAttempt.diagnostic.status !== null &&
+        candidateAttempt.diagnostic.status !== 403 &&
+        candidateAttempt.diagnostic.status !== 404
+      ) {
+        withHeadersRes = candidateAttempt;
+        break;
+      }
+    }
+  }
 
   const hostCategory = classifyEmbedHost(targetUrl.toString());
   const frameAncestorsValue =
@@ -711,6 +864,14 @@ export async function diagnoseVideoSource(
     cloudflareServerBlocked
   );
 
+  const expirableCheck = await detectExpirableHlsSource({
+    detectedKind,
+    targetUrl: targetUrl.toString(),
+    withHeadersRes,
+    noHeadersRes,
+    fetchWithRedirects,
+  });
+
   const report: SourceTestReport = {
     slot: input.slot,
     label,
@@ -719,6 +880,8 @@ export async function diagnoseVideoSource(
     noHeaders: noHeadersRes.diagnostic,
     withHeaders: withHeadersRes.diagnostic,
     ...classification,
+    isExpirable: expirableCheck.isExpirable,
+    expirableReason: expirableCheck.expirableReason,
     embedDiagnostic,
   };
 

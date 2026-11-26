@@ -14,6 +14,7 @@ import {
   EyeOff,
   Film,
   FolderOpen,
+  Globe,
   Image as ImageIcon,
   ListPlus,
   Loader2,
@@ -64,6 +65,7 @@ import {
   adminCreateEpisodeFn,
   adminDeleteEpisodeFn,
   adminDiagnoseDatabaseFn,
+  adminImportFromSiteFn,
   adminLoginFn,
   adminLogoutFn,
   adminProcessBatchItemFn,
@@ -77,6 +79,7 @@ import type { GeneratedThumbnailCandidate } from '@/lib/thumbnail-utils';
 import type {
   DatabaseDiagnosticResult,
   EpisodeDto,
+  SiteImportCandidateDiagnostic,
   SourceTestReport,
 } from '@/lib/types';
 import {
@@ -88,6 +91,7 @@ import {
   type ExplicitSourceKind,
   getIframeReferrerPolicy,
   hasUrlHashParams,
+  isExpirableHlsSourceUrl,
   isVercelBlobUrl,
   normalizeVideoSource,
   validateHttpUrl,
@@ -117,6 +121,8 @@ interface SinglePlayerFormState {
   poster_url: string;
   video_url: string;
   source_kind: ExplicitSourceKind | '';
+  source_referer: string;
+  force_proxy: boolean;
 }
 
 const EMPTY_FORM: SinglePlayerFormState = {
@@ -128,6 +134,8 @@ const EMPTY_FORM: SinglePlayerFormState = {
   poster_url: '',
   video_url: '',
   source_kind: '',
+  source_referer: '',
+  force_proxy: true,
 };
 
 function formatDatePtBr(iso: string): string {
@@ -147,6 +155,8 @@ interface EpisodeSourceRow {
   url: string;
   kind: ExplicitSourceKind;
   isMirror: boolean;
+  isExpirable: boolean;
+  sourceReferer: string | null;
 }
 
 function getEpisodeSourcesList(ep: EpisodeDto): EpisodeSourceRow[] {
@@ -155,12 +165,43 @@ function getEpisodeSourcesList(ep: EpisodeDto): EpisodeSourceRow[] {
     url: string | null | undefined;
     explicitKind: ExplicitSourceKind | null | undefined;
     isMirrorFlag: boolean | null | undefined;
+    sourceReferer: string | null | undefined;
   }> = [
-    { slot: 1, url: ep.video_url, explicitKind: ep.source_kind, isMirrorFlag: ep.is_mirror },
-    { slot: 2, url: ep.video_url_2, explicitKind: ep.source_kind_2, isMirrorFlag: ep.is_mirror_2 },
-    { slot: 3, url: ep.video_url_3, explicitKind: ep.source_kind_3, isMirrorFlag: ep.is_mirror_3 },
-    { slot: 4, url: ep.video_url_4, explicitKind: ep.source_kind_4, isMirrorFlag: ep.is_mirror_4 },
-    { slot: 5, url: ep.video_url_5, explicitKind: ep.source_kind_5, isMirrorFlag: ep.is_mirror_5 },
+    {
+      slot: 1,
+      url: ep.video_url,
+      explicitKind: ep.source_kind,
+      isMirrorFlag: ep.is_mirror,
+      sourceReferer: ep.source_referer,
+    },
+    {
+      slot: 2,
+      url: ep.video_url_2,
+      explicitKind: ep.source_kind_2,
+      isMirrorFlag: ep.is_mirror_2,
+      sourceReferer: ep.source_referer_2,
+    },
+    {
+      slot: 3,
+      url: ep.video_url_3,
+      explicitKind: ep.source_kind_3,
+      isMirrorFlag: ep.is_mirror_3,
+      sourceReferer: ep.source_referer_3,
+    },
+    {
+      slot: 4,
+      url: ep.video_url_4,
+      explicitKind: ep.source_kind_4,
+      isMirrorFlag: ep.is_mirror_4,
+      sourceReferer: ep.source_referer_4,
+    },
+    {
+      slot: 5,
+      url: ep.video_url_5,
+      explicitKind: ep.source_kind_5,
+      isMirrorFlag: ep.is_mirror_5,
+      sourceReferer: ep.source_referer_5,
+    },
   ];
 
   const list: EpisodeSourceRow[] = [];
@@ -173,6 +214,8 @@ function getEpisodeSourcesList(ep: EpisodeDto): EpisodeSourceRow[] {
       url: trimmed,
       kind: isMirror ? 'mp4' : detectSourceKind(trimmed, entry.explicitKind),
       isMirror,
+      isExpirable: !isMirror && isExpirableHlsSourceUrl(trimmed, entry.explicitKind),
+      sourceReferer: entry.sourceReferer?.trim() || null,
     });
   }
   return list;
@@ -286,6 +329,23 @@ function AdminPage() {
   const [mirrorBusyId, setMirrorBusyId] = useState<string | null>(null);
   const [mirrorErrorMap, setMirrorErrorMap] = useState<Record<string, string>>({});
   const [mirrorSuccessMap, setMirrorSuccessMap] = useState<Record<string, string>>({});
+
+  // Site import state (form + episode list)
+  const [formSiteUrl, setFormSiteUrl] = useState('');
+  const [formSiteImportBusy, setFormSiteImportBusy] = useState(false);
+  const [formSiteImportError, setFormSiteImportError] = useState<string | null>(null);
+  const [formSiteImportCandidates, setFormSiteImportCandidates] = useState<
+    SiteImportCandidateDiagnostic[]
+  >([]);
+  const [formSiteImportNotice, setFormSiteImportNotice] = useState<string | null>(null);
+
+  const [siteImportInputs, setSiteImportInputs] = useState<Record<string, string>>({});
+  const [siteImportBusyId, setSiteImportBusyId] = useState<string | null>(null);
+  const [siteImportErrorMap, setSiteImportErrorMap] = useState<Record<string, string>>({});
+  const [siteImportCandidatesMap, setSiteImportCandidatesMap] = useState<
+    Record<string, SiteImportCandidateDiagnostic[]>
+  >({});
+  const [siteImportSuccessMap, setSiteImportSuccessMap] = useState<Record<string, string>>({});
 
   // Neon DB diagnostic state
   const [showDiagnostic, setShowDiagnostic] = useState(false);
@@ -420,6 +480,7 @@ function AdminPage() {
     const candidateUrl = check.normalizedUrl ?? trimmed;
     const embedHostMode = classifyEmbedHost(candidateUrl);
     const hasHashParams = hasUrlHashParams(candidateUrl);
+    const isExpirableUrl = isExpirableHlsSourceUrl(candidateUrl, form.source_kind || null);
     const referrerPolicy = getIframeReferrerPolicy(candidateUrl);
     const isR2 = isR2SignedUrl(trimmed);
     const isCleanR2 = (() => {
@@ -444,6 +505,7 @@ function AdminPage() {
       detectedKind,
       embedHostMode,
       hasHashParams,
+      isExpirableUrl,
       referrerPolicy,
       detectedPrefix,
       isR2,
@@ -530,6 +592,11 @@ function AdminPage() {
     setSlotTesting(false);
     setSlotReport(null);
     setSlotTestError(null);
+    setFormSiteUrl('');
+    setFormSiteImportBusy(false);
+    setFormSiteImportError(null);
+    setFormSiteImportCandidates([]);
+    setFormSiteImportNotice(null);
     resetThumbnailState();
   };
 
@@ -557,6 +624,8 @@ function AdminPage() {
       poster_url: ep.poster_url,
       video_url: ep.video_url,
       source_kind: ep.source_kind ?? '',
+      source_referer: ep.source_referer ?? '',
+      force_proxy: ep.force_proxy !== false,
     });
     resetFormTestState();
     setOpenMenuId(null);
@@ -592,6 +661,7 @@ function AdminPage() {
           label: 'Player 1',
           url: trimmed,
           kind: form.source_kind,
+          sourceReferer: form.source_referer.trim() || null,
           isMirror: isVercelBlobUrl(trimmed),
           originalUrl: siblingOriginal?.url ?? null,
         },
@@ -607,6 +677,131 @@ function AdminPage() {
       setSlotReport(null);
     } finally {
       setSlotTesting(false);
+    }
+  };
+
+  const handleImportSiteIntoForm = async () => {
+    const pageUrl = formSiteUrl.trim();
+    if (!pageUrl) {
+      setFormSiteImportError('Informe a URL da página do episódio (anitube.biz ou anitube22.vip).');
+      return;
+    }
+    setFormSiteImportBusy(true);
+    setFormSiteImportError(null);
+    setFormSiteImportCandidates([]);
+    setFormSiteImportNotice(null);
+    setSlotTestError(null);
+
+    try {
+      const res = await adminImportFromSiteFn({
+        data: {
+          pageUrl,
+          episodeId: editingId,
+          targetSlot: editingId ? 1 : null,
+        },
+      });
+
+      if (!res.ok) {
+        setFormSiteImportError(res.error);
+        setFormSiteImportCandidates(res.candidates);
+        return;
+      }
+
+      setForm((prev) => ({
+        ...prev,
+        title: prev.title.trim() ? prev.title : res.extractedTitle ?? prev.title,
+        poster_url: prev.poster_url.trim() ? prev.poster_url : res.extractedPoster ?? prev.poster_url,
+        video_url: res.selected.url,
+        source_kind: res.selected.kind,
+        source_referer: res.selected.hostReferer,
+        force_proxy: true,
+      }));
+      setFormSiteImportCandidates(res.candidates);
+      setSlotReport(res.testReport);
+
+      const expirableWarn = res.selected.isExpirable
+        ? ` Atenção: ${res.selected.expirableReason ?? 'fonte expirável detectada.'}`
+        : '';
+      setFormSiteImportNotice(
+        res.saved
+          ? `Fonte gravada no Player ${res.slot ?? 1} (${res.selected.kind}, proxy ativo, referer ${res.selected.hostReferer || 'vazio'}) e testada.${expirableWarn}`
+          : `Fonte importada para o formulário (${res.selected.kind}, proxy ativo, referer ${res.selected.hostReferer || 'vazio'}) e testada.${expirableWarn}`
+      );
+
+      if (res.saved) {
+        await router.invalidate();
+      }
+    } catch (err) {
+      setFormSiteImportError(
+        err instanceof Error ? err.message : 'Falha ao importar fonte da página.'
+      );
+    } finally {
+      setFormSiteImportBusy(false);
+    }
+  };
+
+  const handleImportSiteForEpisode = async (ep: EpisodeDto) => {
+    const pageUrl = (siteImportInputs[ep.id] ?? '').trim();
+    if (!pageUrl) {
+      setSiteImportErrorMap((prev) => ({
+        ...prev,
+        [ep.id]: 'Informe a URL da página do episódio (anitube.biz ou anitube22.vip).',
+      }));
+      return;
+    }
+
+    setSiteImportBusyId(ep.id);
+    setSiteImportErrorMap((prev) => {
+      const next = { ...prev };
+      delete next[ep.id];
+      return next;
+    });
+    setSiteImportCandidatesMap((prev) => {
+      const next = { ...prev };
+      delete next[ep.id];
+      return next;
+    });
+    setSiteImportSuccessMap((prev) => {
+      const next = { ...prev };
+      delete next[ep.id];
+      return next;
+    });
+
+    try {
+      const res = await adminImportFromSiteFn({
+        data: {
+          pageUrl,
+          episodeId: ep.id,
+        },
+      });
+
+      if (!res.ok) {
+        setSiteImportErrorMap((prev) => ({ ...prev, [ep.id]: res.error }));
+        setSiteImportCandidatesMap((prev) => ({ ...prev, [ep.id]: res.candidates }));
+        return;
+      }
+
+      setSiteImportInputs((prev) => ({ ...prev, [ep.id]: '' }));
+      setSiteImportCandidatesMap((prev) => ({ ...prev, [ep.id]: res.candidates }));
+      const expirableWarn = res.selected.isExpirable
+        ? ` Atenção: ${res.selected.expirableReason ?? 'fonte expirável.'}`
+        : '';
+      setSiteImportSuccessMap((prev) => ({
+        ...prev,
+        [ep.id]: `Fonte ${res.slot ?? 1} gravada (${res.selected.kind}, force_proxy=true, referer ${res.selected.hostReferer || 'vazio'}).${expirableWarn}`,
+      }));
+      setEpisodeTests((prev) => ({
+        ...prev,
+        [ep.id]: [res.testReport],
+      }));
+      await router.invalidate();
+    } catch (err) {
+      setSiteImportErrorMap((prev) => ({
+        ...prev,
+        [ep.id]: err instanceof Error ? err.message : 'Falha ao importar fonte da página.',
+      }));
+    } finally {
+      setSiteImportBusyId(null);
     }
   };
 
@@ -631,6 +826,7 @@ function AdminPage() {
             label: `Player ${src.slot}${src.isMirror ? ' (espelho)' : ''}`,
             url: src.url,
             kind: src.kind,
+            sourceReferer: src.sourceReferer,
             isMirror: src.isMirror,
             originalUrl: src.isMirror && typedOriginalUrl ? typedOriginalUrl : null,
           })),
@@ -820,6 +1016,8 @@ function AdminPage() {
         poster_url: resolvedPosterUrl,
         video_url: form.video_url.trim(),
         source_kind: form.source_kind,
+        source_referer: form.source_referer.trim() || null,
+        force_proxy: form.force_proxy,
       };
 
       if (editingId) {
@@ -958,6 +1156,13 @@ function AdminPage() {
   const parsedBatchLines = useMemo(() => parseBatchInputLines(batchInput), [batchInput]);
   const hasBatchHashLinks = useMemo(
     () => parsedBatchLines.some((item) => !item.parseError && hasUrlHashParams(item.url)),
+    [parsedBatchLines]
+  );
+  const hasBatchExpirableHlsLinks = useMemo(
+    () =>
+      parsedBatchLines.some(
+        (item) => !item.parseError && isExpirableHlsSourceUrl(item.url, item.explicitKind ?? null)
+      ),
     [parsedBatchLines]
   );
   const batchTotals = useMemo(
@@ -1508,6 +1713,15 @@ function AdminPage() {
                       <span>link com hash, use sempre um link novo e não reaproveite</span>
                     </div>
                   )}
+                  {hasBatchExpirableHlsLinks && (
+                    <div
+                      role="note"
+                      className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
+                    >
+                      <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                      <span>fonte HLS expirável (X-Amz-Expires, token= ou sig=): o link pode expirar depois de algum tempo</span>
+                    </div>
+                  )}
                 </div>
 
                 <div className="flex flex-wrap items-center gap-2.5">
@@ -1841,6 +2055,73 @@ function AdminPage() {
                     </p>
                   </div>
 
+                  {/* Importar fonte a partir da página do episódio */}
+                  <div className="pt-2 border-t border-white/10 space-y-2.5">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <label
+                        htmlFor="ep-site-page-url"
+                        className="text-xs font-medium text-slate-200 inline-flex items-center gap-1.5"
+                      >
+                        <Globe className="w-3.5 h-3.5 text-rose-400" />
+                        URL da página do episódio (anitube.biz / anitube22.vip)
+                      </label>
+                      <span className="text-[11px] text-slate-400">
+                        Extrai e valida playerricas.php → /index.m3u8 → .mp4
+                      </span>
+                    </div>
+
+                    <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                      <input
+                        id="ep-site-page-url"
+                        type="url"
+                        disabled={formSiteImportBusy}
+                        value={formSiteUrl}
+                        onChange={(e) => setFormSiteUrl(e.target.value)}
+                        placeholder="https://www.anitube.biz/episodio-01/"
+                        className="flex-1 min-w-0 h-11 px-3 rounded-lg bg-[#090B10] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 disabled:opacity-50"
+                      />
+                      <button
+                        type="button"
+                        disabled={formSiteImportBusy || !formSiteUrl.trim()}
+                        onClick={() => void handleImportSiteIntoForm()}
+                        className="h-11 px-4 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-40 text-xs font-medium text-white inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer"
+                      >
+                        {formSiteImportBusy ? (
+                          <>
+                            <Loader2 className="w-3.5 h-3.5 animate-spin text-rose-400" />
+                            Importando...
+                          </>
+                        ) : (
+                          <>
+                            <Download className="w-3.5 h-3.5 text-rose-400" />
+                            Importar do site
+                          </>
+                        )}
+                      </button>
+                    </div>
+
+                    {formSiteImportError && (
+                      <div
+                        role="alert"
+                        className="rounded-lg border border-rose-500/35 bg-rose-950/30 px-3 py-2 text-xs text-rose-200 space-y-1.5"
+                      >
+                        <p className="font-medium text-rose-300">{formSiteImportError}</p>
+                        {formSiteImportCandidates.length > 0 && (
+                          <SiteImportCandidateList candidates={formSiteImportCandidates} />
+                        )}
+                      </div>
+                    )}
+
+                    {formSiteImportNotice && (
+                      <div className="rounded-lg border border-emerald-500/35 bg-emerald-950/25 px-3 py-2 text-xs text-emerald-200 space-y-1.5">
+                        <p>{formSiteImportNotice}</p>
+                        {formSiteImportCandidates.length > 0 && (
+                          <SiteImportCandidateList candidates={formSiteImportCandidates} />
+                        )}
+                      </div>
+                    )}
+                  </div>
+
                   {/* Single Video Source: Player 1 only */}
                   <div className="pt-2 border-t border-white/10 space-y-2.5">
                     <div className="flex flex-wrap items-center justify-between gap-2">
@@ -1869,6 +2150,11 @@ function AdminPage() {
                         {primarySourceInfo?.detectedKind && (
                           <span className="text-[11px] font-mono text-emerald-300">
                             {primarySourceInfo.detectedKind}
+                          </span>
+                        )}
+                        {(primarySourceInfo?.isExpirableUrl || slotReport?.isExpirable) && (
+                          <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-1.5 py-0.5 rounded border border-amber-500/30">
+                            fonte expirável
                           </span>
                         )}
                         {primarySourceInfo?.normalized ? (
@@ -1924,6 +2210,13 @@ function AdminPage() {
                       </select>
                     </div>
 
+                    {form.source_referer.trim() && (
+                      <div className="text-[11px] font-mono text-slate-400">
+                        Referer do host:{' '}
+                        <span className="text-slate-200">{form.source_referer.trim()}</span>
+                      </div>
+                    )}
+
                     <p className="text-[11px] text-slate-400 leading-relaxed">
                       Aceita URL direta (.m3u8, .mp4, .webm) ou página do provedor (.php, embed).
                     </p>
@@ -1935,6 +2228,19 @@ function AdminPage() {
                       >
                         <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
                         <span>link com hash, use sempre um link novo e não reaproveite</span>
+                      </div>
+                    )}
+
+                    {(primarySourceInfo?.isExpirableUrl || slotReport?.isExpirable) && (
+                      <div
+                        role="note"
+                        className="flex items-start gap-2 rounded-lg border border-amber-500/35 bg-amber-950/30 px-3 py-2 text-xs text-amber-200"
+                      >
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                        <span>
+                          {slotReport?.expirableReason ??
+                            'Fonte HLS expirável: o M3U8 contém parâmetros temporários (X-Amz-Expires, token= ou sig=) e pode parar de reproduzir após expirar.'}
+                        </span>
                       </div>
                     )}
 
@@ -1999,13 +2305,25 @@ function AdminPage() {
                           >
                             Veredito: {slotReport.verdictLabel}
                           </span>
-                          <span className="text-slate-400">
-                            kind: {slotReport.detectedKind}
-                          </span>
+                          <div className="flex items-center gap-2">
+                            {slotReport.isExpirable && (
+                              <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[10px] font-semibold text-amber-300">
+                                expirável
+                              </span>
+                            )}
+                            <span className="text-slate-400">
+                              kind: {slotReport.detectedKind}
+                            </span>
+                          </div>
                         </div>
                         <p className="font-sans text-slate-300 leading-snug">
                           {slotReport.verdictReason}
                         </p>
+                        {slotReport.isExpirable && slotReport.expirableReason && (
+                          <p className="font-sans text-amber-300 leading-snug">
+                            {slotReport.expirableReason}
+                          </p>
+                        )}
                         <div className="text-slate-300">
                           Sem cabeçalhos:{' '}
                           {slotReport.noHeaders.status !== null
@@ -2386,6 +2704,9 @@ function AdminPage() {
                       const hasHashSource = episodeSources.some((src) =>
                         hasUrlHashParams(src.url)
                       );
+                      const hasExpirableSource =
+                        episodeSources.some((src) => src.isExpirable) ||
+                        Boolean(testReports?.some((report) => report.isExpirable));
 
                       return (
                         <li
@@ -2422,6 +2743,13 @@ function AdminPage() {
                                 <p className="inline-flex items-center gap-1.5 text-[11px] text-amber-300">
                                   <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
                                   <span>link com hash, use sempre um link novo e não reaproveite</span>
+                                </p>
+                              )}
+
+                              {hasExpirableSource && (
+                                <p className="inline-flex items-center gap-1.5 text-[11px] text-amber-300">
+                                  <AlertTriangle className="w-3.5 h-3.5 shrink-0" />
+                                  <span>fonte expirável: M3U8 com X-Amz-Expires, token= ou sig= pode vencer</span>
                                 </p>
                               )}
                             </div>
@@ -2587,30 +2915,43 @@ function AdminPage() {
                             </div>
 
                             <ul className="space-y-1.5">
-                              {episodeSources.map((src) => (
-                                <li
-                                  key={`${ep.id}-slot-${src.slot}`}
-                                  className="flex items-center gap-2 text-[11px] min-w-0"
-                                >
-                                  <span className="font-mono text-slate-300 shrink-0">
-                                    {`Fonte ${src.slot}`}
-                                  </span>
-                                  <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 font-mono text-[10px] text-slate-300 shrink-0">
-                                    {src.kind}
-                                  </span>
-                                  {src.isMirror && (
-                                    <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-[10px] font-semibold text-emerald-300 shrink-0">
-                                      espelho
-                                    </span>
-                                  )}
-                                  <span
-                                    className="font-mono text-slate-400 truncate min-w-0 flex-1"
-                                    title={src.url}
+                              {episodeSources.map((src) => {
+                                const slotExpirable =
+                                  src.isExpirable ||
+                                  Boolean(
+                                    testReports?.find((report) => report.slot === src.slot)
+                                      ?.isExpirable
+                                  );
+                                return (
+                                  <li
+                                    key={`${ep.id}-slot-${src.slot}`}
+                                    className="flex items-center gap-2 text-[11px] min-w-0"
                                   >
-                                    {src.url}
-                                  </span>
-                                </li>
-                              ))}
+                                    <span className="font-mono text-slate-300 shrink-0">
+                                      {`Fonte ${src.slot}`}
+                                    </span>
+                                    <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 font-mono text-[10px] text-slate-300 shrink-0">
+                                      {src.kind}
+                                    </span>
+                                    {src.isMirror && (
+                                      <span className="px-1.5 py-0.5 rounded bg-emerald-500/20 border border-emerald-500/40 text-[10px] font-semibold text-emerald-300 shrink-0">
+                                        espelho
+                                      </span>
+                                    )}
+                                    {slotExpirable && (
+                                      <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[10px] font-semibold text-amber-300 shrink-0">
+                                        expirável
+                                      </span>
+                                    )}
+                                    <span
+                                      className="font-mono text-slate-400 truncate min-w-0 flex-1"
+                                      title={src.url}
+                                    >
+                                      {src.url}
+                                    </span>
+                                  </li>
+                                );
+                              })}
                             </ul>
 
                             <div className="pt-2 border-t border-white/10 space-y-2">
@@ -2669,6 +3010,60 @@ function AdminPage() {
                               {mirrorSuccess && (
                                 <p className="text-xs text-emerald-300">
                                   {mirrorSuccess}
+                                </p>
+                              )}
+                            </div>
+
+                            {/* Importar do site diretamente no episódio */}
+                            <div className="pt-2 border-t border-white/10 space-y-2">
+                              <div className="flex flex-col sm:flex-row sm:items-center gap-2">
+                                <input
+                                  type="url"
+                                  value={siteImportInputs[ep.id] ?? ''}
+                                  disabled={siteImportBusyId === ep.id}
+                                  onChange={(e) =>
+                                    setSiteImportInputs((prev) => ({
+                                      ...prev,
+                                      [ep.id]: e.target.value,
+                                    }))
+                                  }
+                                  aria-label={`URL da página do episódio para importar em ${epLabel}`}
+                                  placeholder="https://www.anitube.biz/... ou https://anitube22.vip/..."
+                                  className="flex-1 min-w-0 h-9 px-3 rounded-lg bg-[#11151E] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 disabled:opacity-50"
+                                />
+                                <button
+                                  type="button"
+                                  disabled={
+                                    siteImportBusyId === ep.id ||
+                                    !(siteImportInputs[ep.id] ?? '').trim()
+                                  }
+                                  onClick={() => void handleImportSiteForEpisode(ep)}
+                                  className="h-9 px-3 rounded-lg border border-white/15 bg-white/5 hover:bg-white/10 disabled:opacity-50 disabled:cursor-not-allowed text-xs font-medium text-white inline-flex items-center justify-center gap-1.5 whitespace-nowrap shrink-0 cursor-pointer transition-colors"
+                                >
+                                  <Globe className="w-3.5 h-3.5 text-rose-400" />
+                                  {siteImportBusyId === ep.id
+                                    ? 'Importando...'
+                                    : 'Importar do site'}
+                                </button>
+                              </div>
+
+                              {siteImportErrorMap[ep.id] && (
+                                <div
+                                  role="alert"
+                                  className="rounded-lg border border-rose-500/35 bg-rose-950/30 px-3 py-2 text-xs text-rose-200 space-y-1.5"
+                                >
+                                  <p className="text-rose-300">{siteImportErrorMap[ep.id]}</p>
+                                  {(siteImportCandidatesMap[ep.id]?.length ?? 0) > 0 && (
+                                    <SiteImportCandidateList
+                                      candidates={siteImportCandidatesMap[ep.id]}
+                                    />
+                                  )}
+                                </div>
+                              )}
+
+                              {siteImportSuccessMap[ep.id] && (
+                                <p className="text-xs text-emerald-300">
+                                  {siteImportSuccessMap[ep.id]}
                                 </p>
                               )}
                             </div>
@@ -2925,20 +3320,32 @@ function SourceDiagnosticTable({ reports }: { reports: SourceTestReport[] }) {
                   </div>
                 </td>
                 <td className="px-2.5 py-2">
-                  <span
-                    className={`font-semibold whitespace-nowrap ${
-                      report.verdict === 'direto_ok'
-                        ? 'text-emerald-400'
-                        : report.verdict === 'proxy_necessario'
-                          ? 'text-amber-300'
-                          : 'text-rose-400'
-                    }`}
-                  >
-                    {report.verdictLabel}
-                  </span>
+                  <div className="flex flex-wrap items-center gap-1.5">
+                    <span
+                      className={`font-semibold whitespace-nowrap ${
+                        report.verdict === 'direto_ok'
+                          ? 'text-emerald-400'
+                          : report.verdict === 'proxy_necessario'
+                            ? 'text-amber-300'
+                            : 'text-rose-400'
+                      }`}
+                    >
+                      {report.verdictLabel}
+                    </span>
+                    {report.isExpirable && (
+                      <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[10px] font-semibold text-amber-300 whitespace-nowrap">
+                        expirável
+                      </span>
+                    )}
+                  </div>
                   {report.verdictReason && (
                     <div className="text-[10px] font-sans text-slate-300 mt-0.5 max-w-[260px] leading-snug">
                       {report.verdictReason}
+                    </div>
+                  )}
+                  {report.isExpirable && report.expirableReason && (
+                    <div className="text-[10px] font-sans text-amber-300 mt-0.5 max-w-[260px] leading-snug">
+                      {report.expirableReason}
                     </div>
                   )}
                   {report.embedDiagnostic && (
@@ -2994,3 +3401,40 @@ function SourceDiagnosticTable({ reports }: { reports: SourceTestReport[] }) {
     </div>
   );
 }
+
+function SiteImportCandidateList({
+  candidates,
+}: {
+  candidates: SiteImportCandidateDiagnostic[];
+}) {
+  return (
+    <ul className="space-y-1 font-mono text-[10px] text-slate-300">
+      {candidates.map((cand, idx) => (
+        <li
+          key={`${cand.url}-${idx}`}
+          className="flex flex-wrap items-center gap-1.5 break-all"
+        >
+          <span
+            className={`px-1.5 py-0.5 rounded border ${
+              cand.passed
+                ? 'border-emerald-500/40 bg-emerald-500/15 text-emerald-300'
+                : 'border-rose-500/40 bg-rose-500/15 text-rose-300'
+            }`}
+          >
+            {cand.status !== null ? `HTTP ${cand.status}` : 'erro'}
+          </span>
+          <span className="px-1.5 py-0.5 rounded bg-white/5 border border-white/10 text-slate-300">
+            {cand.type}
+          </span>
+          {cand.contentType && (
+            <span className="text-slate-400">({cand.contentType})</span>
+          )}
+          <span className="text-slate-300 truncate max-w-full" title={cand.url}>
+            {cand.url}
+          </span>
+        </li>
+      ))}
+    </ul>
+  );
+}
+

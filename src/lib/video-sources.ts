@@ -22,6 +22,7 @@ export interface NormalizedVideoSource {
   requiresServerResolve: boolean;
   formatLabel: string;
   isMirror?: boolean;
+  isExpirable?: boolean;
 }
 
 export interface UrlValidationResult {
@@ -176,12 +177,40 @@ export function normalizeExplicitSourceKind(raw: unknown): ExplicitSourceKind | 
   return null;
 }
 
-export function validateHttpUrl(raw: string): UrlValidationResult {
+export function hasExpirableHlsTokens(input: string): boolean {
+  if (!input) return false;
+  return /(?:x-amz-expires|token=|sig=)/i.test(input);
+}
+
+export function isExpirableHlsSourceUrl(
+  rawUrl: string,
+  explicitKind?: ExplicitSourceKind | string | null
+): boolean {
+  const trimmed = rawUrl.trim();
+  if (!trimmed || !hasExpirableHlsTokens(trimmed)) {
+    return false;
+  }
+  const kind = detectSourceKind(trimmed, explicitKind);
+  if (kind === 'hls') {
+    return true;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    return /\.(m3u8|m3u)$/i.test(parsed.pathname);
+  } catch {
+    return /\.(m3u8|m3u)(?:[?#]|$)/i.test(trimmed);
+  }
+}
+
+export function validateHttpUrl(
+  raw: string,
+  maxLength = MAX_URL_LENGTH
+): UrlValidationResult {
   const trimmed = raw.trim();
   if (!trimmed) {
     return { valid: false, error: 'URL vazia.' };
   }
-  if (trimmed.length > MAX_URL_LENGTH) {
+  if (trimmed.length > maxLength) {
     return { valid: false, error: 'URL excede o limite máximo de caracteres.' };
   }
 
@@ -532,6 +561,7 @@ export function normalizeVideoSource(
       needsProxy: true,
       requiresServerResolve: false,
       formatLabel: maxima ? 'Maximaimg · HLS' : 'HLS',
+      ...(hasExpirableHlsTokens(normalizedUrl) ? { isExpirable: true } : {}),
     };
   }
 
@@ -616,6 +646,7 @@ export function normalizeVideoSource(
       needsProxy: kind !== 'iframe',
       requiresServerResolve: false,
       formatLabel: kind === 'iframe' ? 'Maximaimg · Embed' : `Maximaimg · ${kind.toUpperCase()}`,
+      ...(kind === 'hls' && hasExpirableHlsTokens(normalizedUrl) ? { isExpirable: true } : {}),
     };
   }
 
@@ -678,6 +709,7 @@ export function normalizeVideoSource(
         needsProxy: true,
         requiresServerResolve: false,
         formatLabel: 'HLS',
+        ...(hasExpirableHlsTokens(normalizedUrl) ? { isExpirable: true } : {}),
       };
     }
   }

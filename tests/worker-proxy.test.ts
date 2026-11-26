@@ -1,8 +1,13 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
-import { createProxySignature, verifyProxySignature } from '@/lib/proxy-signing';
+import {
+  createProxyDepthSignature,
+  createProxySignature,
+  verifyProxySignature,
+} from '@/lib/proxy-signing';
 import { resolveProxyPlayUrl } from '@/lib/server-fns';
 import {
   type CfRequestInit,
+  createWorkerDepthSignature,
   createWorkerProxySignature,
   getStableSegmentExpiry,
   handleWorkerProxyRequest,
@@ -316,7 +321,7 @@ describe('Cloudflare Worker Edge Proxy', () => {
     ).toBe('https://cdn.generico.com/');
   });
 
-  it('omite Referer para mywallpaper-4k-image.net e faz pass-through binário video/mp2t de segmentos .webp', async () => {
+  it('envia Referer https://www.anitube.biz/ para mywallpaper-4k-image.net (e faz pass-through binário video/mp2t de segmentos .webp)', async () => {
     const segUrl = 'https://cdn-s01.mywallpaper-4k-image.net/stream/ep01/seg-001.webp';
     const exp = 2_000_000_000;
     const sig = await createWorkerProxySignature(segUrl, exp, TEST_SECRET);
@@ -344,10 +349,117 @@ describe('Cloudflare Worker Edge Proxy', () => {
     );
 
     expect(capturedHeaders).not.toBeNull();
-    expect(capturedHeaders!.has('referer')).toBe(false);
+    expect(capturedHeaders!.get('referer')).toBe('https://www.anitube.biz/');
     expect(capturedHeaders!.has('origin')).toBe(false);
     expect(res.status).toBe(200);
     expect(res.headers.get('content-type')).toBe('video/mp2t');
     expect(Array.from(new Uint8Array(await res.arrayBuffer()))).toEqual(Array.from(tsBytes));
+  });
+
+  it('suporta reescrita recursiva até profundidade 2, retry 403 com fallback de Referer e sinaliza M3U8 expirável no Worker', async () => {
+    const masterUrl = 'https://host-a.example.com/master.m3u8';
+    const variantUrl = 'https://host-b.example.com/var/stream';
+    const subVariantUrl = 'https://host-c.example.com/sub/index.m3u8';
+    const segUrl = 'https://host-d.example.com/seg.ts?token=tmp123';
+    const tooDeepUrl = 'https://host-e.example.com/deep.m3u8';
+
+    const exp = 2_000_000_000;
+    const nodeDepthSig = createProxyDepthSignature(variantUrl, exp, 1);
+    const workerDepthSig = await createWorkerDepthSignature(variantUrl, exp, 1, TEST_SECRET);
+    expect(workerDepthSig).toBe(nodeDepthSig);
+
+    const seenReferersByUrl = new Map<string, Array<string | null>>();
+    const fetcher = vi.fn(async (input: string, init?: CfRequestInit) => {
+      const ref = new Headers(init?.headers).get('referer');
+      const arr = seenReferersByUrl.get(input) ?? [];
+      arr.push(ref);
+      seenReferersByUrl.set(input, arr);
+
+      if (input === masterUrl) {
+        return new Response(`#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=1000\n${variantUrl}`, {
+          status: 200,
+          headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+        });
+      }
+      if (input === variantUrl) {
+        return new Response(`#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=500\n${subVariantUrl}`, {
+          status: 200,
+          headers: { 'content-type': 'application/octet-stream' },
+        });
+      }
+      if (input === subVariantUrl) {
+        return new Response(
+          `#EXTM3U\n#EXTINF:5.0,\n${segUrl}\n#EXT-X-STREAM-INF:BANDWIDTH=100\n${tooDeepUrl}`,
+          { status: 200, headers: { 'content-type': 'application/vnd.apple.mpegurl' } }
+        );
+      }
+      if (input === segUrl) {
+        // Retorna 403 com Referer do host, sucesso sem Referer
+        if (ref !== null) {
+          return new Response('Forbidden', { status: 403 });
+        }
+        return new Response(new Uint8Array([0x47, 0x40, 0x00, 0x55]), {
+          status: 200,
+          headers: { 'content-type': 'video/mp2t' },
+        });
+      }
+      return new Response('#EXTM3U\n#EXTINF:5.0,\nend.ts', {
+        status: 200,
+        headers: { 'content-type': 'application/vnd.apple.mpegurl' },
+      });
+    });
+
+    const masterSig = await createWorkerProxySignature(masterUrl, exp, TEST_SECRET);
+    const res0 = await handleWorkerProxyRequest(
+      new Request(
+        `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(masterUrl)}&exp=${exp}&sig=${masterSig}`
+      ),
+      env,
+      undefined,
+      { fetcher, edgeCache: null, nowSeconds: () => 1_795_000_000 }
+    );
+    expect(res0.status).toBe(200);
+    const body0 = await res0.text();
+    const path1 = body0.split('\n').find((l) => l.includes(encodeURIComponent(variantUrl)))!.trim();
+
+    const res1 = await handleWorkerProxyRequest(
+      new Request(`https://hikari-media-proxy.workers.dev${path1}`),
+      env,
+      undefined,
+      { fetcher, edgeCache: null, nowSeconds: () => 1_795_000_000 }
+    );
+    expect(res1.status).toBe(200);
+    const body1 = await res1.text();
+    const path2 = body1.split('\n').find((l) => l.includes(encodeURIComponent(subVariantUrl)))!.trim();
+
+    const res2 = await handleWorkerProxyRequest(
+      new Request(`https://hikari-media-proxy.workers.dev${path2}`),
+      env,
+      undefined,
+      { fetcher, edgeCache: null, nowSeconds: () => 1_795_000_000 }
+    );
+    expect(res2.status).toBe(200);
+    expect(res2.headers.get('x-hikari-source-expirable')).toBe('1');
+    const body2 = await res2.text();
+
+    const segPath = body2.split('\n').find((l) => l.includes(encodeURIComponent(segUrl)))!.trim();
+    const resSeg = await handleWorkerProxyRequest(
+      new Request(`https://hikari-media-proxy.workers.dev${segPath}`),
+      env,
+      undefined,
+      { fetcher, edgeCache: null, nowSeconds: () => 1_795_000_000 }
+    );
+    expect(resSeg.status).toBe(200);
+    expect(resSeg.headers.get('cache-control')).not.toContain('immutable');
+    expect(seenReferersByUrl.get(segUrl)).toEqual(['https://host-d.example.com/', null]);
+
+    const deepPath = body2.split('\n').find((l) => l.includes(encodeURIComponent(tooDeepUrl)))!.trim();
+    const resDeep = await handleWorkerProxyRequest(
+      new Request(`https://hikari-media-proxy.workers.dev${deepPath}`),
+      env,
+      undefined,
+      { fetcher, edgeCache: null, nowSeconds: () => 1_795_000_000 }
+    );
+    expect(resDeep.status).toBe(502);
   });
 });

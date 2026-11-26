@@ -48,6 +48,11 @@ export interface PlayerEpisode {
   is_mirror_3: boolean | null;
   is_mirror_4: boolean | null;
   is_mirror_5: boolean | null;
+  source_referer?: string | null;
+  source_referer_2?: string | null;
+  source_referer_3?: string | null;
+  source_referer_4?: string | null;
+  source_referer_5?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -74,6 +79,11 @@ export interface EpisodeWriteInput {
   force_proxy_3?: boolean | null;
   force_proxy_4?: boolean | null;
   force_proxy_5?: boolean | null;
+  source_referer?: string | null;
+  source_referer_2?: string | null;
+  source_referer_3?: string | null;
+  source_referer_4?: string | null;
+  source_referer_5?: string | null;
 }
 
 export class DatabaseNotConfiguredError extends Error {
@@ -190,6 +200,24 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
         : true;
   };
 
+  const resolveSlotReferer = (
+    url: string | null | undefined,
+    rawReferer: string | null | undefined
+  ): string | null | undefined => {
+    if (url && (isDirectMediaUrl(url) || isVercelBlobUrl(url))) {
+      return null;
+    }
+    if (rawReferer === undefined) return undefined;
+    if (rawReferer === null) return null;
+    const trimmed = typeof rawReferer === 'string' ? rawReferer.trim() : '';
+    if (!trimmed) return null;
+    const check = validateHttpUrl(trimmed);
+    if (!check.valid || !check.normalizedUrl) {
+      throw new Error(`Referer da fonte inválido: ${check.error}`);
+    }
+    return check.normalizedUrl;
+  };
+
   return {
     anime_name: animeName,
     episode_number: episodeNumber,
@@ -212,6 +240,11 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
     force_proxy_3: resolveSlotForceProxy(sanitizedOptional.video_url_3, input.force_proxy_3),
     force_proxy_4: resolveSlotForceProxy(sanitizedOptional.video_url_4, input.force_proxy_4),
     force_proxy_5: resolveSlotForceProxy(sanitizedOptional.video_url_5, input.force_proxy_5),
+    source_referer: resolveSlotReferer(primaryCheck.normalizedUrl, input.source_referer) ?? null,
+    source_referer_2: resolveSlotReferer(sanitizedOptional.video_url_2, input.source_referer_2),
+    source_referer_3: resolveSlotReferer(sanitizedOptional.video_url_3, input.source_referer_3),
+    source_referer_4: resolveSlotReferer(sanitizedOptional.video_url_4, input.source_referer_4),
+    source_referer_5: resolveSlotReferer(sanitizedOptional.video_url_5, input.source_referer_5),
   };
 }
 
@@ -220,6 +253,12 @@ function normalizeOptionalSeconds(raw: unknown): number | null {
   const num = Number(raw);
   if (!Number.isFinite(num) || num < 0) return null;
   return Math.floor(num);
+}
+
+function normalizeOptionalText(raw: unknown): string | null {
+  if (typeof raw !== 'string') return null;
+  const trimmed = raw.trim();
+  return trimmed.length > 0 ? trimmed : null;
 }
 
 function mapEpisodeRow(row: Record<string, unknown>): PlayerEpisode {
@@ -251,6 +290,11 @@ function mapEpisodeRow(row: Record<string, unknown>): PlayerEpisode {
     is_mirror_3: Boolean(row.is_mirror_3),
     is_mirror_4: Boolean(row.is_mirror_4),
     is_mirror_5: Boolean(row.is_mirror_5),
+    source_referer: normalizeOptionalText(row.source_referer),
+    source_referer_2: normalizeOptionalText(row.source_referer_2),
+    source_referer_3: normalizeOptionalText(row.source_referer_3),
+    source_referer_4: normalizeOptionalText(row.source_referer_4),
+    source_referer_5: normalizeOptionalText(row.source_referer_5),
     created_at: new Date(String(row.created_at)).toISOString(),
     updated_at: new Date(String(row.updated_at)).toISOString(),
   };
@@ -274,6 +318,7 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
              COALESCE(is_mirror_3, false) AS is_mirror_3,
              COALESCE(is_mirror_4, false) AS is_mirror_4,
              COALESCE(is_mirror_5, false) AS is_mirror_5,
+             source_referer, source_referer_2, source_referer_3, source_referer_4, source_referer_5,
              created_at, updated_at
       FROM public.player_episodes
       ORDER BY created_at DESC
@@ -317,6 +362,11 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
           is_mirror_3: Boolean(data.is_mirror_3),
           is_mirror_4: Boolean(data.is_mirror_4),
           is_mirror_5: Boolean(data.is_mirror_5),
+          source_referer: data.source_referer ?? null,
+          source_referer_2: data.source_referer_2 ?? null,
+          source_referer_3: data.source_referer_3 ?? null,
+          source_referer_4: data.source_referer_4 ?? null,
+          source_referer_5: data.source_referer_5 ?? null,
         });
       });
     }
@@ -350,6 +400,7 @@ export async function getEpisodeById(
              COALESCE(is_mirror_3, false) AS is_mirror_3,
              COALESCE(is_mirror_4, false) AS is_mirror_4,
              COALESCE(is_mirror_5, false) AS is_mirror_5,
+             source_referer, source_referer_2, source_referer_3, source_referer_4, source_referer_5,
              created_at, updated_at
       FROM public.player_episodes
       WHERE id = ${cleanId}
@@ -391,6 +442,11 @@ export async function getEpisodeById(
         is_mirror_3: Boolean(data.is_mirror_3),
         is_mirror_4: Boolean(data.is_mirror_4),
         is_mirror_5: Boolean(data.is_mirror_5),
+        source_referer: data.source_referer ?? null,
+        source_referer_2: data.source_referer_2 ?? null,
+        source_referer_3: data.source_referer_3 ?? null,
+        source_referer_4: data.source_referer_4 ?? null,
+        source_referer_5: data.source_referer_5 ?? null,
       });
     }
     throw err;
@@ -456,7 +512,8 @@ export async function createEpisode(
         title, poster_url,
         video_url, video_url_2, video_url_3, video_url_4, video_url_5,
         source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
-        force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5
+        force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5,
+        source_referer, source_referer_2, source_referer_3, source_referer_4, source_referer_5
       ) VALUES (
         ${id},
         ${input.anime_name ?? null},
@@ -479,7 +536,12 @@ export async function createEpisode(
         ${input.force_proxy_2 ?? true},
         ${input.force_proxy_3 ?? true},
         ${input.force_proxy_4 ?? true},
-        ${input.force_proxy_5 ?? true}
+        ${input.force_proxy_5 ?? true},
+        ${input.source_referer ?? null},
+        ${input.source_referer_2 ?? null},
+        ${input.source_referer_3 ?? null},
+        ${input.source_referer_4 ?? null},
+        ${input.source_referer_5 ?? null}
       )
       RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
                 title, poster_url,
@@ -490,12 +552,64 @@ export async function createEpisode(
                 COALESCE(force_proxy_3, true) AS force_proxy_3,
                 COALESCE(force_proxy_4, true) AS force_proxy_4,
                 COALESCE(force_proxy_5, true) AS force_proxy_5,
+                source_referer, source_referer_2, source_referer_3, source_referer_4, source_referer_5,
                 created_at, updated_at
     `;
     return finalizeCreated((rows as Array<Record<string, unknown>>)[0]);
   } catch (err: unknown) {
     if (!isUndefinedColumnError(err)) {
       throw err;
+    }
+
+    // Fallback 0: migration 0008 (source_referer) pendente, mas 0004/0005 presentes
+    try {
+      const rows = await sql`
+        INSERT INTO public.player_episodes (
+          id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
+          title, poster_url,
+          video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+          source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
+          force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5
+        ) VALUES (
+          ${id},
+          ${input.anime_name ?? null},
+          ${input.episode_number ?? null},
+          ${input.opening_start_seconds ?? null},
+          ${input.opening_end_seconds ?? null},
+          ${input.title},
+          ${input.poster_url},
+          ${input.video_url},
+          ${input.video_url_2 ?? null},
+          ${input.video_url_3 ?? null},
+          ${input.video_url_4 ?? null},
+          ${input.video_url_5 ?? null},
+          ${input.source_kind ?? null},
+          ${input.source_kind_2 ?? null},
+          ${input.source_kind_3 ?? null},
+          ${input.source_kind_4 ?? null},
+          ${input.source_kind_5 ?? null},
+          ${input.force_proxy ?? true},
+          ${input.force_proxy_2 ?? true},
+          ${input.force_proxy_3 ?? true},
+          ${input.force_proxy_4 ?? true},
+          ${input.force_proxy_5 ?? true}
+        )
+        RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
+                  title, poster_url,
+                  video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                  source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
+                  COALESCE(force_proxy, true) AS force_proxy,
+                  COALESCE(force_proxy_2, true) AS force_proxy_2,
+                  COALESCE(force_proxy_3, true) AS force_proxy_3,
+                  COALESCE(force_proxy_4, true) AS force_proxy_4,
+                  COALESCE(force_proxy_5, true) AS force_proxy_5,
+                  created_at, updated_at
+      `;
+      return finalizeCreated((rows as Array<Record<string, unknown>>)[0]);
+    } catch (err0: unknown) {
+      if (!isUndefinedColumnError(err0)) {
+        throw err0;
+      }
     }
 
     // Fallback 1: schema sem anime_name / episode_number (migration 0004 pendente), mas com 0002, 0003 e 0005
@@ -644,7 +758,11 @@ export async function updateEpisode(
     rawInput.force_proxy_2 === undefined &&
     rawInput.force_proxy_3 === undefined &&
     rawInput.force_proxy_4 === undefined &&
-    rawInput.force_proxy_5 === undefined;
+    rawInput.force_proxy_5 === undefined &&
+    rawInput.source_referer_2 === undefined &&
+    rawInput.source_referer_3 === undefined &&
+    rawInput.source_referer_4 === undefined &&
+    rawInput.source_referer_5 === undefined;
   const hasOpeningTimes =
     input.opening_start_seconds !== null &&
     input.opening_start_seconds !== undefined &&
@@ -672,6 +790,7 @@ export async function updateEpisode(
             video_url = ${input.video_url},
             source_kind = ${input.source_kind ?? null},
             force_proxy = ${input.force_proxy ?? true},
+            source_referer = ${input.source_referer ?? null},
             updated_at = NOW()
           WHERE id = ${cleanId}
           RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
@@ -683,6 +802,7 @@ export async function updateEpisode(
                     COALESCE(force_proxy_3, true) AS force_proxy_3,
                     COALESCE(force_proxy_4, true) AS force_proxy_4,
                     COALESCE(force_proxy_5, true) AS force_proxy_5,
+                    source_referer, source_referer_2, source_referer_3, source_referer_4, source_referer_5,
                     created_at, updated_at
         `
       : await sql`
@@ -709,6 +829,11 @@ export async function updateEpisode(
             force_proxy_3 = ${input.force_proxy_3 ?? true},
             force_proxy_4 = ${input.force_proxy_4 ?? true},
             force_proxy_5 = ${input.force_proxy_5 ?? true},
+            source_referer = ${input.source_referer ?? null},
+            source_referer_2 = ${input.source_referer_2 ?? null},
+            source_referer_3 = ${input.source_referer_3 ?? null},
+            source_referer_4 = ${input.source_referer_4 ?? null},
+            source_referer_5 = ${input.source_referer_5 ?? null},
             updated_at = NOW()
           WHERE id = ${cleanId}
           RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
@@ -720,12 +845,85 @@ export async function updateEpisode(
                     COALESCE(force_proxy_3, true) AS force_proxy_3,
                     COALESCE(force_proxy_4, true) AS force_proxy_4,
                     COALESCE(force_proxy_5, true) AS force_proxy_5,
+                    source_referer, source_referer_2, source_referer_3, source_referer_4, source_referer_5,
                     created_at, updated_at
         `;
     return finalizeUpdated((rows as Array<Record<string, unknown>>)[0]);
   } catch (err: unknown) {
     if (!isUndefinedColumnError(err)) {
       throw err;
+    }
+
+    // Fallback 0: migration 0008 (source_referer) pendente
+    try {
+      const rows = preserveAdditionalSources
+        ? await sql`
+            UPDATE public.player_episodes
+            SET
+              anime_name = ${input.anime_name ?? null},
+              episode_number = ${input.episode_number ?? null},
+              opening_start_seconds = ${input.opening_start_seconds ?? null},
+              opening_end_seconds = ${input.opening_end_seconds ?? null},
+              title = ${input.title},
+              poster_url = ${input.poster_url},
+              video_url = ${input.video_url},
+              source_kind = ${input.source_kind ?? null},
+              force_proxy = ${input.force_proxy ?? true},
+              updated_at = NOW()
+            WHERE id = ${cleanId}
+            RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
+                      title, poster_url,
+                      video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                      source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
+                      COALESCE(force_proxy, true) AS force_proxy,
+                      COALESCE(force_proxy_2, true) AS force_proxy_2,
+                      COALESCE(force_proxy_3, true) AS force_proxy_3,
+                      COALESCE(force_proxy_4, true) AS force_proxy_4,
+                      COALESCE(force_proxy_5, true) AS force_proxy_5,
+                      created_at, updated_at
+          `
+        : await sql`
+            UPDATE public.player_episodes
+            SET
+              anime_name = ${input.anime_name ?? null},
+              episode_number = ${input.episode_number ?? null},
+              opening_start_seconds = ${input.opening_start_seconds ?? null},
+              opening_end_seconds = ${input.opening_end_seconds ?? null},
+              title = ${input.title},
+              poster_url = ${input.poster_url},
+              video_url = ${input.video_url},
+              video_url_2 = ${input.video_url_2 ?? null},
+              video_url_3 = ${input.video_url_3 ?? null},
+              video_url_4 = ${input.video_url_4 ?? null},
+              video_url_5 = ${input.video_url_5 ?? null},
+              source_kind = ${input.source_kind ?? null},
+              source_kind_2 = ${input.source_kind_2 ?? null},
+              source_kind_3 = ${input.source_kind_3 ?? null},
+              source_kind_4 = ${input.source_kind_4 ?? null},
+              source_kind_5 = ${input.source_kind_5 ?? null},
+              force_proxy = ${input.force_proxy ?? true},
+              force_proxy_2 = ${input.force_proxy_2 ?? true},
+              force_proxy_3 = ${input.force_proxy_3 ?? true},
+              force_proxy_4 = ${input.force_proxy_4 ?? true},
+              force_proxy_5 = ${input.force_proxy_5 ?? true},
+              updated_at = NOW()
+            WHERE id = ${cleanId}
+            RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
+                      title, poster_url,
+                      video_url, video_url_2, video_url_3, video_url_4, video_url_5,
+                      source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
+                      COALESCE(force_proxy, true) AS force_proxy,
+                      COALESCE(force_proxy_2, true) AS force_proxy_2,
+                      COALESCE(force_proxy_3, true) AS force_proxy_3,
+                      COALESCE(force_proxy_4, true) AS force_proxy_4,
+                      COALESCE(force_proxy_5, true) AS force_proxy_5,
+                      created_at, updated_at
+          `;
+      return finalizeUpdated((rows as Array<Record<string, unknown>>)[0]);
+    } catch (err0: unknown) {
+      if (!isUndefinedColumnError(err0)) {
+        throw err0;
+      }
     }
 
     // Fallback 1: schema sem anime_name / episode_number (migration 0004 pendente), mas com 0002, 0003 e 0005
@@ -926,6 +1124,11 @@ export async function appendEpisodeIframeSource(
       force_proxy_3: episode.force_proxy_3,
       force_proxy_4: episode.force_proxy_4,
       force_proxy_5: episode.force_proxy_5,
+      source_referer: episode.source_referer,
+      source_referer_2: episode.source_referer_2,
+      source_referer_3: episode.source_referer_3,
+      source_referer_4: episode.source_referer_4,
+      source_referer_5: episode.source_referer_5,
     },
     sqlOverride
   );
@@ -1125,6 +1328,164 @@ export async function saveEpisodeMirrorSource(
   if (targetSlot === 3) mapped.is_mirror_3 = true;
   if (targetSlot === 4) mapped.is_mirror_4 = true;
   if (targetSlot === 5) mapped.is_mirror_5 = true;
+
+  return {
+    episode: mapped,
+    slot: targetSlot,
+  };
+}
+
+export async function saveEpisodeImportedSource(
+  episodeId: string,
+  source: {
+    videoUrl: string;
+    sourceKind: 'hls' | 'mp4';
+    forceProxy: boolean;
+    sourceReferer: string | null;
+    targetSlot?: 1 | 2 | 3 | 4 | 5;
+    sqlOverride?: DiagnosticSqlTag;
+  }
+): Promise<{
+  episode: PlayerEpisode;
+  slot: 1 | 2 | 3 | 4 | 5;
+}> {
+  const urlCheck = validateHttpUrl(source.videoUrl);
+  if (!urlCheck.valid || !urlCheck.normalizedUrl) {
+    throw new Error(`URL importada inválida: ${urlCheck.error ?? 'URL malformada'}`);
+  }
+  const normalizedUrl = urlCheck.normalizedUrl;
+
+  let normalizedReferer: string | null = null;
+  if (source.sourceReferer && source.sourceReferer.trim()) {
+    const refCheck = validateHttpUrl(source.sourceReferer);
+    if (refCheck.valid && refCheck.normalizedUrl) {
+      normalizedReferer = refCheck.normalizedUrl;
+    }
+  }
+
+  const sql = source.sqlOverride ?? (getSql() as unknown as DiagnosticSqlTag);
+  const episode = await getEpisodeById(episodeId, source.sqlOverride);
+  if (!episode) {
+    throw new Error('Episódio não encontrado.');
+  }
+
+  const slots: Array<{ slot: 1 | 2 | 3 | 4 | 5; url: string | null }> = [
+    { slot: 1, url: episode.video_url },
+    { slot: 2, url: episode.video_url_2 },
+    { slot: 3, url: episode.video_url_3 },
+    { slot: 4, url: episode.video_url_4 },
+    { slot: 5, url: episode.video_url_5 },
+  ];
+
+  const matchingSlot = slots.find((item) => item.url?.trim() === normalizedUrl)?.slot ?? null;
+  const targetSlot = source.targetSlot ?? matchingSlot ?? findNextFreeMirrorSlot(episode);
+  if (!targetSlot) {
+    throw new Error('Todos os 5 slots de fontes deste episódio já estão preenchidos.');
+  }
+
+  const runSlotUpdate = async (withRefererColumn: boolean): Promise<Record<string, unknown> | undefined> => {
+    const kind = source.sourceKind;
+    const forceProxy = source.forceProxy;
+    if (targetSlot === 1) {
+      const rows = withRefererColumn
+        ? await sql`
+            UPDATE public.player_episodes
+            SET video_url = ${normalizedUrl}, source_kind = ${kind}, force_proxy = ${forceProxy}, source_referer = ${normalizedReferer}, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `
+        : await sql`
+            UPDATE public.player_episodes
+            SET video_url = ${normalizedUrl}, source_kind = ${kind}, force_proxy = ${forceProxy}, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `;
+      return (rows as Array<Record<string, unknown>>)[0];
+    }
+    if (targetSlot === 2) {
+      const rows = withRefererColumn
+        ? await sql`
+            UPDATE public.player_episodes
+            SET video_url_2 = ${normalizedUrl}, source_kind_2 = ${kind}, force_proxy_2 = ${forceProxy}, source_referer_2 = ${normalizedReferer}, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `
+        : await sql`
+            UPDATE public.player_episodes
+            SET video_url_2 = ${normalizedUrl}, source_kind_2 = ${kind}, force_proxy_2 = ${forceProxy}, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `;
+      return (rows as Array<Record<string, unknown>>)[0];
+    }
+    if (targetSlot === 3) {
+      const rows = withRefererColumn
+        ? await sql`
+            UPDATE public.player_episodes
+            SET video_url_3 = ${normalizedUrl}, source_kind_3 = ${kind}, force_proxy_3 = ${forceProxy}, source_referer_3 = ${normalizedReferer}, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `
+        : await sql`
+            UPDATE public.player_episodes
+            SET video_url_3 = ${normalizedUrl}, source_kind_3 = ${kind}, force_proxy_3 = ${forceProxy}, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `;
+      return (rows as Array<Record<string, unknown>>)[0];
+    }
+    if (targetSlot === 4) {
+      const rows = withRefererColumn
+        ? await sql`
+            UPDATE public.player_episodes
+            SET video_url_4 = ${normalizedUrl}, source_kind_4 = ${kind}, force_proxy_4 = ${forceProxy}, source_referer_4 = ${normalizedReferer}, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `
+        : await sql`
+            UPDATE public.player_episodes
+            SET video_url_4 = ${normalizedUrl}, source_kind_4 = ${kind}, force_proxy_4 = ${forceProxy}, updated_at = NOW()
+            WHERE id = ${episode.id}
+            RETURNING *
+          `;
+      return (rows as Array<Record<string, unknown>>)[0];
+    }
+    const rows = withRefererColumn
+      ? await sql`
+          UPDATE public.player_episodes
+          SET video_url_5 = ${normalizedUrl}, source_kind_5 = ${kind}, force_proxy_5 = ${forceProxy}, source_referer_5 = ${normalizedReferer}, updated_at = NOW()
+          WHERE id = ${episode.id}
+          RETURNING *
+        `
+      : await sql`
+          UPDATE public.player_episodes
+          SET video_url_5 = ${normalizedUrl}, source_kind_5 = ${kind}, force_proxy_5 = ${forceProxy}, updated_at = NOW()
+          WHERE id = ${episode.id}
+          RETURNING *
+        `;
+    return (rows as Array<Record<string, unknown>>)[0];
+  };
+
+  let row: Record<string, unknown> | undefined;
+  try {
+    row = await runSlotUpdate(true);
+  } catch (err) {
+    if (!isUndefinedColumnError(err)) {
+      throw err;
+    }
+    row = await runSlotUpdate(false);
+  }
+
+  if (!row) {
+    throw new Error('Episódio não encontrado ao gravar fonte importada.');
+  }
+
+  const mapped = mapEpisodeRow(row);
+  if (targetSlot === 1 && !mapped.source_referer && normalizedReferer) mapped.source_referer = normalizedReferer;
+  if (targetSlot === 2 && !mapped.source_referer_2 && normalizedReferer) mapped.source_referer_2 = normalizedReferer;
+  if (targetSlot === 3 && !mapped.source_referer_3 && normalizedReferer) mapped.source_referer_3 = normalizedReferer;
+  if (targetSlot === 4 && !mapped.source_referer_4 && normalizedReferer) mapped.source_referer_4 = normalizedReferer;
+  if (targetSlot === 5 && !mapped.source_referer_5 && normalizedReferer) mapped.source_referer_5 = normalizedReferer;
 
   return {
     episode: mapped,

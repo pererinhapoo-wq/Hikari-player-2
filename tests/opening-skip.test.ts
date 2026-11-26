@@ -370,9 +370,10 @@ describe('Pular abertura — persistência no banco e integração Player / Admi
       createMockSql
     );
 
-    expect(createQueries).toHaveLength(2);
-    expect(createQueries[1]).toContain('opening_start_seconds');
-    expect(createQueries[1]).toContain('opening_end_seconds');
+    expect(createQueries.length).toBeGreaterThanOrEqual(2);
+    const successfulQuery = createQueries[createQueries.length - 1];
+    expect(successfulQuery).toContain('opening_start_seconds');
+    expect(successfulQuery).toContain('opening_end_seconds');
     expect(created.opening_start_seconds).toBe(2);
     expect(created.opening_end_seconds).toBe(180);
 
@@ -433,10 +434,11 @@ describe('Pular abertura — persistência no banco e integração Player / Admi
       updateMockSql
     );
 
-    expect(updateQueries).toHaveLength(2);
-    expect(updateQueries[1]).toContain('opening_start_seconds =');
-    expect(updateQueries[1]).toContain('opening_end_seconds =');
-    expect(updateQueries[1]).not.toContain('video_url_2 =');
+    expect(updateQueries.length).toBeGreaterThanOrEqual(2);
+    const successfulUpdate = updateQueries[updateQueries.length - 1];
+    expect(successfulUpdate).toContain('opening_start_seconds =');
+    expect(successfulUpdate).toContain('opening_end_seconds =');
+    expect(successfulUpdate).not.toContain('video_url_2 =');
     expect(updated?.opening_start_seconds).toBe(2);
     expect(updated?.opening_end_seconds).toBe(180);
     expect(updated?.video_url_2).toBe('https://cdn.example.com/old-p2.mp4');

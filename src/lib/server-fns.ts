@@ -37,19 +37,23 @@ import {
   listEpisodes,
   type PlayerEpisode,
   sanitizeDiagnosticError,
+  saveEpisodeImportedSource,
   updateEpisode,
 } from '@/lib/db';
 import { IMAGE_WIDTH_LIMITS, resizeImageUrlForWidth } from '@/lib/image-optimization';
 import {
   buildSignedProxyPath,
+  createProxyRefererSignature,
   createProxySignature,
   getStableProxyExpiry,
 } from '@/lib/proxy-signing';
+import { importSourceFromEpisodePage } from '@/lib/site-import';
 import {
   diagnoseEpisodeSources,
   diagnoseVideoSource,
   type SourceTestInput,
 } from '@/lib/source-diagnostics';
+import { resolveUpstreamReferer } from '@/lib/stream-proxy';
 import type {
   AdminDashboardState,
   DatabaseDiagnosticResult,
@@ -57,6 +61,7 @@ import type {
   EpisodeFormPayload,
   PlayableSource,
   PublicEpisodeResult,
+  SiteImportFromPageResult,
   SourceTestReport,
 } from '@/lib/types';
 import { resolveThumbnailSourceForAdmin } from '@/lib/thumbnails';
@@ -72,8 +77,10 @@ import {
 export function resolveProxyPlayUrl(
   targetUrl: string,
   workerBaseEnv = process.env.WORKER_BASE,
-  nowSeconds = Math.floor(Date.now() / 1000)
+  nowSeconds = Math.floor(Date.now() / 1000),
+  customReferer?: string | null
 ): string {
+  const cleanRef = typeof customReferer === 'string' ? customReferer.trim() : '';
   const rawBase = workerBaseEnv?.trim();
   if (rawBase) {
     try {
@@ -90,13 +97,17 @@ export function resolveProxyPlayUrl(
           exp: String(stableExp),
           sig,
         });
+        if (cleanRef) {
+          params.set('ref', cleanRef);
+          params.set('rsig', createProxyRefererSignature(targetUrl, stableExp, cleanRef));
+        }
         return `${normalizedBase}/api/proxy/stream?${params.toString()}`;
       }
     } catch {
       // WORKER_BASE inválida: mantém fallback para /api/proxy/stream na Vercel
     }
   }
-  return buildSignedProxyPath(targetUrl, undefined, nowSeconds);
+  return buildSignedProxyPath(targetUrl, undefined, nowSeconds, 0, cleanRef || undefined);
 }
 
 function trySetResponseHeader(name: string, value: string): void {
@@ -157,6 +168,14 @@ export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
       5: episode.force_proxy_5,
     };
 
+    const sourceRefererBySlot: Record<1 | 2 | 3 | 4 | 5, string | null> = {
+      1: episode.source_referer ?? null,
+      2: episode.source_referer_2 ?? null,
+      3: episode.source_referer_3 ?? null,
+      4: episode.source_referer_4 ?? null,
+      5: episode.source_referer_5 ?? null,
+    };
+
     const normalizedSources = collectEpisodeSources(episode);
     const sources: PlayableSource[] = normalizedSources.map((src) => {
       const isMirrorSource = Boolean(
@@ -168,11 +187,22 @@ export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
         !isMirrorSource &&
         forceProxyBySlot[src.slot] !== false &&
         src.needsProxy;
+      let customRefererForProxy: string | null = null;
+      if (shouldProxy && sourceRefererBySlot[src.slot]) {
+        try {
+          const defaultRef = resolveUpstreamReferer(new URL(src.resolvedUrl));
+          if (sourceRefererBySlot[src.slot] !== defaultRef) {
+            customRefererForProxy = sourceRefererBySlot[src.slot];
+          }
+        } catch {
+          // Ignora URL inválida ao resolver referer
+        }
+      }
       const playUrl =
         src.kind === 'iframe'
           ? buildIframePlayUrl(src.resolvedUrl)
           : shouldProxy
-            ? resolveProxyPlayUrl(src.resolvedUrl)
+            ? resolveProxyPlayUrl(src.resolvedUrl, undefined, undefined, customRefererForProxy)
             : src.resolvedUrl;
       return {
         ...src,
@@ -399,6 +429,7 @@ export const adminTestSourceFn = createServerFn({ method: 'POST' })
       label?: string;
       url: string;
       kind?: ExplicitSourceKind | '' | null;
+      sourceReferer?: string | null;
       isMirror?: boolean;
       originalContentLength?: number | null;
       originalUrl?: string | null;
@@ -412,6 +443,7 @@ export const adminTestSourceFn = createServerFn({ method: 'POST' })
       label: typeof data?.label === 'string' ? data.label : undefined,
       url: typeof data?.url === 'string' ? data.url : '',
       kind: data?.kind ?? null,
+      sourceReferer: typeof data?.sourceReferer === 'string' ? data.sourceReferer : null,
       isMirror: typeof data?.isMirror === 'boolean' ? data.isMirror : undefined,
       originalContentLength:
         typeof data?.originalContentLength === 'number' &&
@@ -606,4 +638,106 @@ export const adminResolveThumbnailSourceFn = createServerFn({ method: 'POST' })
     }
   );
 
+export async function processSiteImportServer(input: {
+  pageUrl: string;
+  episodeId?: string | null;
+  targetSlot?: 1 | 2 | 3 | 4 | 5 | null;
+}): Promise<SiteImportFromPageResult> {
+  const importRes = await importSourceFromEpisodePage(input.pageUrl);
+  if (!importRes.ok) {
+    return {
+      ok: false,
+      error: importRes.error,
+      candidates: importRes.candidates,
+    };
+  }
+
+  let saved = false;
+  let savedEpisode: EpisodeDto | undefined;
+  let savedSlot: 1 | 2 | 3 | 4 | 5 | undefined;
+
+  if (input.episodeId?.trim()) {
+    if (!isDatabaseConfigured()) {
+      return {
+        ok: false,
+        error: 'DATABASE_URL não configurada no servidor.',
+        candidates: importRes.candidates,
+      };
+    }
+
+    const savedResult = await saveEpisodeImportedSource(input.episodeId.trim(), {
+      videoUrl: importRes.selected.url,
+      sourceKind: importRes.selected.kind,
+      forceProxy: true,
+      sourceReferer: importRes.selected.hostReferer || null,
+      targetSlot: input.targetSlot ?? undefined,
+    });
+    saved = true;
+    savedEpisode = toEpisodeDto(savedResult.episode);
+    savedSlot = savedResult.slot;
+  }
+
+  const reportSlot = savedSlot ?? input.targetSlot ?? 1;
+  const testReport = await diagnoseVideoSource({
+    slot: reportSlot,
+    label: `Player ${reportSlot}`,
+    url: importRes.selected.url,
+    kind: importRes.selected.kind,
+    sourceReferer: importRes.selected.hostReferer || null,
+  });
+
+  const isExpirable = Boolean(importRes.selected.isExpirable || testReport.isExpirable);
+  const expirableReason =
+    importRes.selected.expirableReason ?? testReport.expirableReason ?? null;
+
+  return {
+    ok: true,
+    saved,
+    episode: savedEpisode,
+    slot: savedSlot,
+    selected: {
+      ...importRes.selected,
+      isExpirable,
+      expirableReason,
+    },
+    extractedTitle: importRes.extractedTitle,
+    extractedPoster: importRes.extractedPoster,
+    candidates: importRes.candidates,
+    testReport: {
+      ...testReport,
+      isExpirable,
+      expirableReason,
+    },
+  };
+}
+
+export const adminImportFromSiteFn = createServerFn({ method: 'POST' })
+  .validator(
+    (data: {
+      pageUrl: string;
+      episodeId?: string | null;
+      targetSlot?: number | null;
+    }) => ({
+      pageUrl: typeof data?.pageUrl === 'string' ? data.pageUrl : '',
+      episodeId: typeof data?.episodeId === 'string' ? data.episodeId : null,
+      targetSlot: [1, 2, 3, 4, 5].includes(Number(data?.targetSlot))
+        ? (Number(data?.targetSlot) as 1 | 2 | 3 | 4 | 5)
+        : null,
+    })
+  )
+  .handler(async ({ data }): Promise<SiteImportFromPageResult> => {
+    try {
+      requireAdminSession();
+      return await processSiteImportServer(data);
+    } catch (err) {
+      return {
+        ok: false,
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Falha ao importar fonte da página no servidor.',
+        candidates: [],
+      };
+    }
+  });
 

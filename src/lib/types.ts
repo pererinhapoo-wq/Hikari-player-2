@@ -32,6 +32,11 @@ export interface EpisodeDto {
   is_mirror_3?: boolean | null;
   is_mirror_4?: boolean | null;
   is_mirror_5?: boolean | null;
+  source_referer?: string | null;
+  source_referer_2?: string | null;
+  source_referer_3?: string | null;
+  source_referer_4?: string | null;
+  source_referer_5?: string | null;
   public_url: string;
   created_at: string;
   updated_at: string;
@@ -67,6 +72,11 @@ export interface EpisodeFormPayload {
   source_kind_3?: ExplicitSourceKind | '' | null;
   source_kind_4?: ExplicitSourceKind | '' | null;
   source_kind_5?: ExplicitSourceKind | '' | null;
+  source_referer?: string | null;
+  source_referer_2?: string | null;
+  source_referer_3?: string | null;
+  source_referer_4?: string | null;
+  source_referer_5?: string | null;
 }
 
 export type PublicEpisodeResult =
@@ -205,5 +215,45 @@ export interface SourceTestReport {
   verdict: SourceTestVerdict;
   verdictLabel: 'direto ok' | 'proxy necessário' | 'bloqueado';
   verdictReason: string;
+  isExpirable?: boolean;
+  expirableReason?: string | null;
   embedDiagnostic?: EmbedHostDiagnostic;
 }
+
+export type SiteImportCandidateType = 'playerricas' | 'm3u8' | 'mp4';
+
+export interface SiteImportCandidateDiagnostic {
+  url: string;
+  type: SiteImportCandidateType;
+  status: number | null;
+  contentType: string | null;
+  refererUsed: string | null;
+  passed: boolean;
+  reason: string;
+}
+
+export type SiteImportFromPageResult =
+  | {
+      ok: true;
+      saved: boolean;
+      episode?: EpisodeDto;
+      slot?: 1 | 2 | 3 | 4 | 5;
+      selected: {
+        url: string;
+        kind: 'hls' | 'mp4';
+        forceProxy: true;
+        hostReferer: string;
+        candidateType: SiteImportCandidateType;
+        isExpirable: boolean;
+        expirableReason: string | null;
+      };
+      extractedTitle: string | null;
+      extractedPoster: string | null;
+      candidates: SiteImportCandidateDiagnostic[];
+      testReport: SourceTestReport;
+    }
+  | {
+      ok: false;
+      error: string;
+      candidates: SiteImportCandidateDiagnostic[];
+    };
