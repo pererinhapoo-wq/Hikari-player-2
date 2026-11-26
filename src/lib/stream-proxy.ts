@@ -13,6 +13,8 @@ import {
   extractExpirableTokenRemainingSeconds,
   hasExpirableHlsTokens,
   isDirectMediaHost,
+  isGoogleVideoPlaybackUrl,
+  isGoogleVideoUrl,
   isMaximaimgHost,
   isR2StorageHost,
   isR2StorageUrl,
@@ -503,9 +505,13 @@ function buildBinaryResponseHeaders(
   const isR2Target =
     isR2StorageUrl(sourceTargetUrl ?? '') ||
     Boolean(targetUrl && isR2StorageHost(targetUrl.hostname));
+  const isGoogleVideoTarget =
+    isGoogleVideoUrl(sourceTargetUrl ?? '') ||
+    Boolean(targetUrl && isGoogleVideoPlaybackUrl(targetUrl));
   const isExpirable =
     inheritedExpirable ||
     isR2Target ||
+    isGoogleVideoTarget ||
     Boolean(sourceTargetUrl && safeDetectExpirable(sourceTargetUrl, detectExpirable)) ||
     Boolean(targetUrl && safeDetectExpirable(targetUrl.toString(), detectExpirable));
   const origin = parseOriginCacheDirectives(upstream);
@@ -513,7 +519,10 @@ function buildBinaryResponseHeaders(
   let cacheControl: string;
   let cdnCacheControl: string;
 
-  if (isExpirable) {
+  if (isGoogleVideoTarget) {
+    cacheControl = 'no-store';
+    cdnCacheControl = 'no-store';
+  } else if (isExpirable) {
     cdnCacheControl = 'no-store';
     if (
       origin.hasNoStore ||

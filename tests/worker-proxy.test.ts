@@ -17,6 +17,8 @@ import {
   getStableSegmentExpiry,
   handleWorkerProxyRequest,
   hasExpirableHlsTokens,
+  isGoogleVideoHost,
+  isGoogleVideoUrl,
   LEARNED_REFERER_TTL_SECONDS,
   resolveUpstreamReferer,
   resolveUpstreamRefererCandidates,
@@ -1256,5 +1258,108 @@ describe('Cloudflare Worker Edge Proxy', () => {
       expect(rPerm2.headers.get('cf-cache-status')).toBe('HIT');
       expect(permFetcher).toHaveBeenCalledTimes(1);
     }
+  });
+
+  it('protege URLs Google Video (/videoplayback) acima de 2.048 chars contra cache e edgeCache no Worker preservando query params e Range', async () => {
+    const now = 1_800_000_000;
+    const exp = 2_000_000_000;
+    const edgeCache = createMemoryEdgeCache();
+    const pending: Promise<unknown>[] = [];
+    const ctx: WorkerExecutionContext = {
+      waitUntil(p) {
+        pending.push(p);
+      },
+    };
+    const mp4Bytes = new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]);
+
+    // Anti-spoofing no Worker e detecção de expire=/lsig= sem falsos positivos
+    expect(isGoogleVideoHost('rr4---sn-example.googlevideo.com')).toBe(true);
+    expect(isGoogleVideoHost('googlevideo.com.exemplo.com')).toBe(false);
+    expect(
+      isGoogleVideoUrl('https://googlevideo.com.exemplo.com/videoplayback?mime=video%2Fmp4')
+    ).toBe(false);
+    expect(
+      hasExpirableHlsTokens('https://cdn.example.com/v.mp4?id=1&ip=198.51.100.1&itag=18&ei=abc')
+    ).toBe(false);
+    expect(
+      hasExpirableHlsTokens('https://cdn.example.com/v.mp4?expire=1900000000&lsig=FAKE_LSIG')
+    ).toBe(true);
+
+    const googleVideoUrl = `https://rr4---sn-example-003.googlevideo.com/videoplayback?expire=${now + 7200}&ei=fake_ei&ip=198.51.100.1&id=o-FAKEID789&itag=18&source=blogger&mime=video%2Fmp4&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Cmime&sig=FAKE_SIG_${'B'.repeat(2400)}&lsig=FAKE_LSIG_777`;
+    expect(googleVideoUrl.length).toBeGreaterThan(2048);
+    expect(googleVideoUrl.length).toBeLessThan(8192);
+
+    const sig = await createWorkerProxySignature(googleVideoUrl, exp, TEST_SECRET);
+    const xsig = await createWorkerExpirableSignature(googleVideoUrl, exp, TEST_SECRET);
+    const workerReqUrl = `https://hikari-media-proxy.workers.dev/api/proxy/stream?url=${encodeURIComponent(googleVideoUrl)}&exp=${exp}&sig=${sig}&ex=1&xsig=${xsig}`;
+
+    const capturedUrls: string[] = [];
+    const capturedCfList: Array<CfRequestInit['cf']> = [];
+    const capturedRanges: Array<string | null> = [];
+
+    const fetcher = vi.fn(async (input: string, init?: CfRequestInit) => {
+      capturedUrls.push(input);
+      capturedCfList.push(init?.cf);
+      const range = new Headers(init?.headers).get('range');
+      capturedRanges.push(range);
+      if (range) {
+        return new Response(mp4Bytes, {
+          status: 206,
+          headers: {
+            'content-type': 'video/mp4',
+            'content-length': String(mp4Bytes.byteLength),
+            'content-range': 'bytes 0-7/1024',
+            'accept-ranges': 'bytes',
+          },
+        });
+      }
+      return new Response(mp4Bytes, {
+        status: 200,
+        headers: {
+          'content-type': 'video/mp4',
+          'cache-control': 'public, max-age=31536000',
+        },
+      });
+    });
+
+    // GET completo -> não entra no edgeCache, cf.cacheEverything=false e Cache-Control: no-store
+    const res1 = await handleWorkerProxyRequest(new Request(workerReqUrl), env, ctx, {
+      fetcher,
+      edgeCache,
+      nowSeconds: () => now,
+    });
+    await Promise.all(pending.splice(0));
+
+    expect(res1.status).toBe(200);
+    expect(capturedUrls[0]).toBe(googleVideoUrl);
+    expect(res1.headers.get('cache-control')).toBe('no-store');
+    expect(res1.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(res1.headers.get('cache-control')).not.toContain('immutable');
+    expect(res1.headers.get('x-hikari-source-expirable')).toBe('1');
+    expect(capturedCfList[0]).toEqual({ cacheEverything: false, cacheTtl: 0 });
+
+    // Segunda requisição GET confirma que nunca houve HIT no edgeCache
+    const res2 = await handleWorkerProxyRequest(new Request(workerReqUrl), env, ctx, {
+      fetcher,
+      edgeCache,
+      nowSeconds: () => now + 5,
+    });
+    expect(res2.status).toBe(200);
+    expect(fetcher).toHaveBeenCalledTimes(2);
+
+    // Requisição com Range -> preserva query params, Range e responde 206 com no-store
+    const resRange = await handleWorkerProxyRequest(
+      new Request(workerReqUrl, { headers: { Range: 'bytes=0-7' } }),
+      env,
+      ctx,
+      { fetcher, edgeCache, nowSeconds: () => now + 10 }
+    );
+    expect(resRange.status).toBe(206);
+    expect(capturedRanges[2]).toBe('bytes=0-7');
+    expect(capturedUrls[2]).toBe(googleVideoUrl);
+    expect(resRange.headers.get('content-range')).toBe('bytes 0-7/1024');
+    expect(resRange.headers.get('cache-control')).toBe('no-store');
+    expect(resRange.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(resRange.headers.get('x-hikari-source-expirable')).toBe('1');
   });
 });

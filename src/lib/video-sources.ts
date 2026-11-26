@@ -8,6 +8,7 @@ export type SourceProvider =
   | 'mux'
   | 'bunny'
   | 'maximaimg'
+  | 'googlevideo'
   | 'iframe';
 
 export interface NormalizedVideoSource {
@@ -32,6 +33,7 @@ export interface UrlValidationResult {
 }
 
 const MAX_URL_LENGTH = 2048;
+export const MAX_VIDEO_SOURCE_URL_LENGTH = 8192;
 
 export const EMBED_PROXIED_HOSTS = [
   'allappinc.com',
@@ -178,7 +180,7 @@ export function normalizeExplicitSourceKind(raw: unknown): ExplicitSourceKind | 
 }
 
 const NAMED_EXPIRABLE_PARAM_RE =
-  /(?:^|[?&#,;,\s"'/~])(expires|exp|token|sig|signature|hash|auth|hmac|hdnea|hdnts|policy|key-pair-id|x-amz-expires|x-amz-date|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-expires|x-goog-date|x-goog-signature|x-goog-credential|bcdn_token)=[^\s"'<>&#,;]+/gi;
+  /(?:^|[?&#,;,\s"'/~])(expires|expire|exp|token|sig|lsig|signature|hash|auth|hmac|hdnea|hdnts|policy|key-pair-id|x-amz-expires|x-amz-date|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-expires|x-goog-date|x-goog-signature|x-goog-credential|bcdn_token)=[^\s"'<>&#,;]+/gi;
 
 const SHORT_QUERY_EXPIRABLE_PARAM_RE = /[?&](e|t)=[^&#\s"'<>]+/gi;
 
@@ -301,7 +303,7 @@ export function extractExpirableTokenRemainingSeconds(
       paramsLower.set(k.toLowerCase(), v);
     }
 
-    for (const key of ['expires', 'exp', 'e', 'x-goog-expires']) {
+    for (const key of ['expire', 'expires', 'exp', 'e', 'x-goog-expires']) {
       const val = paramsLower.get(key);
       if (val) {
         const ts = parseUnixEpochSeconds(val);
@@ -416,9 +418,84 @@ export function validateHttpUrl(
   return { valid: true, normalizedUrl: parsed.toString() };
 }
 
+export function validateVideoSourceUrl(raw: string): UrlValidationResult {
+  return validateHttpUrl(raw, MAX_VIDEO_SOURCE_URL_LENGTH);
+}
+
 export function isMaximaimgHost(hostname: string): boolean {
   const lower = hostname.toLowerCase();
   return lower === 'maximaimg.online' || lower.endsWith('.maximaimg.online');
+}
+
+export function isGoogleVideoHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase().replace(/\.+$/, '');
+  if (!lower) return false;
+  return lower === 'googlevideo.com' || lower.endsWith('.googlevideo.com');
+}
+
+export function isGoogleVideoPlaybackUrl(url: URL): boolean {
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return false;
+  }
+  if (!isGoogleVideoHost(url.hostname)) {
+    return false;
+  }
+  const path = url.pathname.toLowerCase();
+  return path === '/videoplayback' || path.startsWith('/videoplayback/');
+}
+
+export function isGoogleVideoUrl(rawUrl: string): boolean {
+  try {
+    const parsed = new URL(rawUrl.trim());
+    return isGoogleVideoPlaybackUrl(parsed);
+  } catch {
+    return false;
+  }
+}
+
+export interface GoogleVideoSourceInspection {
+  isGoogleVideo: boolean;
+  hasSignedParams: boolean;
+  hasExpireParam: boolean;
+  badgeLabel: string | null;
+  warningMessage: string | null;
+}
+
+export function inspectGoogleVideoSourceUrl(rawUrl: string): GoogleVideoSourceInspection {
+  const trimmed = rawUrl.trim();
+  if (!trimmed || !isGoogleVideoUrl(trimmed)) {
+    return {
+      isGoogleVideo: false,
+      hasSignedParams: false,
+      hasExpireParam: false,
+      badgeLabel: null,
+      warningMessage: null,
+    };
+  }
+
+  let hasSignedParams = false;
+  let hasExpireParam = false;
+  try {
+    const parsed = new URL(trimmed);
+    for (const key of parsed.searchParams.keys()) {
+      const lower = key.toLowerCase();
+      if (lower === 'expire') hasExpireParam = true;
+      if (lower === 'sig' || lower === 'lsig' || lower === 'signature') {
+        hasSignedParams = true;
+      }
+    }
+  } catch {
+    // Ignore parse edge cases
+  }
+
+  return {
+    isGoogleVideo: true,
+    hasSignedParams,
+    hasExpireParam,
+    badgeLabel: 'Google Video · temporário',
+    warningMessage:
+      'URL temporária do Google Video (/videoplayback): contém assinatura/expiração temporária e pode parar de reproduzir após o vencimento.',
+  };
 }
 
 export function isVercelBlobHost(hostname: string): boolean {
@@ -615,19 +692,45 @@ export function parseBunnyEmbedUrl(
   };
 }
 
+function getQueryParamCaseInsensitive(url: URL, name: string): string | null {
+  const target = name.toLowerCase();
+  for (const [k, v] of url.searchParams.entries()) {
+    if (k.toLowerCase() === target) {
+      return v;
+    }
+  }
+  return null;
+}
+
 function detectDirectOrStreamKind(url: URL): 'mp4' | 'webm' | 'hls' | null {
   const path = url.pathname.toLowerCase();
   const fullQuery = url.search.toLowerCase();
+  const mimeParam = (getQueryParamCaseInsensitive(url, 'mime') ?? '').trim().toLowerCase();
 
   if (/\.(m3u8|m3u)($|[?#])/i.test(path) || path.includes('/hls/') || fullQuery.includes('m3u8') || fullQuery.includes('type=hls')) {
     return 'hls';
   }
 
-  if (/\.(mp4|m4v)($|[?#])/i.test(path) || fullQuery.includes('video/mp4') || fullQuery.includes('format=mp4')) {
+  if (
+    /\.(mp4|m4v)($|[?#])/i.test(path) ||
+    mimeParam === 'video/mp4' ||
+    fullQuery.includes('video/mp4') ||
+    fullQuery.includes('video%2fmp4') ||
+    fullQuery.includes('format=mp4') ||
+    (isGoogleVideoPlaybackUrl(url) &&
+      !mimeParam.startsWith('audio/') &&
+      mimeParam !== 'video/webm')
+  ) {
     return 'mp4';
   }
 
-  if (/\.webm($|[?#])/i.test(path) || fullQuery.includes('video/webm') || fullQuery.includes('format=webm')) {
+  if (
+    /\.webm($|[?#])/i.test(path) ||
+    mimeParam === 'video/webm' ||
+    fullQuery.includes('video/webm') ||
+    fullQuery.includes('video%2fwebm') ||
+    fullQuery.includes('format=webm')
+  ) {
     return 'webm';
   }
 
@@ -651,7 +754,7 @@ export function detectSourceKind(
     return explicit;
   }
 
-  const validation = validateHttpUrl(rawUrl);
+  const validation = validateHttpUrl(rawUrl, MAX_VIDEO_SOURCE_URL_LENGTH);
   const candidate = validation.normalizedUrl ?? rawUrl.trim();
   if (!candidate) {
     return 'iframe';
@@ -770,7 +873,7 @@ export function normalizeVideoSource(
   slot: 1 | 2 | 3 | 4 | 5,
   explicitKind?: ExplicitSourceKind | string | null
 ): NormalizedVideoSource | null {
-  const validation = validateHttpUrl(rawUrl);
+  const validation = validateHttpUrl(rawUrl, MAX_VIDEO_SOURCE_URL_LENGTH);
   if (!validation.valid || !validation.normalizedUrl) {
     return null;
   }
@@ -817,6 +920,7 @@ export function normalizeVideoSource(
 
   if (forcedKind === 'hls') {
     const maxima = isMaximaimgHost(host);
+    const googleVideo = isGoogleVideoPlaybackUrl(parsed);
     return {
       slot,
       label,
@@ -827,7 +931,7 @@ export function normalizeVideoSource(
       needsProxy: true,
       requiresServerResolve: false,
       formatLabel: maxima ? 'Maximaimg · HLS' : 'HLS',
-      ...(hasExpirableHlsTokens(normalizedUrl) || isR2StorageHost(host)
+      ...(hasExpirableHlsTokens(normalizedUrl) || isR2StorageHost(host) || googleVideo
         ? { isExpirable: true }
         : {}),
     };
@@ -835,17 +939,26 @@ export function normalizeVideoSource(
 
   if (forcedKind === 'mp4') {
     const maxima = isMaximaimgHost(host);
+    const googleVideo = isGoogleVideoPlaybackUrl(parsed);
+    const expirable =
+      isR2StorageHost(host) ||
+      googleVideo ||
+      hasExpirableHlsTokens(normalizedUrl);
     return {
       slot,
       label,
       rawUrl: normalizedUrl,
       resolvedUrl: normalizedUrl,
       kind: 'mp4',
-      provider: maxima ? 'maximaimg' : 'direct',
+      provider: maxima ? 'maximaimg' : googleVideo ? 'googlevideo' : 'direct',
       needsProxy: true,
       requiresServerResolve: false,
-      formatLabel: maxima ? 'Maximaimg · MP4' : 'MP4',
-      ...(isR2StorageHost(host) ? { isExpirable: true } : {}),
+      formatLabel: maxima
+        ? 'Maximaimg · MP4'
+        : googleVideo
+          ? 'Google Video · MP4'
+          : 'MP4',
+      ...(expirable ? { isExpirable: true } : {}),
     };
   }
 
@@ -942,6 +1055,9 @@ export function normalizeVideoSource(
   if (!isLikelyHtmlPage(parsed)) {
     const mediaKind = detectDirectOrStreamKind(parsed);
     const isR2 = isR2StorageHost(host);
+    const isGoogleVideo = isGoogleVideoPlaybackUrl(parsed);
+    const hasTokens = hasExpirableHlsTokens(normalizedUrl);
+    const expirable = isR2 || isGoogleVideo || hasTokens;
     if (mediaKind === 'mp4') {
       return {
         slot,
@@ -949,11 +1065,11 @@ export function normalizeVideoSource(
         rawUrl: normalizedUrl,
         resolvedUrl: normalizedUrl,
         kind: 'mp4',
-        provider: 'direct',
+        provider: isGoogleVideo ? 'googlevideo' : 'direct',
         needsProxy: true,
         requiresServerResolve: false,
-        formatLabel: 'MP4',
-        ...(isR2 ? { isExpirable: true } : {}),
+        formatLabel: isGoogleVideo ? 'Google Video · MP4' : 'MP4',
+        ...(expirable ? { isExpirable: true } : {}),
       };
     }
     if (mediaKind === 'webm') {
@@ -963,11 +1079,11 @@ export function normalizeVideoSource(
         rawUrl: normalizedUrl,
         resolvedUrl: normalizedUrl,
         kind: 'webm',
-        provider: 'direct',
+        provider: isGoogleVideo ? 'googlevideo' : 'direct',
         needsProxy: true,
         requiresServerResolve: false,
-        formatLabel: 'WebM',
-        ...(isR2 ? { isExpirable: true } : {}),
+        formatLabel: isGoogleVideo ? 'Google Video · WebM' : 'WebM',
+        ...(expirable ? { isExpirable: true } : {}),
       };
     }
     if (mediaKind === 'hls') {
@@ -981,7 +1097,7 @@ export function normalizeVideoSource(
         needsProxy: true,
         requiresServerResolve: false,
         formatLabel: 'HLS',
-        ...(hasExpirableHlsTokens(normalizedUrl) || isR2 ? { isExpirable: true } : {}),
+        ...(expirable ? { isExpirable: true } : {}),
       };
     }
   }

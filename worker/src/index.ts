@@ -81,7 +81,7 @@ function getCorsHeaders(): Record<string, string> {
 }
 
 const NAMED_EXPIRABLE_PARAM_RE =
-  /(?:^|[?&#,;,\s"'/~])(expires|exp|token|sig|signature|hash|auth|hmac|hdnea|hdnts|policy|key-pair-id|x-amz-expires|x-amz-date|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-expires|x-goog-date|x-goog-signature|x-goog-credential|bcdn_token)=[^\s"'<>&#,;]+/gi;
+  /(?:^|[?&#,;,\s"'/~])(expires|expire|exp|token|sig|lsig|signature|hash|auth|hmac|hdnea|hdnts|policy|key-pair-id|x-amz-expires|x-amz-date|x-amz-signature|x-amz-credential|x-amz-security-token|x-goog-expires|x-goog-date|x-goog-signature|x-goog-credential|bcdn_token)=[^\s"'<>&#,;]+/gi;
 
 const SHORT_QUERY_EXPIRABLE_PARAM_RE = /[?&](e|t)=[^&#\s"'<>]+/gi;
 
@@ -169,7 +169,7 @@ function extractExpirableTokenRemainingSecondsWorker(
       paramsLower.set(k.toLowerCase(), v);
     }
 
-    for (const key of ['expires', 'exp', 'e', 'x-goog-expires']) {
+    for (const key of ['expire', 'expires', 'exp', 'e', 'x-goog-expires']) {
       const val = paramsLower.get(key);
       if (val) {
         const ts = parseUnixEpochSeconds(val);
@@ -254,6 +254,33 @@ function isR2StorageUrl(rawUrl: string): boolean {
       return false;
     }
     return isR2StorageHost(parsed.hostname);
+  } catch {
+    return false;
+  }
+}
+
+export function isGoogleVideoHost(hostname: string): boolean {
+  const lower = hostname.toLowerCase().replace(/\.+$/, '');
+  if (!lower) return false;
+  return lower === 'googlevideo.com' || lower.endsWith('.googlevideo.com');
+}
+
+function isGoogleVideoPlaybackUrl(url: URL): boolean {
+  if (url.protocol !== 'http:' && url.protocol !== 'https:') {
+    return false;
+  }
+  if (!isGoogleVideoHost(url.hostname)) {
+    return false;
+  }
+  const path = url.pathname.toLowerCase();
+  return path === '/videoplayback' || path.startsWith('/videoplayback/');
+}
+
+export function isGoogleVideoUrl(rawUrl: string): boolean {
+  if (!rawUrl) return false;
+  try {
+    const parsed = new URL(rawUrl.trim());
+    return isGoogleVideoPlaybackUrl(parsed);
   } catch {
     return false;
   }
@@ -1160,9 +1187,13 @@ function buildBinaryResponseHeaders(
   const isR2Target =
     isR2StorageUrl(sourceTargetUrl ?? '') ||
     Boolean(targetUrl && isR2StorageHost(targetUrl.hostname));
+  const isGoogleVideoTarget =
+    isGoogleVideoUrl(sourceTargetUrl ?? '') ||
+    Boolean(targetUrl && isGoogleVideoPlaybackUrl(targetUrl));
   const isExpirable =
     inheritedExpirable ||
     isR2Target ||
+    isGoogleVideoTarget ||
     Boolean(sourceTargetUrl && safeDetectExpirableWorker(sourceTargetUrl, detectExpirable)) ||
     Boolean(targetUrl && safeDetectExpirableWorker(targetUrl.toString(), detectExpirable));
   const origin = parseOriginCacheDirectivesWorker(upstream);
@@ -1170,7 +1201,11 @@ function buildBinaryResponseHeaders(
   let cacheHeader: string;
   let cdnCacheHeader: string;
 
-  if (isExpirable) {
+  if (isGoogleVideoTarget) {
+    cacheHeader = 'no-store';
+    cdnCacheHeader = 'no-store';
+    outHeaders.set('X-Hikari-Source-Expirable', '1');
+  } else if (isExpirable) {
     cdnCacheHeader = 'no-store';
     if (
       origin.hasNoStore ||
@@ -1626,6 +1661,7 @@ export async function handleWorkerProxyRequest(
   const targetIsExpirable =
     expirableCheck.expirable ||
     isR2StorageUrl(normalizedTargetUrl) ||
+    isGoogleVideoUrl(normalizedTargetUrl) ||
     safeDetectExpirableWorker(normalizedTargetUrl, detectExpirable);
   const rangeHeader = request.headers.get('range');
   const edgeCache = deps.edgeCache !== undefined ? deps.edgeCache : getDefaultEdgeCache();
@@ -1791,6 +1827,7 @@ export async function handleWorkerProxyRequest(
     const binaryExpirable =
       targetIsExpirable ||
       isR2StorageUrl(finalUrl) ||
+      isGoogleVideoUrl(finalUrl) ||
       safeDetectExpirableWorker(finalUrl, detectExpirable);
 
     if (

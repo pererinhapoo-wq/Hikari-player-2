@@ -93,11 +93,14 @@ import {
   EMBED_PROXIED_HOSTS,
   type ExplicitSourceKind,
   getIframeReferrerPolicy,
+  type GoogleVideoSourceInspection,
   hasUrlHashParams,
+  inspectGoogleVideoSourceUrl,
   inspectR2SourceUrl,
   isExpirableHlsSourceUrl,
   isR2StorageUrl,
   isVercelBlobUrl,
+  MAX_VIDEO_SOURCE_URL_LENGTH,
   normalizeVideoSource,
   type R2SourceInspection,
   validateHttpUrl,
@@ -168,6 +171,7 @@ interface EpisodeSourceRow {
   isMirror: boolean;
   isExpirable: boolean;
   r2Inspection: R2SourceInspection;
+  googleVideoInspection: GoogleVideoSourceInspection;
   sourceReferer: string | null;
 }
 
@@ -228,6 +232,9 @@ function getEpisodeSourcesList(ep: EpisodeDto): EpisodeSourceRow[] {
       isMirror,
       isExpirable: !isMirror && isExpirableHlsSourceUrl(trimmed, entry.explicitKind),
       r2Inspection: isMirror ? inspectR2SourceUrl('') : inspectR2SourceUrl(trimmed),
+      googleVideoInspection: isMirror
+        ? inspectGoogleVideoSourceUrl('')
+        : inspectGoogleVideoSourceUrl(trimmed),
       sourceReferer: entry.sourceReferer?.trim() || null,
     });
   }
@@ -534,7 +541,7 @@ function AdminPage() {
   const primarySourceInfo = useMemo(() => {
     const trimmed = form.video_url.trim();
     if (!trimmed) return null;
-    const check = validateHttpUrl(trimmed);
+    const check = validateHttpUrl(trimmed, MAX_VIDEO_SOURCE_URL_LENGTH);
     const normalized = normalizeVideoSource(trimmed, 1, form.source_kind || null);
     const detectedKind = detectSourceKind(trimmed, form.source_kind || null);
     const candidateUrl = check.normalizedUrl ?? trimmed;
@@ -543,6 +550,7 @@ function AdminPage() {
     const isExpirableUrl = isExpirableHlsSourceUrl(candidateUrl, form.source_kind || null);
     const referrerPolicy = getIframeReferrerPolicy(candidateUrl);
     const r2Inspection = inspectR2SourceUrl(candidateUrl);
+    const googleVideoInspection = inspectGoogleVideoSourceUrl(candidateUrl);
     const isR2 = isR2SignedUrl(trimmed);
     const isCleanR2 = r2Inspection.isR2 && !r2Inspection.hasAmzSignature;
     const isUnconfirmed = trimmed.includes('unconfirmed=1') || isR2 || isCleanR2 || isR2StorageUrl(trimmed);
@@ -565,6 +573,7 @@ function AdminPage() {
       detectedPrefix,
       isR2,
       r2Inspection,
+      googleVideoInspection,
       isUnconfirmed,
     };
   }, [form.video_url, form.source_kind]);
@@ -2132,6 +2141,11 @@ function AdminPage() {
                             {primarySourceInfo.r2Inspection.badgeLabel}
                           </span>
                         )}
+                        {primarySourceInfo?.googleVideoInspection.badgeLabel && (
+                          <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-2 py-0.5 rounded-md border border-amber-500/30">
+                            {primarySourceInfo.googleVideoInspection.badgeLabel}
+                          </span>
+                        )}
                         {primarySourceInfo?.detectedKind && (
                           <span className="text-[11px] font-mono text-emerald-300">
                             {primarySourceInfo.detectedKind}
@@ -2139,6 +2153,7 @@ function AdminPage() {
                         )}
                         {(primarySourceInfo?.isExpirableUrl ||
                           primarySourceInfo?.r2Inspection.isR2 ||
+                          primarySourceInfo?.googleVideoInspection.isGoogleVideo ||
                           slotReport?.isExpirable) && (
                           <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-2 py-0.5 rounded-md border border-amber-500/30">
                             fonte expirável
@@ -2279,8 +2294,20 @@ function AdminPage() {
                       </div>
                     )}
 
+                    {primarySourceInfo?.googleVideoInspection.warningMessage && (
+                      <div
+                        role="note"
+                        className="flex items-start gap-2 rounded-xl border border-amber-500/35 bg-amber-950/30 px-3.5 py-2.5 text-xs text-amber-200"
+                      >
+                        <AlertTriangle className="w-4 h-4 text-amber-400 shrink-0 mt-0.5" />
+                        <span>{primarySourceInfo.googleVideoInspection.warningMessage}</span>
+                      </div>
+                    )}
+
                     {(primarySourceInfo?.isExpirableUrl ||
-                      (slotReport?.isExpirable && !primarySourceInfo?.r2Inspection.isR2)) && (
+                      (slotReport?.isExpirable &&
+                        !primarySourceInfo?.r2Inspection.isR2 &&
+                        !primarySourceInfo?.googleVideoInspection.isGoogleVideo)) && (
                       <div
                         role="note"
                         className="flex items-start gap-2 rounded-xl border border-amber-500/35 bg-amber-950/30 px-3.5 py-2.5 text-xs text-amber-200"
@@ -3069,6 +3096,9 @@ function AdminPage() {
                                   const r2Badge = episodeSources.find(
                                     (src) => src.r2Inspection.badgeLabel
                                   )?.r2Inspection.badgeLabel;
+                                  const googleVideoBadge = episodeSources.find(
+                                    (src) => src.googleVideoInspection.badgeLabel
+                                  )?.googleVideoInspection.badgeLabel;
 
                                   return (
                                     <li
@@ -3112,8 +3142,17 @@ function AdminPage() {
                                                 {r2Badge}
                                               </span>
                                             )}
+                                            {googleVideoBadge && (
+                                              <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-[10px] font-medium text-amber-300">
+                                                {googleVideoBadge}
+                                              </span>
+                                            )}
                                             {(hasExpirableSource ||
-                                              episodeSources.some((src) => src.r2Inspection.isR2)) && (
+                                              episodeSources.some(
+                                                (src) =>
+                                                  src.r2Inspection.isR2 ||
+                                                  src.googleVideoInspection.isGoogleVideo
+                                              )) && (
                                               <span className="px-1.5 py-0.5 rounded bg-amber-500/15 border border-amber-500/30 text-[10px] font-medium text-amber-300">
                                                 expirável
                                               </span>
@@ -3350,7 +3389,14 @@ function AdminPage() {
                                                       {src.r2Inspection.badgeLabel}
                                                     </span>
                                                   )}
-                                                  {(slotExpirable || src.r2Inspection.isR2) && (
+                                                  {src.googleVideoInspection.badgeLabel && (
+                                                    <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[10px] font-semibold text-amber-300 shrink-0">
+                                                      {src.googleVideoInspection.badgeLabel}
+                                                    </span>
+                                                  )}
+                                                  {(slotExpirable ||
+                                                    src.r2Inspection.isR2 ||
+                                                    src.googleVideoInspection.isGoogleVideo) && (
                                                     <span className="px-1.5 py-0.5 rounded bg-amber-500/20 border border-amber-500/40 text-[10px] font-semibold text-amber-300 shrink-0">
                                                       expirável
                                                     </span>

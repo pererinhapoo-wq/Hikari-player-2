@@ -74,7 +74,9 @@ import {
   buildIframePlayUrl,
   collectEpisodeSources,
   type ExplicitSourceKind,
+  hasExpirableHlsTokens,
   isDirectMediaUrl,
+  isGoogleVideoUrl,
   isR2StorageUrl,
   isVercelBlobUrl,
 } from '@/lib/video-sources';
@@ -83,9 +85,15 @@ export function resolveProxyPlayUrl(
   targetUrl: string,
   workerBaseEnv = process.env.WORKER_BASE,
   nowSeconds = Math.floor(Date.now() / 1000),
-  customReferer?: string | null
+  customReferer?: string | null,
+  expirable = false
 ): string {
   const cleanRef = typeof customReferer === 'string' ? customReferer.trim() : '';
+  const effectiveExpirable =
+    Boolean(expirable) ||
+    isR2StorageUrl(targetUrl) ||
+    isGoogleVideoUrl(targetUrl) ||
+    hasExpirableHlsTokens(targetUrl);
   const rawBase = workerBaseEnv?.trim();
   if (rawBase) {
     try {
@@ -106,7 +114,7 @@ export function resolveProxyPlayUrl(
           params.set('ref', cleanRef);
           params.set('rsig', createProxyRefererSignature(targetUrl, stableExp, cleanRef));
         }
-        if (isR2StorageUrl(targetUrl)) {
+        if (effectiveExpirable) {
           params.set('ex', '1');
           params.set('xsig', createProxyExpirableSignature(targetUrl, stableExp));
         }
@@ -116,7 +124,14 @@ export function resolveProxyPlayUrl(
       // WORKER_BASE inválida: mantém fallback para /api/proxy/stream na Vercel
     }
   }
-  return buildSignedProxyPath(targetUrl, undefined, nowSeconds, 0, cleanRef || undefined);
+  return buildSignedProxyPath(
+    targetUrl,
+    undefined,
+    nowSeconds,
+    0,
+    cleanRef || undefined,
+    effectiveExpirable
+  );
 }
 
 function trySetResponseHeader(name: string, value: string): void {
@@ -211,7 +226,13 @@ export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
         src.kind === 'iframe'
           ? buildIframePlayUrl(src.resolvedUrl)
           : shouldProxy
-            ? resolveProxyPlayUrl(src.resolvedUrl, undefined, undefined, customRefererForProxy)
+            ? resolveProxyPlayUrl(
+                src.resolvedUrl,
+                undefined,
+                undefined,
+                customRefererForProxy,
+                Boolean(src.isExpirable)
+              )
             : src.resolvedUrl;
       return {
         ...src,

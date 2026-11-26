@@ -25,9 +25,12 @@ import {
   detectSourceKind,
   type ExplicitSourceKind,
   hasExpirableHlsTokens,
+  inspectGoogleVideoSourceUrl,
   inspectR2SourceUrl,
+  isGoogleVideoUrl,
   isR2StorageUrl,
   isVercelBlobUrl,
+  MAX_VIDEO_SOURCE_URL_LENGTH,
   validateHttpUrl,
 } from '@/lib/video-sources';
 import { resolveVideoInputUrl } from '@/lib/r2-resolver';
@@ -389,7 +392,7 @@ async function probeOriginalContentLength(
   } catch {
     // Segue com URL informada se resolução falhar
   }
-  const urlCheck = validateHttpUrl(effective);
+  const urlCheck = validateHttpUrl(effective, MAX_VIDEO_SOURCE_URL_LENGTH);
   if (!urlCheck.valid || !urlCheck.normalizedUrl) {
     return null;
   }
@@ -602,6 +605,19 @@ async function detectExpirableHlsSource(params: {
     };
   }
 
+  const googleVideoCandidate =
+    (isGoogleVideoUrl(params.withHeadersRes.finalUrl ?? '') ? params.withHeadersRes.finalUrl : null) ??
+    (isGoogleVideoUrl(params.noHeadersRes.finalUrl ?? '') ? params.noHeadersRes.finalUrl : null) ??
+    (isGoogleVideoUrl(params.targetUrl) ? params.targetUrl : null);
+
+  if (googleVideoCandidate) {
+    const gvInfo = inspectGoogleVideoSourceUrl(googleVideoCandidate);
+    return {
+      isExpirable: true,
+      expirableReason: gvInfo.warningMessage,
+    };
+  }
+
   const manifestText = params.withHeadersRes.manifestText ?? params.noHeadersRes.manifestText;
   const manifestBaseUrl =
     (params.withHeadersRes.manifestText ? params.withHeadersRes.finalUrl : params.noHeadersRes.finalUrl) ??
@@ -696,7 +712,7 @@ export async function diagnoseVideoSource(
   } catch {
     // let validateHttpUrl handle error if resolution fails
   }
-  const urlCheck = validateHttpUrl(effectiveUrl, 8192);
+  const urlCheck = validateHttpUrl(effectiveUrl, MAX_VIDEO_SOURCE_URL_LENGTH);
   const detectedKind = detectSourceKind(effectiveUrl, input.kind);
 
   if (!urlCheck.valid || !urlCheck.normalizedUrl) {

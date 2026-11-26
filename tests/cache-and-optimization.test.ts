@@ -239,6 +239,71 @@ describe('Assinatura estável (bucket de 6h) e cache do proxy', () => {
     expect(resBlobMp4.headers.get('cache-control')).toBe('public, max-age=31536000, immutable');
     expect(resBlobMp4.headers.get('cdn-cache-control')).toBe('public, max-age=31536000, immutable');
   });
+
+  it('protege URLs Google Video (/videoplayback) acima de 2.048 chars com ex=1/xsig e Cache-Control no-store preservando Range', async () => {
+    const nowSec = 1_800_000_000;
+    const googleVideoUrl = `https://rr3---sn-example-002.googlevideo.com/videoplayback?expire=${nowSec + 7200}&ei=fake_ei&ip=198.51.100.1&id=o-FAKEID456&itag=18&source=blogger&mime=video%2Fmp4&sparams=expire%2Cei%2Cip%2Cid%2Citag%2Csource%2Cmime&sig=FAKE_SIG_${'A'.repeat(2400)}&lsig=FAKE_LSIG_999`;
+    expect(googleVideoUrl.length).toBeGreaterThan(2048);
+    expect(googleVideoUrl.length).toBeLessThan(8192);
+
+    const signedPath = buildSignedProxyPath(googleVideoUrl, undefined, nowSec);
+    const parsedSigned = new URL(`http://localhost${signedPath}`);
+    expect(parsedSigned.searchParams.get('url')).toBe(googleVideoUrl);
+    expect(parsedSigned.searchParams.get('ex')).toBe('1');
+    expect(parsedSigned.searchParams.get('xsig')).toBeTruthy();
+
+    const workerUrl = new URL(
+      resolveProxyPlayUrl(
+        googleVideoUrl,
+        'https://proxy.example.workers.dev',
+        nowSec,
+        null,
+        true
+      )
+    );
+    expect(workerUrl.searchParams.get('ex')).toBe('1');
+    expect(workerUrl.searchParams.get('xsig')).toBeTruthy();
+
+    const mp4Bytes = new Uint8Array([0x00, 0x00, 0x00, 0x18, 0x66, 0x74, 0x79, 0x70]);
+    let capturedUpstreamUrl = '';
+    let capturedRange: string | null = null;
+
+    const res = await handleProxyStreamRequest(
+      new Request(`http://localhost${signedPath}`, {
+        headers: { Range: 'bytes=0-7' },
+      }),
+      {
+        nowSeconds: () => nowSec,
+        fetchWithRedirects: async (url, init) => {
+          capturedUpstreamUrl = url;
+          capturedRange = new Headers(init?.headers).get('range');
+          return {
+            finalUrl: url,
+            response: new Response(mp4Bytes, {
+              status: 206,
+              headers: {
+                'content-type': 'video/mp4',
+                'content-length': '8',
+                'content-range': 'bytes 0-7/1024',
+                'accept-ranges': 'bytes',
+                'cache-control': 'private, max-age=21600',
+              },
+            }),
+          };
+        },
+      }
+    );
+
+    expect(res.status).toBe(206);
+    expect(capturedUpstreamUrl).toBe(googleVideoUrl);
+    expect(capturedRange).toBe('bytes=0-7');
+    expect(res.headers.get('content-range')).toBe('bytes 0-7/1024');
+    expect(res.headers.get('cache-control')).toBe('no-store');
+    expect(res.headers.get('cdn-cache-control')).toBe('no-store');
+    expect(res.headers.get('cache-control')).not.toContain('immutable');
+    expect(res.headers.get('cache-control')).not.toContain('31536000');
+    expect(res.headers.get('x-hikari-source-expirable')).toBe('1');
+  });
 });
 
 describe('Cache das rotas de página e otimização de imagens/JS', () => {

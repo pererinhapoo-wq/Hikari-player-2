@@ -15,6 +15,7 @@ import {
   type ExplicitSourceKind,
   isDirectMediaUrl,
   isVercelBlobUrl,
+  MAX_VIDEO_SOURCE_URL_LENGTH,
   normalizeExplicitSourceKind,
   validateHttpUrl,
 } from '@/lib/video-sources';
@@ -146,7 +147,7 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
     throw new Error(`Imagem de capa inválida: ${posterCheck.error}`);
   }
 
-  const primaryCheck = validateHttpUrl(input.video_url ?? '');
+  const primaryCheck = validateHttpUrl(input.video_url ?? '', MAX_VIDEO_SOURCE_URL_LENGTH);
   if (!primaryCheck.valid || !primaryCheck.normalizedUrl) {
     throw new Error(`Player 1 inválido: ${primaryCheck.error}`);
   }
@@ -169,7 +170,7 @@ export function sanitizeEpisodeInput(input: EpisodeWriteInput): EpisodeWriteInpu
       sanitizedOptional[key] = null;
       continue;
     }
-    const check = validateHttpUrl(raw);
+    const check = validateHttpUrl(raw, MAX_VIDEO_SOURCE_URL_LENGTH);
     if (!check.valid || !check.normalizedUrl) {
       throw new Error(`${label} inválido: ${check.error}`);
     }

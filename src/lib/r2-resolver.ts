@@ -4,6 +4,7 @@ import {
   hasR2SignedQueryParams,
   isEmbedAllowedFinalHost,
   isR2StorageHost,
+  MAX_VIDEO_SOURCE_URL_LENGTH,
   validateHttpUrl,
 } from '@/lib/video-sources';
 
@@ -280,7 +281,7 @@ export async function resolveVideoInputUrl(
     };
   }
 
-  const check = validateHttpUrl(trimmed);
+  const check = validateHttpUrl(trimmed, MAX_VIDEO_SOURCE_URL_LENGTH);
   if (!check.valid || !check.normalizedUrl) {
     throw new Error(check.error ?? 'URL inválida.');
   }
@@ -934,7 +935,7 @@ export async function attemptControlledR2Resolution(
       });
 
       if (validation.valid && validation.detectedKind) {
-        const finalHttpCheck = validateHttpUrl(finalUrl);
+        const finalHttpCheck = validateHttpUrl(finalUrl, MAX_VIDEO_SOURCE_URL_LENGTH);
         if (!finalHttpCheck.valid || !finalHttpCheck.normalizedUrl) {
           continue;
         }
