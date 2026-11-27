@@ -87,6 +87,7 @@ import type {
   SourceTestReport,
 } from '@/lib/types';
 import {
+  AVAILABLE_QUALITIES,
   classifyEmbedHost,
   detectSourceKind,
   EMBED_DIRECT_HOSTS,
@@ -136,9 +137,26 @@ interface SinglePlayerFormState {
   opening_end: string;
   poster_url: string;
   video_url: string;
+  quality: string;
   source_kind: ExplicitSourceKind | '';
   source_referer: string;
   force_proxy: boolean;
+  video_url_2: string;
+  quality_2: string;
+  source_kind_2: ExplicitSourceKind | '';
+  source_referer_2: string;
+  video_url_3: string;
+  quality_3: string;
+  source_kind_3: ExplicitSourceKind | '';
+  source_referer_3: string;
+  video_url_4: string;
+  quality_4: string;
+  source_kind_4: ExplicitSourceKind | '';
+  source_referer_4: string;
+  video_url_5: string;
+  quality_5: string;
+  source_kind_5: ExplicitSourceKind | '';
+  source_referer_5: string;
 }
 
 const EMPTY_FORM: SinglePlayerFormState = {
@@ -149,9 +167,26 @@ const EMPTY_FORM: SinglePlayerFormState = {
   opening_end: '',
   poster_url: '',
   video_url: '',
+  quality: '1080p',
   source_kind: '',
   source_referer: '',
   force_proxy: true,
+  video_url_2: '',
+  quality_2: '720p',
+  source_kind_2: '',
+  source_referer_2: '',
+  video_url_3: '',
+  quality_3: '480p',
+  source_kind_3: '',
+  source_referer_3: '',
+  video_url_4: '',
+  quality_4: '360p',
+  source_kind_4: '',
+  source_referer_4: '',
+  video_url_5: '',
+  quality_5: '240p',
+  source_kind_5: '',
+  source_referer_5: '',
 };
 
 function formatDatePtBr(iso: string): string {
@@ -303,10 +338,11 @@ function AdminPage() {
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<AnimeSortMode>('recent');
 
-  // Form modal/panel state (single player only)
+  // Form modal/panel state (multi-source with manual quality selection)
   const [formOpen, setFormOpen] = useState(false);
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<SinglePlayerFormState>(EMPTY_FORM);
+  const [visibleExtraSlots, setVisibleExtraSlots] = useState<Array<2 | 3 | 4 | 5>>([]);
   const [formError, setFormError] = useState<string | null>(null);
   const [saveBusy, setSaveBusy] = useState(false);
   const [posterPreviewError, setPosterPreviewError] = useState(false);
@@ -580,6 +616,65 @@ function AdminPage() {
     };
   }, [form.video_url, form.source_kind]);
 
+  const formSourcesSummary = useMemo(() => {
+    const slotDefs: Array<{
+      slot: 1 | 2 | 3 | 4 | 5;
+      url: string;
+      quality: string;
+      kind: ExplicitSourceKind | '';
+    }> = [
+      { slot: 1, url: form.video_url, quality: form.quality, kind: form.source_kind },
+      { slot: 2, url: form.video_url_2, quality: form.quality_2, kind: form.source_kind_2 },
+      { slot: 3, url: form.video_url_3, quality: form.quality_3, kind: form.source_kind_3 },
+      { slot: 4, url: form.video_url_4, quality: form.quality_4, kind: form.source_kind_4 },
+      { slot: 5, url: form.video_url_5, quality: form.quality_5, kind: form.source_kind_5 },
+    ];
+
+    let validCount = 0;
+    let extraValidCount = 0;
+    const invalidSlots: Array<{ slot: 1 | 2 | 3 | 4 | 5; error: string }> = [];
+
+    for (const item of slotDefs) {
+      const trimmed = item.url.trim();
+      if (!trimmed) continue;
+      const check = validateHttpUrl(trimmed, MAX_VIDEO_SOURCE_URL_LENGTH);
+      if (check.valid) {
+        validCount += 1;
+        if (item.slot !== 1) {
+          extraValidCount += 1;
+        }
+      } else {
+        invalidSlots.push({
+          slot: item.slot,
+          error: check.error ?? 'URL inválida.',
+        });
+      }
+    }
+
+    return {
+      validCount,
+      extraValidCount,
+      invalidSlots,
+      qualityMenuEnabled: validCount >= 2,
+    };
+  }, [
+    form.video_url,
+    form.quality,
+    form.source_kind,
+    form.video_url_2,
+    form.quality_2,
+    form.source_kind_2,
+    form.video_url_3,
+    form.quality_3,
+    form.source_kind_3,
+    form.video_url_4,
+    form.quality_4,
+    form.source_kind_4,
+    form.video_url_5,
+    form.quality_5,
+    form.source_kind_5,
+  ]);
+
   const copyLink = async (id: string, url: string) => {
     try {
       await navigator.clipboard.writeText(url);
@@ -616,6 +711,7 @@ function AdminPage() {
     setFormOpen(false);
     setEditingId(null);
     setForm(EMPTY_FORM);
+    setVisibleExtraSlots([]);
     resetFormTestState();
     setExpandedGroups({});
     setPendingFocusGroupKey(null);
@@ -674,6 +770,7 @@ function AdminPage() {
       ...EMPTY_FORM,
       anime_name: prefillAnimeName ?? '',
     });
+    setVisibleExtraSlots([]);
     resetFormTestState();
     setOpenMenuId(null);
     setConfirmDeleteId(null);
@@ -691,10 +788,33 @@ function AdminPage() {
       opening_end: formatOpeningTimestamp(ep.opening_end_seconds),
       poster_url: ep.poster_url,
       video_url: ep.video_url,
+      quality: ep.quality ?? '1080p',
       source_kind: ep.source_kind ?? '',
       source_referer: ep.source_referer ?? '',
       force_proxy: ep.force_proxy !== false,
+      video_url_2: ep.video_url_2 ?? '',
+      quality_2: ep.quality_2 ?? '720p',
+      source_kind_2: ep.source_kind_2 ?? '',
+      source_referer_2: ep.source_referer_2 ?? '',
+      video_url_3: ep.video_url_3 ?? '',
+      quality_3: ep.quality_3 ?? '480p',
+      source_kind_3: ep.source_kind_3 ?? '',
+      source_referer_3: ep.source_referer_3 ?? '',
+      video_url_4: ep.video_url_4 ?? '',
+      quality_4: ep.quality_4 ?? '360p',
+      source_kind_4: ep.source_kind_4 ?? '',
+      source_referer_4: ep.source_referer_4 ?? '',
+      video_url_5: ep.video_url_5 ?? '',
+      quality_5: ep.quality_5 ?? '240p',
+      source_kind_5: ep.source_kind_5 ?? '',
+      source_referer_5: ep.source_referer_5 ?? '',
     });
+    const extraSlots: Array<2 | 3 | 4 | 5> = [];
+    if (ep.video_url_2?.trim()) extraSlots.push(2);
+    if (ep.video_url_3?.trim()) extraSlots.push(3);
+    if (ep.video_url_4?.trim()) extraSlots.push(4);
+    if (ep.video_url_5?.trim()) extraSlots.push(5);
+    setVisibleExtraSlots(extraSlots);
     resetFormTestState();
     setOpenMenuId(null);
     setConfirmDeleteId(null);
@@ -706,7 +826,33 @@ function AdminPage() {
     setFormOpen(false);
     setEditingId(null);
     setForm(EMPTY_FORM);
+    setVisibleExtraSlots([]);
     resetFormTestState();
+  };
+
+  const handleAddExtraSource = () => {
+    const nextSlot = ([2, 3, 4, 5] as const).find(
+      (slot) => !visibleExtraSlots.includes(slot)
+    );
+    if (!nextSlot) return;
+    setVisibleExtraSlots((prev) => [...prev, nextSlot].sort((a, b) => a - b));
+  };
+
+  const handleRemoveExtraSource = (slot: 2 | 3 | 4 | 5) => {
+    setForm((prev) => {
+      if (slot === 2) {
+        return { ...prev, video_url_2: '', quality_2: '720p', source_kind_2: '', source_referer_2: '' };
+      }
+      if (slot === 3) {
+        return { ...prev, video_url_3: '', quality_3: '480p', source_kind_3: '', source_referer_3: '' };
+      }
+      if (slot === 4) {
+        return { ...prev, video_url_4: '', quality_4: '360p', source_kind_4: '', source_referer_4: '' };
+      }
+      return { ...prev, video_url_5: '', quality_5: '240p', source_kind_5: '', source_referer_5: '' };
+    });
+    setVisibleExtraSlots((prev) => prev.filter((item) => item !== slot));
+    setFormError(null);
   };
 
   const handleClearPrimarySource = () => {
@@ -989,7 +1135,14 @@ function AdminPage() {
     e.preventDefault();
     setFormError(null);
 
-    if (!form.video_url.trim() && !editingHasFallbackSources) {
+    if (formSourcesSummary.invalidSlots.length > 0) {
+      const firstInvalid = formSourcesSummary.invalidSlots[0];
+      const slotName = firstInvalid.slot === 1 ? 'Player 1' : `Fonte ${firstInvalid.slot}`;
+      setFormError(`${slotName}: ${firstInvalid.error}`);
+      return;
+    }
+
+    if (formSourcesSummary.validCount === 0 && !editingHasFallbackSources) {
       setFormError(
         'Informe a URL do Player 1 ou mantenha pelo menos uma outra fonte válida no episódio.'
       );
@@ -1046,9 +1199,26 @@ function AdminPage() {
         title: form.title.trim(),
         poster_url: resolvedPosterUrl,
         video_url: form.video_url.trim(),
+        quality: form.video_url.trim() ? form.quality || '1080p' : null,
         source_kind: form.source_kind,
         source_referer: form.source_referer.trim() || null,
         force_proxy: form.force_proxy,
+        video_url_2: form.video_url_2.trim() || null,
+        quality_2: form.video_url_2.trim() ? form.quality_2 || '720p' : null,
+        source_kind_2: form.source_kind_2,
+        source_referer_2: form.source_referer_2.trim() || null,
+        video_url_3: form.video_url_3.trim() || null,
+        quality_3: form.video_url_3.trim() ? form.quality_3 || '480p' : null,
+        source_kind_3: form.source_kind_3,
+        source_referer_3: form.source_referer_3.trim() || null,
+        video_url_4: form.video_url_4.trim() || null,
+        quality_4: form.video_url_4.trim() ? form.quality_4 || '360p' : null,
+        source_kind_4: form.source_kind_4,
+        source_referer_4: form.source_referer_4.trim() || null,
+        video_url_5: form.video_url_5.trim() || null,
+        quality_5: form.video_url_5.trim() ? form.quality_5 || '240p' : null,
+        source_kind_5: form.source_kind_5,
+        source_referer_5: form.source_referer_5.trim() || null,
       };
 
       if (editingId) {
@@ -1069,6 +1239,7 @@ function AdminPage() {
         setPendingFocusGroupKey(targetKey);
         setEditingId(null);
         setForm(EMPTY_FORM);
+        setVisibleExtraSlots([]);
         setFormOpen(false);
       } else {
         const res = await adminCreateEpisodeFn({ data: payload });
@@ -1085,6 +1256,7 @@ function AdminPage() {
         setExpandedGroups((prev) => ({ ...prev, [targetKey]: true }));
         setPendingFocusGroupKey(targetKey);
         setForm(EMPTY_FORM);
+        setVisibleExtraSlots([]);
         setFormOpen(false);
       }
       resetFormTestState();
@@ -2156,119 +2328,279 @@ function AdminPage() {
                     </p>
                   </div>
 
-                  {/* Section 3: Single Video Source: Player 1 only */}
-                  <div className="pt-5 border-t border-white/[0.08] space-y-3">
-                    <div className="flex flex-col sm:flex-row sm:items-center sm:justify-between gap-2">
-                      <label
-                        htmlFor="ep-video_url"
-                        className="text-xs font-semibold uppercase tracking-wider text-slate-400"
-                      >
-                        Fonte de vídeo (Player 1)
-                      </label>
-
-                      <div className="flex flex-wrap items-center gap-1.5">
-                        {primarySourceInfo?.isUnconfirmed ? (
-                          <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-2 py-0.5 rounded-md border border-amber-500/30">
-                            prefixo não confirmado
-                          </span>
-                        ) : primarySourceInfo?.detectedPrefix ? (
-                          <span className="text-[11px] font-mono text-cyan-300">
-                            Prefixo: {primarySourceInfo.detectedPrefix}
-                          </span>
-                        ) : null}
-                        {primarySourceInfo?.isR2 && !primarySourceInfo?.trimmed.includes('unconfirmed=1') && (
-                          <span
-                            className="text-[11px] font-mono text-amber-300"
-                            title="URL assinada do R2: prefixo verificado por tentativa ao salvar/testar"
-                          >
-                            R2 Signed URL (tentativa automática)
-                          </span>
-                        )}
-                        {primarySourceInfo?.r2Inspection.status === 'r2_unsigned' && (
-                          <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-2 py-0.5 rounded-md border border-amber-500/30">
-                            {primarySourceInfo.r2Inspection.badgeLabel}
-                          </span>
-                        )}
-                        {primarySourceInfo?.googleVideoInspection.badgeLabel && (
-                          <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-2 py-0.5 rounded-md border border-amber-500/30">
-                            {primarySourceInfo.googleVideoInspection.badgeLabel}
-                          </span>
-                        )}
-                        {primarySourceInfo?.detectedKind && (
-                          <span className="text-[11px] font-mono text-emerald-300">
-                            {primarySourceInfo.detectedKind}
-                          </span>
-                        )}
-                        {(primarySourceInfo?.isExpirableUrl ||
-                          primarySourceInfo?.r2Inspection.isR2 ||
-                          primarySourceInfo?.googleVideoInspection.isGoogleVideo ||
-                          slotReport?.isExpirable) && (
-                          <span className="text-[11px] font-mono text-amber-300 bg-amber-950/40 px-2 py-0.5 rounded-md border border-amber-500/30">
-                            fonte expirável
-                          </span>
-                        )}
-                        {primarySourceInfo?.normalized ? (
-                          <span className="text-[11px] font-mono text-slate-400">
-                            {primarySourceInfo.normalized.formatLabel}
-                          </span>
-                        ) : primarySourceInfo?.check && !primarySourceInfo.check.valid ? (
-                          <span className="text-[11px] text-rose-400">URL inválida</span>
-                        ) : null}
-                      </div>
+                  {/* Section 3: Video Sources & Qualities */}
+                  <div className="pt-5 border-t border-white/[0.08] space-y-4">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">
+                        Fontes de vídeo e qualidades
+                      </span>
+                      <span className="text-[11px] font-mono text-slate-400">
+                        {formSourcesSummary.validCount} fonte(s) válida(s) ·{' '}
+                        {formSourcesSummary.qualityMenuEnabled
+                          ? 'Qualidade ativa no player'
+                          : 'Qualidade oculta no player'}
+                      </span>
                     </div>
 
-                    <div className="flex flex-col sm:flex-row items-stretch sm:items-center gap-2.5">
-                      <input
-                        id="ep-video_url"
-                        type="url"
-                        required={!editingHasFallbackSources}
-                        value={form.video_url}
-                        onChange={(e) => {
-                          setForm({ ...form, video_url: e.target.value });
-                          if (r2ResolveResult || r2ResolveError || r2AppliedNotice) {
-                            setR2ResolveResult(null);
-                            setR2ResolveError(null);
-                            setR2AppliedNotice(null);
-                          }
-                        }}
-                        placeholder={
-                          editingHasFallbackSources
-                            ? 'Player 1 vazio (usando outra fonte salva do episódio)'
-                            : 'https://.../playerricas.php?... ou https://.../index.m3u8'
-                        }
-                        className="flex-1 min-w-0 h-11 px-3.5 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 transition-colors"
-                      />
-                      <select
-                        id="ep-source_kind"
-                        aria-label="Tipo de fonte do Player 1"
-                        value={form.source_kind}
-                        onChange={(e) =>
-                          setForm({
-                            ...form,
-                            source_kind: e.target.value as ExplicitSourceKind | '',
-                          })
-                        }
-                        className="h-11 sm:w-28 px-3 rounded-xl bg-[#090B10] border border-white/15 hover:border-white/25 text-xs font-mono text-slate-200 focus:outline-none focus:border-rose-500 focus:ring-2 focus:ring-rose-500/20 shrink-0 transition-colors"
-                      >
-                        <option value="">auto</option>
-                        <option value="iframe">iframe</option>
-                        <option value="hls">hls</option>
-                        <option value="mp4">mp4</option>
-                      </select>
-                      {form.video_url.trim().length > 0 && (
-                        <button
-                          type="button"
-                          onClick={handleClearPrimarySource}
-                          title="Remover a URL e os metadados exclusivos do Player 1"
-                          aria-label="Remover fonte do Player 1"
-                          className="h-11 px-3 rounded-xl border border-rose-500/35 bg-rose-950/25 hover:bg-rose-950/55 text-xs font-medium text-rose-200 inline-flex items-center justify-center gap-1.5 shrink-0 cursor-pointer whitespace-nowrap transition-colors"
+                    {/* Slot 1 (Principal) */}
+                    <div className="space-y-2 p-3.5 rounded-xl bg-[#090B10] border border-white/10">
+                      <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-medium text-slate-300">
+                        <div className="flex flex-wrap items-center gap-1.5">
+                          <span>Player 1 (Principal)</span>
+                          {primarySourceInfo?.normalized && (
+                            <span className="px-1.5 py-0.5 rounded bg-white/[0.06] text-[10px] font-mono text-slate-300">
+                              {primarySourceInfo.normalized.formatLabel}
+                            </span>
+                          )}
+                          {primarySourceInfo?.r2Inspection.isR2 && (
+                            <span
+                              className={`px-1.5 py-0.5 rounded border text-[10px] font-mono ${
+                                primarySourceInfo.r2Inspection.status === 'r2_unsigned'
+                                  ? 'border-amber-500/40 bg-amber-950/50 text-amber-300'
+                                  : 'border-amber-500/30 bg-amber-950/30 text-amber-200'
+                              }`}
+                            >
+                              {primarySourceInfo.r2Inspection.badgeLabel}
+                            </span>
+                          )}
+                          {primarySourceInfo?.googleVideoInspection.isGoogleVideo && (
+                            <span className="px-1.5 py-0.5 rounded border border-amber-500/35 bg-amber-950/40 text-[10px] font-mono text-amber-200">
+                              {primarySourceInfo.googleVideoInspection.badgeLabel}
+                            </span>
+                          )}
+                          {primarySourceInfo?.hasHashParams && (
+                            <span className="px-1.5 py-0.5 rounded border border-amber-500/35 bg-amber-950/40 text-[10px] font-mono text-amber-200">
+                              link com hash
+                            </span>
+                          )}
+                          {primarySourceInfo?.isExpirableUrl &&
+                            !primarySourceInfo.r2Inspection.isR2 &&
+                            !primarySourceInfo.googleVideoInspection.isGoogleVideo && (
+                              <span className="px-1.5 py-0.5 rounded border border-amber-500/35 bg-amber-950/40 text-[10px] font-mono text-amber-200">
+                                expirável
+                              </span>
+                            )}
+                        </div>
+                        {editingId &&
+                          form.video_url.trim() &&
+                          (editingHasFallbackSources || formSourcesSummary.extraValidCount > 0) && (
+                            <button
+                              type="button"
+                              onClick={handleClearPrimarySource}
+                              className="text-[11px] text-rose-400 hover:text-rose-300 cursor-pointer"
+                            >
+                              Remover fonte
+                            </button>
+                          )}
+                      </div>
+                      <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                        <input
+                          type="url"
+                          required={!editingHasFallbackSources && formSourcesSummary.extraValidCount === 0}
+                          value={form.video_url}
+                          onChange={(e) => {
+                            setForm({ ...form, video_url: e.target.value });
+                            if (r2ResolveResult || r2ResolveError || r2AppliedNotice) {
+                              setR2ResolveResult(null);
+                              setR2ResolveError(null);
+                              setR2AppliedNotice(null);
+                            }
+                          }}
+                          placeholder="https://... (URL da fonte principal)"
+                          className="sm:col-span-7 h-10 px-3 rounded-lg bg-[#11151E] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-500/20"
+                        />
+                        <select
+                          aria-label="Qualidade do Player 1"
+                          value={form.quality}
+                          onChange={(e) => setForm({ ...form, quality: e.target.value })}
+                          className="sm:col-span-2 h-10 px-2.5 rounded-lg bg-[#11151E] border border-white/15 text-xs font-mono text-slate-200 focus:outline-none focus:border-rose-500"
                         >
-                          <Trash2 className="w-3.5 h-3.5" />
-                          <span>Remover fonte</span>
-                        </button>
+                          {AVAILABLE_QUALITIES.map((q) => (
+                            <option key={q} value={q}>
+                              {q}
+                            </option>
+                          ))}
+                        </select>
+                        <select
+                          aria-label="Tipo de fonte do Player 1"
+                          value={form.source_kind}
+                          onChange={(e) =>
+                            setForm({
+                              ...form,
+                              source_kind: e.target.value as ExplicitSourceKind | '',
+                            })
+                          }
+                          className="sm:col-span-3 h-10 px-2.5 rounded-lg bg-[#11151E] border border-white/15 text-xs font-mono text-slate-200 focus:outline-none focus:border-rose-500"
+                        >
+                          <option value="">auto</option>
+                          <option value="iframe">iframe</option>
+                          <option value="hls">hls</option>
+                          <option value="mp4">mp4</option>
+                        </select>
+                      </div>
+                      {primarySourceInfo && !primarySourceInfo.check.valid && (
+                        <p className="text-xs text-rose-400" role="alert">
+                          {primarySourceInfo.check.error}
+                        </p>
                       )}
                     </div>
 
+                    {/* Dynamic Additional Sources (Slots 2..5) */}
+                    {visibleExtraSlots.map((slot) => {
+                      const url =
+                        slot === 2
+                          ? form.video_url_2
+                          : slot === 3
+                            ? form.video_url_3
+                            : slot === 4
+                              ? form.video_url_4
+                              : form.video_url_5;
+                      const quality =
+                        slot === 2
+                          ? form.quality_2
+                          : slot === 3
+                            ? form.quality_3
+                            : slot === 4
+                              ? form.quality_4
+                              : form.quality_5;
+                      const sourceKind =
+                        slot === 2
+                          ? form.source_kind_2
+                          : slot === 3
+                            ? form.source_kind_3
+                            : slot === 4
+                              ? form.source_kind_4
+                              : form.source_kind_5;
+
+                      const trimmed = url.trim();
+                      const check = trimmed
+                        ? validateHttpUrl(trimmed, MAX_VIDEO_SOURCE_URL_LENGTH)
+                        : null;
+                      const normalizedSlot =
+                        trimmed && check?.valid
+                          ? normalizeVideoSource(trimmed, slot, sourceKind || null)
+                          : null;
+                      const isBlob = trimmed ? isVercelBlobUrl(trimmed) : false;
+
+                      const updateSlotUrl = (val: string) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          ...(slot === 2
+                            ? { video_url_2: val }
+                            : slot === 3
+                              ? { video_url_3: val }
+                              : slot === 4
+                                ? { video_url_4: val }
+                                : { video_url_5: val }),
+                        }));
+
+                      const updateSlotQuality = (val: string) =>
+                        setForm((prev) => ({
+                          ...prev,
+                          ...(slot === 2
+                            ? { quality_2: val }
+                            : slot === 3
+                              ? { quality_3: val }
+                              : slot === 4
+                                ? { quality_4: val }
+                                : { quality_5: val }),
+                        }));
+
+                      const updateSlotKind = (val: ExplicitSourceKind | '') =>
+                        setForm((prev) => ({
+                          ...prev,
+                          ...(slot === 2
+                            ? { source_kind_2: val }
+                            : slot === 3
+                              ? { source_kind_3: val }
+                              : slot === 4
+                                ? { source_kind_4: val }
+                                : { source_kind_5: val }),
+                        }));
+
+                      return (
+                        <div
+                          key={slot}
+                          className="space-y-2 p-3.5 rounded-xl bg-[#090B10] border border-white/10"
+                        >
+                          <div className="flex flex-wrap items-center justify-between gap-2 text-xs font-medium text-slate-300">
+                            <div className="flex flex-wrap items-center gap-1.5">
+                              <span>Fonte {slot}</span>
+                              {normalizedSlot && (
+                                <span className="px-1.5 py-0.5 rounded bg-white/[0.06] text-[10px] font-mono text-slate-300">
+                                  {normalizedSlot.formatLabel}
+                                </span>
+                              )}
+                              {isBlob && (
+                                <span className="px-1.5 py-0.5 rounded border border-emerald-500/35 bg-emerald-950/35 text-[10px] font-mono text-emerald-300">
+                                  Espelho Vercel Blob
+                                </span>
+                              )}
+                            </div>
+                            <button
+                              type="button"
+                              onClick={() => handleRemoveExtraSource(slot)}
+                              className="text-[11px] text-rose-400 hover:text-rose-300 cursor-pointer"
+                            >
+                              Remover fonte
+                            </button>
+                          </div>
+                          <div className="grid grid-cols-1 sm:grid-cols-12 gap-2">
+                            <input
+                              type="url"
+                              value={url}
+                              onChange={(e) => updateSlotUrl(e.target.value)}
+                              placeholder={`https://... (URL da Fonte ${slot})`}
+                              className="sm:col-span-7 h-10 px-3 rounded-lg bg-[#11151E] border border-white/15 text-xs font-mono text-white placeholder:text-slate-500 focus:outline-none focus:border-rose-500 focus:ring-1 focus:ring-rose-500/20"
+                            />
+                            <select
+                              aria-label={`Qualidade da Fonte ${slot}`}
+                              value={quality}
+                              onChange={(e) => updateSlotQuality(e.target.value)}
+                              className="sm:col-span-2 h-10 px-2.5 rounded-lg bg-[#11151E] border border-white/15 text-xs font-mono text-slate-200 focus:outline-none focus:border-rose-500"
+                            >
+                              {AVAILABLE_QUALITIES.map((q) => (
+                                <option key={q} value={q}>
+                                  {q}
+                                </option>
+                              ))}
+                            </select>
+                            <select
+                              aria-label={`Tipo da Fonte ${slot}`}
+                              value={sourceKind}
+                              onChange={(e) =>
+                                updateSlotKind(e.target.value as ExplicitSourceKind | '')
+                              }
+                              className="sm:col-span-3 h-10 px-2.5 rounded-lg bg-[#11151E] border border-white/15 text-xs font-mono text-slate-200 focus:outline-none focus:border-rose-500"
+                            >
+                              <option value="">auto</option>
+                              <option value="iframe">iframe</option>
+                              <option value="hls">hls</option>
+                              <option value="mp4">mp4</option>
+                            </select>
+                          </div>
+                          {check && !check.valid && (
+                            <p className="text-xs text-rose-400" role="alert">
+                              {check.error}
+                            </p>
+                          )}
+                        </div>
+                      );
+                    })}
+
+                    {visibleExtraSlots.length < 4 && (
+                      <div>
+                        <button
+                          type="button"
+                          onClick={handleAddExtraSource}
+                          className="min-h-[38px] sm:h-9 px-3.5 rounded-xl border border-dashed border-white/20 bg-white/[0.02] hover:bg-white/[0.06] text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer transition-colors"
+                        >
+                          <Plus className="w-3.5 h-3.5 text-rose-400" />
+                          Adicionar fonte ({visibleExtraSlots.length + 1}/5)
+                        </button>
+                      </div>
+                    )}
+                  
                     {editingId && !form.video_url.trim() && editingHasFallbackSources && (
                       <div
                         role="status"

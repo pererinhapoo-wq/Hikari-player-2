@@ -11,6 +11,18 @@ export type SourceProvider =
   | 'googlevideo'
   | 'iframe';
 
+export const AVAILABLE_QUALITIES = ['1080p', '720p', '480p', '360p', '240p'] as const;
+export type VideoQuality = (typeof AVAILABLE_QUALITIES)[number];
+
+export function normalizeQuality(raw: unknown, defaultQuality: string): string {
+  if (typeof raw === 'string') {
+    const trimmed = raw.trim().toLowerCase();
+    const found = AVAILABLE_QUALITIES.find((q) => q.toLowerCase() === trimmed);
+    if (found) return found;
+  }
+  return defaultQuality;
+}
+
 export interface NormalizedVideoSource {
   slot: 1 | 2 | 3 | 4 | 5;
   label: string;
@@ -22,6 +34,7 @@ export interface NormalizedVideoSource {
   needsProxy: boolean;
   requiresServerResolve: boolean;
   formatLabel: string;
+  quality?: string;
   isMirror?: boolean;
   isExpirable?: boolean;
 }
@@ -1123,6 +1136,11 @@ export interface EpisodeUrlsInput {
   video_url_3?: string | null;
   video_url_4?: string | null;
   video_url_5?: string | null;
+  quality?: string | null;
+  quality_2?: string | null;
+  quality_3?: string | null;
+  quality_4?: string | null;
+  quality_5?: string | null;
   source_kind?: ExplicitSourceKind | string | null;
   source_kind_2?: ExplicitSourceKind | string | null;
   source_kind_3?: ExplicitSourceKind | string | null;
@@ -1152,13 +1170,15 @@ export function collectEpisodeSources(episode: EpisodeUrlsInput): NormalizedVide
     slot: 1 | 2 | 3 | 4 | 5;
     url: string | null | undefined;
     kind: ExplicitSourceKind | string | null | undefined;
+    quality: string | null | undefined;
+    defaultQuality: string;
     isMirror: boolean;
   }> = [
-    { slot: 1, url: episode.video_url, kind: episode.source_kind, isMirror: Boolean(episode.is_mirror) },
-    { slot: 2, url: episode.video_url_2, kind: episode.source_kind_2, isMirror: Boolean(episode.is_mirror_2) },
-    { slot: 3, url: episode.video_url_3, kind: episode.source_kind_3, isMirror: Boolean(episode.is_mirror_3) },
-    { slot: 4, url: episode.video_url_4, kind: episode.source_kind_4, isMirror: Boolean(episode.is_mirror_4) },
-    { slot: 5, url: episode.video_url_5, kind: episode.source_kind_5, isMirror: Boolean(episode.is_mirror_5) },
+    { slot: 1, url: episode.video_url, kind: episode.source_kind, quality: episode.quality, defaultQuality: '1080p', isMirror: Boolean(episode.is_mirror) },
+    { slot: 2, url: episode.video_url_2, kind: episode.source_kind_2, quality: episode.quality_2, defaultQuality: '720p', isMirror: Boolean(episode.is_mirror_2) },
+    { slot: 3, url: episode.video_url_3, kind: episode.source_kind_3, quality: episode.quality_3, defaultQuality: '480p', isMirror: Boolean(episode.is_mirror_3) },
+    { slot: 4, url: episode.video_url_4, kind: episode.source_kind_4, quality: episode.quality_4, defaultQuality: '360p', isMirror: Boolean(episode.is_mirror_4) },
+    { slot: 5, url: episode.video_url_5, kind: episode.source_kind_5, quality: episode.quality_5, defaultQuality: '240p', isMirror: Boolean(episode.is_mirror_5) },
   ];
 
   const sources: NormalizedVideoSource[] = [];
@@ -1172,8 +1192,10 @@ export function collectEpisodeSources(episode: EpisodeUrlsInput): NormalizedVide
           isDirectMediaUrl(normalized.resolvedUrl) ||
           isVercelBlobUrl(normalized.resolvedUrl)
       );
+      const quality = normalizeQuality(item.quality, item.defaultQuality);
       sources.push({
         ...normalized,
+        quality,
         ...(isMirror ? { isMirror: true, needsProxy: false } : {}),
       });
     }
@@ -1305,5 +1327,84 @@ export function getNextFallbackSourceIndex(
     }
   }
   return null;
+}
+
+export interface PlayableQualitySourceLike {
+  slot: 1 | 2 | 3 | 4 | 5;
+  rawUrl?: string | null;
+  resolvedUrl?: string | null;
+  playUrl?: string | null;
+  quality?: string | null;
+}
+
+export function isValidPlayableSource(
+  source: PlayableQualitySourceLike | null | undefined
+): boolean {
+  if (!source) return false;
+  const urlCandidate = (source.rawUrl || source.resolvedUrl || '').trim();
+  if (urlCandidate) {
+    return validateVideoSourceUrl(urlCandidate).valid;
+  }
+  const playCandidate = (source.playUrl || '').trim();
+  if (!playCandidate) return false;
+  if (playCandidate.startsWith('/api/')) return true;
+  return validateVideoSourceUrl(playCandidate).valid;
+}
+
+export function getValidPlayableSources<T extends PlayableQualitySourceLike>(
+  sources: readonly T[]
+): T[] {
+  return sources.filter((src) => isValidPlayableSource(src));
+}
+
+export function shouldShowQualitySelector(
+  sources: readonly PlayableQualitySourceLike[]
+): boolean {
+  return getValidPlayableSources(sources).length >= 2;
+}
+
+export function getAvailableQualities(
+  sources: readonly PlayableQualitySourceLike[]
+): string[] {
+  const valid = getValidPlayableSources(sources);
+  if (valid.length < 2) {
+    return [];
+  }
+
+  const foundSet = new Set<string>();
+  for (const src of valid) {
+    if (typeof src.quality !== 'string') continue;
+    const trimmed = src.quality.trim().toLowerCase();
+    const matched = AVAILABLE_QUALITIES.find((q) => q.toLowerCase() === trimmed);
+    if (matched) {
+      foundSet.add(matched);
+    }
+  }
+
+  return AVAILABLE_QUALITIES.filter((q) => foundSet.has(q));
+}
+
+export function findSourceIndexForQuality(
+  sources: readonly PlayableQualitySourceLike[],
+  quality: string,
+  failedSlots?: ReadonlySet<number>
+): number {
+  const target = quality.trim().toLowerCase();
+  if (!target) return -1;
+
+  let fallbackIndex = -1;
+  for (let i = 0; i < sources.length; i++) {
+    const src = sources[i];
+    if (!isValidPlayableSource(src)) continue;
+    if ((src.quality ?? '').trim().toLowerCase() !== target) continue;
+
+    if (!failedSlots || !failedSlots.has(src.slot)) {
+      return i;
+    }
+    if (fallbackIndex === -1) {
+      fallbackIndex = i;
+    }
+  }
+  return fallbackIndex;
 }
 

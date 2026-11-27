@@ -2,6 +2,7 @@ import type { ExplicitSourceKind, NormalizedVideoSource } from '@/lib/video-sour
 
 export interface PlayableSource extends NormalizedVideoSource {
   playUrl: string;
+  quality?: string;
 }
 
 export interface EpisodeDto {
@@ -17,6 +18,11 @@ export interface EpisodeDto {
   video_url_3: string | null;
   video_url_4: string | null;
   video_url_5: string | null;
+  quality?: string | null;
+  quality_2?: string | null;
+  quality_3?: string | null;
+  quality_4?: string | null;
+  quality_5?: string | null;
   source_kind: ExplicitSourceKind | null;
   source_kind_2: ExplicitSourceKind | null;
   source_kind_3: ExplicitSourceKind | null;
@@ -67,6 +73,11 @@ export interface EpisodeFormPayload {
   video_url_3?: string | null;
   video_url_4?: string | null;
   video_url_5?: string | null;
+  quality?: string | null;
+  quality_2?: string | null;
+  quality_3?: string | null;
+  quality_4?: string | null;
+  quality_5?: string | null;
   source_kind?: ExplicitSourceKind | '' | null;
   source_kind_2?: ExplicitSourceKind | '' | null;
   source_kind_3?: ExplicitSourceKind | '' | null;
