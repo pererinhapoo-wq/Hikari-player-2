@@ -82,6 +82,30 @@ export function formatEpisodeIdentification(ep: {
   return parts.length > 0 ? parts.join(' · ') : 'Episódio';
 }
 
+const DUBBED_SUFFIX = 'Dublado';
+const HAS_DUBBED_WORD_RE = /\bdublado\b/i;
+
+export function buildDubbedEpisodeTitle(ep: {
+  anime_name?: string | null;
+  episode_number?: string | null;
+  title?: string | null;
+}): string {
+  const rawTitle =
+    typeof ep.title === 'string' ? ep.title.trim().replace(/\s+/g, ' ') : '';
+  const base = rawTitle || formatEpisodeDisplayTitle(ep);
+
+  if (HAS_DUBBED_WORD_RE.test(base)) {
+    return base.slice(0, 200).trim();
+  }
+
+  const suffix = ` ${DUBBED_SUFFIX}`;
+  const maxBaseLen = 200 - suffix.length;
+  const trimmedBase =
+    base.length > maxBaseLen ? base.slice(0, maxBaseLen).trimEnd() : base;
+
+  return `${trimmedBase}${suffix}`;
+}
+
 function extractEpisodeNumericValue(raw: string): number | null {
   const direct = Number(raw.replace(',', '.'));
   if (Number.isFinite(direct)) return direct;

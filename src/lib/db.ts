@@ -1,6 +1,10 @@
 import crypto from 'node:crypto';
 import { neon } from '@neondatabase/serverless';
-import { sanitizeAnimeName, sanitizeEpisodeNumber } from '@/lib/anime-library';
+import {
+  buildDubbedEpisodeTitle,
+  sanitizeAnimeName,
+  sanitizeEpisodeNumber,
+} from '@/lib/anime-library';
 import { validateOpeningSecondsPair } from '@/lib/opening-skip';
 import type {
   DatabaseDiagnosisCode,
@@ -120,6 +124,7 @@ export function generateEpisodeId(length = 21): string {
 
 export interface SanitizeEpisodeOptions {
   hasPersistedFallbackSources?: boolean;
+  allowEmptyAllSources?: boolean;
 }
 
 export function sanitizeEpisodeInput(
@@ -185,7 +190,10 @@ export function sanitizeEpisodeInput(
       sanitizedOptional.video_url_4 ||
       sanitizedOptional.video_url_5
   );
-  const allowEmptyPrimary = hasOtherInputSources || Boolean(options.hasPersistedFallbackSources);
+  const allowEmptyPrimary =
+    hasOtherInputSources ||
+    Boolean(options.hasPersistedFallbackSources) ||
+    Boolean(options.allowEmptyAllSources);
 
   const rawPrimaryUrl = typeof input.video_url === 'string' ? input.video_url.trim() : '';
   let normalizedPrimaryUrl = '';
@@ -519,14 +527,16 @@ function assertOpeningFieldsPersisted(
   }
 }
 
-export async function createEpisode(
-  rawInput: EpisodeWriteInput,
-  sqlOverride?: DiagnosticSqlTag
+function isUniqueViolationError(err: unknown): boolean {
+  const code = (err as { code?: unknown } | null)?.code;
+  return code === '23505';
+}
+
+async function insertEpisodeRecord(
+  id: string,
+  input: EpisodeWriteInput,
+  sql: DiagnosticSqlTag
 ): Promise<PlayerEpisode> {
-  const resolvedRaw = await resolveEpisodeInputUrls(rawInput);
-  const input = sanitizeEpisodeInput(resolvedRaw);
-  const id = generateEpisodeId();
-  const sql = sqlOverride ?? (getSql() as unknown as DiagnosticSqlTag);
   const hasOpeningTimes =
     input.opening_start_seconds !== null &&
     input.opening_start_seconds !== undefined &&
@@ -811,6 +821,118 @@ export async function createEpisode(
       }
     }
   }
+}
+
+export async function createEpisode(
+  rawInput: EpisodeWriteInput,
+  sqlOverride?: DiagnosticSqlTag
+): Promise<PlayerEpisode> {
+  const resolvedRaw = await resolveEpisodeInputUrls(rawInput);
+  const input = sanitizeEpisodeInput(resolvedRaw);
+  const id = generateEpisodeId();
+  const sql = sqlOverride ?? (getSql() as unknown as DiagnosticSqlTag);
+  return await insertEpisodeRecord(id, input, sql);
+}
+
+export function buildDubbedEpisodeInput(original: PlayerEpisode): EpisodeWriteInput {
+  const animeName = sanitizeAnimeName(original.anime_name);
+  const episodeNumber = sanitizeEpisodeNumber(original.episode_number);
+  const title = buildDubbedEpisodeTitle({
+    anime_name: animeName,
+    episode_number: episodeNumber,
+    title: original.title,
+  });
+  const openingRange = validateOpeningSecondsPair(
+    original.opening_start_seconds,
+    original.opening_end_seconds
+  );
+
+  return {
+    anime_name: animeName,
+    episode_number: episodeNumber,
+    opening_start_seconds: openingRange.opening_start_seconds,
+    opening_end_seconds: openingRange.opening_end_seconds,
+    title,
+    poster_url: original.poster_url,
+    video_url: '',
+    video_url_2: null,
+    video_url_3: null,
+    video_url_4: null,
+    video_url_5: null,
+    source_kind: null,
+    source_kind_2: null,
+    source_kind_3: null,
+    source_kind_4: null,
+    source_kind_5: null,
+    force_proxy: original.force_proxy !== false,
+    force_proxy_2: true,
+    force_proxy_3: true,
+    force_proxy_4: true,
+    force_proxy_5: true,
+    source_referer: null,
+    source_referer_2: null,
+    source_referer_3: null,
+    source_referer_4: null,
+    source_referer_5: null,
+  };
+}
+
+async function generateUniqueEpisodeId(
+  excludedIds: ReadonlySet<string>,
+  sql: DiagnosticSqlTag
+): Promise<string> {
+  const maxAttempts = 10;
+  for (let attempt = 0; attempt < maxAttempts; attempt++) {
+    const candidateId = generateEpisodeId();
+    if (excludedIds.has(candidateId)) {
+      continue;
+    }
+    const existing = await getEpisodeById(candidateId, sql);
+    if (!existing) {
+      return candidateId;
+    }
+  }
+  throw new Error('Não foi possível gerar um ID exclusivo para o episódio duplicado.');
+}
+
+export async function duplicateEpisodeToDubbed(
+  sourceId: string,
+  sqlOverride?: DiagnosticSqlTag
+): Promise<PlayerEpisode> {
+  const cleanSourceId = typeof sourceId === 'string' ? sourceId.trim() : '';
+  if (!cleanSourceId || cleanSourceId.length > 64 || !/^[A-Za-z0-9_-]+$/.test(cleanSourceId)) {
+    throw new Error('ID do episódio original inválido.');
+  }
+
+  const sql = sqlOverride ?? (getSql() as unknown as DiagnosticSqlTag);
+  const original = await getEpisodeById(cleanSourceId, sql);
+  if (!original) {
+    throw new Error('Episódio original não encontrado.');
+  }
+
+  const dubbedRaw = buildDubbedEpisodeInput(original);
+  const sanitizedInput = sanitizeEpisodeInput(dubbedRaw, {
+    allowEmptyAllSources: true,
+  });
+
+  const excludedIds = new Set<string>([original.id]);
+  const maxInsertAttempts = 3;
+
+  for (let attempt = 0; attempt < maxInsertAttempts; attempt++) {
+    const newId = await generateUniqueEpisodeId(excludedIds, sql);
+    excludedIds.add(newId);
+
+    try {
+      return await insertEpisodeRecord(newId, sanitizedInput, sql);
+    } catch (err) {
+      if (isUniqueViolationError(err) && attempt < maxInsertAttempts - 1) {
+        continue;
+      }
+      throw err;
+    }
+  }
+
+  throw new Error('Não foi possível criar a versão dublada com um ID exclusivo.');
 }
 
 async function resolveEpisodeInputUrls(rawInput: EpisodeWriteInput): Promise<EpisodeWriteInput> {

@@ -11,6 +11,7 @@ import {
   ChevronsDownUp,
   ChevronsUpDown,
   Copy,
+  CopyPlus,
   Database,
   Download,
   ExternalLink,
@@ -70,6 +71,7 @@ import {
   adminCreateEpisodeFn,
   adminDeleteEpisodeFn,
   adminDiagnoseDatabaseFn,
+  adminDuplicateEpisodeFn,
   adminLoginFn,
   adminLogoutFn,
   adminProcessBatchItemFn,
@@ -338,7 +340,13 @@ function AdminPage() {
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deleteBusyId, setDeleteBusyId] = useState<string | null>(null);
+  const [duplicatingEpisodeId, setDuplicatingEpisodeId] = useState<string | null>(null);
+  const [duplicatedNotice, setDuplicatedNotice] = useState<{
+    newId: string;
+    sourceTitle: string;
+  } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
+  const duplicateLockRef = useRef(false);
 
   // Source diagnostics (form Player 1 + episode list)
   const [slotTesting, setSlotTesting] = useState(false);
@@ -616,6 +624,7 @@ function AdminPage() {
     setFormOpen(false);
     setEditingId(null);
     setForm(EMPTY_FORM);
+    setDuplicatedNotice(null);
     resetFormTestState();
     setExpandedGroups({});
     setPendingFocusGroupKey(null);
@@ -670,6 +679,7 @@ function AdminPage() {
 
   const handleOpenCreateForm = (prefillAnimeName?: string) => {
     setEditingId(null);
+    setDuplicatedNotice(null);
     setForm({
       ...EMPTY_FORM,
       anime_name: prefillAnimeName ?? '',
@@ -683,6 +693,7 @@ function AdminPage() {
 
   const handleEditStart = (ep: EpisodeDto) => {
     setEditingId(ep.id);
+    setDuplicatedNotice(null);
     setForm({
       anime_name: ep.anime_name ?? '',
       episode_number: ep.episode_number ?? '',
@@ -705,6 +716,7 @@ function AdminPage() {
   const handleCloseForm = () => {
     setFormOpen(false);
     setEditingId(null);
+    setDuplicatedNotice(null);
     setForm(EMPTY_FORM);
     resetFormTestState();
   };
@@ -1072,6 +1084,7 @@ function AdminPage() {
         setExpandedGroups((prev) => ({ ...prev, [targetKey]: true }));
         setPendingFocusGroupKey(targetKey);
         setEditingId(null);
+        setDuplicatedNotice(null);
         setForm(EMPTY_FORM);
         setFormOpen(false);
       } else {
@@ -1116,6 +1129,47 @@ function AdminPage() {
       }
     } finally {
       setDeleteBusyId(null);
+    }
+  };
+
+  const handleDuplicateToDubbed = async (ep: EpisodeDto) => {
+    if (duplicateLockRef.current || duplicatingEpisodeId !== null) return;
+    duplicateLockRef.current = true;
+    setDuplicatingEpisodeId(ep.id);
+    setActionError(null);
+    setFormError(null);
+    setOpenMenuId(null);
+    setConfirmDeleteId(null);
+
+    try {
+      const res = await adminDuplicateEpisodeFn({ data: { sourceId: ep.id } });
+      if (!res.ok) {
+        setActionError(res.error);
+        if (formOpen) {
+          setFormError(res.error);
+        }
+        return;
+      }
+
+      const targetKey = normalizeAnimeKey(res.episode.anime_name);
+      setExpandedGroups((prev) => ({ ...prev, [targetKey]: true }));
+      setPendingFocusGroupKey(targetKey);
+      handleEditStart(res.episode);
+      setDuplicatedNotice({
+        newId: res.episode.id,
+        sourceTitle: formatEpisodeIdentification(ep),
+      });
+      await router.invalidate().catch(() => undefined);
+    } catch (err) {
+      const message =
+        err instanceof Error ? err.message : 'Erro ao duplicar episódio para dublado.';
+      setActionError(message);
+      if (formOpen) {
+        setFormError(message);
+      }
+    } finally {
+      duplicateLockRef.current = false;
+      setDuplicatingEpisodeId(null);
     }
   };
 
@@ -2025,7 +2079,43 @@ function AdminPage() {
                       )}
                     </div>
                   </div>
+
+                  {editingId && editingEpisode && (
+                    <button
+                      type="button"
+                      disabled={
+                        duplicatingEpisodeId !== null ||
+                        saveBusy ||
+                        !initialState.databaseConfigured
+                      }
+                      onClick={() => void handleDuplicateToDubbed(editingEpisode)}
+                      className="min-h-[40px] sm:h-9 px-3.5 rounded-xl border border-white/15 bg-white/[0.04] hover:bg-white/[0.09] disabled:opacity-50 text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer shrink-0 whitespace-nowrap transition-colors"
+                    >
+                      {duplicatingEpisodeId === editingEpisode.id ? (
+                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                      ) : (
+                        <CopyPlus className="w-3.5 h-3.5 text-rose-400" />
+                      )}
+                      <span>
+                        {duplicatingEpisodeId === editingEpisode.id
+                          ? 'Duplicando...'
+                          : 'Duplicar para dublado'}
+                      </span>
+                    </button>
+                  )}
                 </div>
+
+                {duplicatedNotice && editingId === duplicatedNotice.newId && (
+                  <div
+                    role="status"
+                    className="rounded-xl border border-emerald-500/30 bg-emerald-950/30 px-3.5 py-2.5 text-xs text-emerald-200 leading-relaxed"
+                  >
+                    Versão dublada criada a partir de “{duplicatedNotice.sourceTitle}” com o novo
+                    ID exclusivo <code className="font-mono text-emerald-100">{duplicatedNotice.newId}</code>.
+                    O episódio original permanece intacto. Insira o link do vídeo dublado no
+                    Player 1 e clique em Salvar alterações.
+                  </div>
+                )}
 
                 <form onSubmit={handleSaveEpisode} className="space-y-6">
                   {/* Section 1: Episode Identification */}
@@ -3372,7 +3462,7 @@ function AdminPage() {
                                               <div
                                                 role="menu"
                                                 aria-label={`Ações de ${epLabel}`}
-                                                className="absolute right-0 top-full mt-1.5 z-30 w-48 rounded-xl bg-[#0D1018] border border-white/15 shadow-xl py-1"
+                                                className="absolute right-0 top-full mt-1.5 z-30 w-56 rounded-xl bg-[#0D1018] border border-white/15 shadow-xl py-1"
                                               >
                                                 <button
                                                   type="button"
@@ -3382,6 +3472,26 @@ function AdminPage() {
                                                 >
                                                   <Pencil className="w-3.5 h-3.5 text-slate-400" />
                                                   Editar
+                                                </button>
+
+                                                <button
+                                                  type="button"
+                                                  role="menuitem"
+                                                  disabled={
+                                                    duplicatingEpisodeId !== null ||
+                                                    !initialState.databaseConfigured
+                                                  }
+                                                  onClick={() => void handleDuplicateToDubbed(ep)}
+                                                  className="w-full px-3.5 py-2.5 text-left text-xs font-medium text-slate-200 hover:bg-white/5 disabled:opacity-50 inline-flex items-center gap-2.5 cursor-pointer"
+                                                >
+                                                  {duplicatingEpisodeId === ep.id ? (
+                                                    <Loader2 className="w-3.5 h-3.5 text-rose-400 animate-spin" />
+                                                  ) : (
+                                                    <CopyPlus className="w-3.5 h-3.5 text-rose-400" />
+                                                  )}
+                                                  {duplicatingEpisodeId === ep.id
+                                                    ? 'Duplicando...'
+                                                    : 'Duplicar para dublado'}
                                                 </button>
 
                                                 <button

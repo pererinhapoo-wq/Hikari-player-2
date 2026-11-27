@@ -36,6 +36,7 @@ import {
   DatabaseNotConfiguredError,
   deleteEpisode,
   diagnoseDatabaseConnection,
+  duplicateEpisodeToDubbed,
   getEpisodeById,
   isDatabaseConfigured,
   listEpisodes,
@@ -453,6 +454,28 @@ export const adminDeleteEpisodeFn = createServerFn({ method: 'POST' })
       };
     }
   });
+
+export const adminDuplicateEpisodeFn = createServerFn({ method: 'POST' })
+  .validator((data: { sourceId: string }) => ({
+    sourceId: typeof data?.sourceId === 'string' ? data.sourceId : '',
+  }))
+  .handler(
+    async ({
+      data,
+    }): Promise<{ ok: true; episode: EpisodeDto } | { ok: false; error: string }> => {
+      try {
+        requireAdminSession();
+        const duplicated = await duplicateEpisodeToDubbed(data.sourceId);
+        return { ok: true, episode: toEpisodeDto(duplicated) };
+      } catch (err) {
+        return {
+          ok: false,
+          error:
+            err instanceof Error ? err.message : 'Falha ao duplicar episódio para dublado.',
+        };
+      }
+    }
+  );
 
 export const adminDiagnoseDatabaseFn = createServerFn({ method: 'POST' }).handler(
   async (): Promise<
