@@ -250,6 +250,49 @@ function isPassthroughUriScheme(trimmedUri: string): boolean {
   );
 }
 
+const AUTH_PARAM_NAMES = new Set([
+  'token',
+  'expires',
+  'expire',
+  'exp',
+  'sig',
+  'lsig',
+  'signature',
+  'hash',
+  'auth',
+  'hmac',
+  'hdnea',
+  'hdnts',
+  'policy',
+  'key-pair-id',
+  'bcdn_token',
+  'e',
+  't',
+]);
+
+function resolveHlsResourceUrl(rawUri: string, baseUrl: string): string {
+  const trimmed = rawUri.trim();
+  if (!trimmed || isPassthroughUriScheme(trimmed)) {
+    return rawUri;
+  }
+  const baseObj = new URL(baseUrl);
+  const resolved = new URL(trimmed, baseObj);
+
+  for (const [key, value] of baseObj.searchParams.entries()) {
+    const lowerKey = key.toLowerCase();
+    const isAuthParam =
+      AUTH_PARAM_NAMES.has(lowerKey) ||
+      lowerKey.startsWith('x-amz-') ||
+      lowerKey.startsWith('x-goog-');
+
+    if (isAuthParam && !resolved.searchParams.has(key)) {
+      resolved.searchParams.set(key, value);
+    }
+  }
+
+  return resolved.toString();
+}
+
 function resolveAndSignUri(
   rawUri: string,
   baseUrl: string,
@@ -259,8 +302,8 @@ function resolveAndSignUri(
   if (!trimmed || isPassthroughUriScheme(trimmed)) {
     return rawUri;
   }
-  const absolute = new URL(trimmed, baseUrl).toString();
-  return signFn(absolute);
+  const resolvedUrl = resolveHlsResourceUrl(trimmed, baseUrl);
+  return signFn(resolvedUrl);
 }
 
 export function rewriteM3u8Playlist(
@@ -338,7 +381,7 @@ export function extractHlsVariantUrls(playlistContent: string, baseUrl: string):
         const rawUri = (match?.[2] ?? match?.[3] ?? '').trim();
         if (rawUri && !isPassthroughUriScheme(rawUri)) {
           try {
-            const abs = new URL(rawUri, baseUrl).toString();
+            const abs = resolveHlsResourceUrl(rawUri, baseUrl);
             if (!seen.has(abs)) {
               seen.add(abs);
               urls.push(abs);
@@ -355,7 +398,7 @@ export function extractHlsVariantUrls(playlistContent: string, baseUrl: string):
       expectVariantLine = false;
       if (!isPassthroughUriScheme(trimmed)) {
         try {
-          const abs = new URL(trimmed, baseUrl).toString();
+          const abs = resolveHlsResourceUrl(trimmed, baseUrl);
           if (!seen.has(abs)) {
             seen.add(abs);
             urls.push(abs);

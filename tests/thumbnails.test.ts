@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 import type { PlayerEpisode } from '@/lib/db';
-import { buildSignedProxyPath } from '@/lib/proxy-signing';
+import { buildSignedProxyPath, rewriteM3u8Playlist } from '@/lib/proxy-signing';
 import { handleProxyStreamRequest } from '@/lib/stream-proxy';
 import {
   buildThumbnailTimestamps,
@@ -610,5 +610,48 @@ describe('M3U8 / HLS thumbnail resolution, proxy handling & error classification
     expect(buildThumbnailTimestamps(Number.POSITIVE_INFINITY)).toEqual([]);
     expect(buildThumbnailTimestamps(-5)).toEqual([]);
   });
+
+  it('propagates token and expires authentication parameters to relative HLS segments and secondary playlists without overwriting resource-specific parameters', async () => {
+    const bunnyHlsUrl = 'https://vz-abc.b-cdn.net/12345/playlist.m3u8?token=secret123&expires=1800000000';
+    const playlistContent = [
+      '#EXTM3U',
+      '#EXT-X-STREAM-INF:BANDWIDTH=1000000',
+      '720p/index.m3u8',
+      '#EXT-X-MAP:URI="init.mp4"',
+      'segment_0.ts',
+      'segment_1.ts?token=customToken456',
+    ].join('\n');
+
+    const rewritten = rewriteM3u8Playlist(playlistContent, bunnyHlsUrl, (resolved) => {
+      return resolved;
+    });
+
+    expect(rewritten).toContain('720p/index.m3u8?token=secret123&expires=1800000000');
+    expect(rewritten).toContain('init.mp4?token=secret123&expires=1800000000');
+    expect(rewritten).toContain('segment_0.ts?token=secret123&expires=1800000000');
+    // Should preserve resource-specific custom token and NOT overwrite it with secret123
+    expect(rewritten).toContain('segment_1.ts?token=customToken456&expires=1800000000');
+  });
+
+  it('handles public HLS streams without token/expires successfully and leaves MP4 and Vercel Blob unaffected', async () => {
+    const publicHls = 'https://cdn.example.com/public/stream.m3u8';
+    const plan = await resolveThumbnailSourceForAdmin(
+      { videoUrl: publicHls },
+      { signProxyUrl: (u) => `/proxy?u=${encodeURIComponent(u)}` }
+    );
+    expect(plan.ok).toBe(true);
+    expect(plan.mode).toBe('hls');
+    expect(plan.sourceUrl).toBe(publicHls);
+
+    const blobUrl = 'https://q70piqtcusyiwtbz.public.blob.vercel-storage.com/mirrors/ep.mp4';
+    const blobPlan = await resolveThumbnailSourceForAdmin(
+      { videoUrl: blobUrl, sourceKind: 'mp4' },
+      { signProxyUrl: (u) => `/proxy?u=${encodeURIComponent(u)}` }
+    );
+    expect(blobPlan.ok).toBe(true);
+    expect(blobPlan.mode).toBe('direct');
+    expect(blobPlan.sourceKind).toBe('mp4');
+  });
 });
+
 
