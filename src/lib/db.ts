@@ -11,7 +11,6 @@ import type {
 } from '@/lib/types';
 import { planEpisodeSlotInsertion } from '@/lib/batch-import';
 import {
-  AVAILABLE_QUALITIES,
   deriveKindFromExtension,
   type ExplicitSourceKind,
   isDirectMediaUrl,
@@ -21,13 +20,6 @@ import {
   validateHttpUrl,
 } from '@/lib/video-sources';
 import { resolveVideoInputUrl } from '@/lib/r2-resolver';
-
-export function sanitizeQuality(raw: unknown): string | null {
-  if (typeof raw !== 'string') return null;
-  const trimmed = raw.trim().toLowerCase();
-  const found = AVAILABLE_QUALITIES.find((q) => q.toLowerCase() === trimmed);
-  return found ?? null;
-}
 
 export interface PlayerEpisode {
   id: string;
@@ -42,11 +34,6 @@ export interface PlayerEpisode {
   video_url_3: string | null;
   video_url_4: string | null;
   video_url_5: string | null;
-  quality?: string | null;
-  quality_2?: string | null;
-  quality_3?: string | null;
-  quality_4?: string | null;
-  quality_5?: string | null;
   source_kind: ExplicitSourceKind | null;
   source_kind_2: ExplicitSourceKind | null;
   source_kind_3: ExplicitSourceKind | null;
@@ -83,11 +70,6 @@ export interface EpisodeWriteInput {
   video_url_3?: string | null;
   video_url_4?: string | null;
   video_url_5?: string | null;
-  quality?: string | null;
-  quality_2?: string | null;
-  quality_3?: string | null;
-  quality_4?: string | null;
-  quality_5?: string | null;
   source_kind?: ExplicitSourceKind | '' | null;
   source_kind_2?: ExplicitSourceKind | '' | null;
   source_kind_3?: ExplicitSourceKind | '' | null;
@@ -300,33 +282,6 @@ export function sanitizeEpisodeInput(
     source_referer_3: resolveSlotReferer(sanitizedOptional.video_url_3, input.source_referer_3),
     source_referer_4: resolveSlotReferer(sanitizedOptional.video_url_4, input.source_referer_4),
     source_referer_5: resolveSlotReferer(sanitizedOptional.video_url_5, input.source_referer_5),
-    quality: primaryCleared
-      ? null
-      : (input.quality === undefined ? undefined : sanitizeQuality(input.quality)),
-    quality_2:
-      sanitizedOptional.video_url_2 === undefined
-        ? undefined
-        : sanitizedOptional.video_url_2
-          ? sanitizeQuality(input.quality_2)
-          : null,
-    quality_3:
-      sanitizedOptional.video_url_3 === undefined
-        ? undefined
-        : sanitizedOptional.video_url_3
-          ? sanitizeQuality(input.quality_3)
-          : null,
-    quality_4:
-      sanitizedOptional.video_url_4 === undefined
-        ? undefined
-        : sanitizedOptional.video_url_4
-          ? sanitizeQuality(input.quality_4)
-          : null,
-    quality_5:
-      sanitizedOptional.video_url_5 === undefined
-        ? undefined
-        : sanitizedOptional.video_url_5
-          ? sanitizeQuality(input.quality_5)
-          : null,
   };
 }
 
@@ -357,11 +312,6 @@ function mapEpisodeRow(row: Record<string, unknown>): PlayerEpisode {
     video_url_3: row.video_url_3 ? String(row.video_url_3) : null,
     video_url_4: row.video_url_4 ? String(row.video_url_4) : null,
     video_url_5: row.video_url_5 ? String(row.video_url_5) : null,
-    quality: normalizeOptionalText(row.quality),
-    quality_2: normalizeOptionalText(row.quality_2),
-    quality_3: normalizeOptionalText(row.quality_3),
-    quality_4: normalizeOptionalText(row.quality_4),
-    quality_5: normalizeOptionalText(row.quality_5),
     source_kind: normalizeExplicitSourceKind(row.source_kind),
     source_kind_2: normalizeExplicitSourceKind(row.source_kind_2),
     source_kind_3: normalizeExplicitSourceKind(row.source_kind_3),
@@ -394,7 +344,6 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
       SELECT id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
              title, poster_url,
              video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-             quality, quality_2, quality_3, quality_4, quality_5,
              source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
              COALESCE(force_proxy, true) AS force_proxy,
              COALESCE(force_proxy_2, true) AS force_proxy_2,
@@ -435,11 +384,6 @@ export async function listEpisodes(): Promise<PlayerEpisode[]> {
           episode_number: data.episode_number ?? null,
           opening_start_seconds: data.opening_start_seconds ?? null,
           opening_end_seconds: data.opening_end_seconds ?? null,
-          quality: data.quality ?? null,
-          quality_2: data.quality_2 ?? null,
-          quality_3: data.quality_3 ?? null,
-          quality_4: data.quality_4 ?? null,
-          quality_5: data.quality_5 ?? null,
           source_kind: data.source_kind ?? null,
           source_kind_2: data.source_kind_2 ?? null,
           source_kind_3: data.source_kind_3 ?? null,
@@ -482,7 +426,6 @@ export async function getEpisodeById(
       SELECT id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
              title, poster_url,
              video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-             quality, quality_2, quality_3, quality_4, quality_5,
              source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
              COALESCE(force_proxy, true) AS force_proxy,
              COALESCE(force_proxy_2, true) AS force_proxy_2,
@@ -521,11 +464,6 @@ export async function getEpisodeById(
         episode_number: data.episode_number ?? null,
         opening_start_seconds: data.opening_start_seconds ?? null,
         opening_end_seconds: data.opening_end_seconds ?? null,
-        quality: data.quality ?? null,
-        quality_2: data.quality_2 ?? null,
-        quality_3: data.quality_3 ?? null,
-        quality_4: data.quality_4 ?? null,
-        quality_5: data.quality_5 ?? null,
         source_kind: data.source_kind ?? null,
         source_kind_2: data.source_kind_2 ?? null,
         source_kind_3: data.source_kind_3 ?? null,
@@ -610,7 +548,6 @@ export async function createEpisode(
         id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
         title, poster_url,
         video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-        quality, quality_2, quality_3, quality_4, quality_5,
         source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
         force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5,
         source_referer, source_referer_2, source_referer_3, source_referer_4, source_referer_5
@@ -627,11 +564,6 @@ export async function createEpisode(
         ${input.video_url_3 ?? null},
         ${input.video_url_4 ?? null},
         ${input.video_url_5 ?? null},
-        ${input.quality ?? null},
-        ${input.quality_2 ?? null},
-        ${input.quality_3 ?? null},
-        ${input.quality_4 ?? null},
-        ${input.quality_5 ?? null},
         ${input.source_kind ?? null},
         ${input.source_kind_2 ?? null},
         ${input.source_kind_3 ?? null},
@@ -651,7 +583,6 @@ export async function createEpisode(
       RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
                 title, poster_url,
                 video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-                quality, quality_2, quality_3, quality_4, quality_5,
                 source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
                 COALESCE(force_proxy, true) AS force_proxy,
                 COALESCE(force_proxy_2, true) AS force_proxy_2,
@@ -667,65 +598,7 @@ export async function createEpisode(
       throw err;
     }
 
-    // Fallback 0a: migration 0009 (quality) pendente, mas 0008 (source_referer) presente
-    try {
-      const rows = await sql`
-        INSERT INTO public.player_episodes (
-          id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
-          title, poster_url,
-          video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-          source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
-          force_proxy, force_proxy_2, force_proxy_3, force_proxy_4, force_proxy_5,
-          source_referer, source_referer_2, source_referer_3, source_referer_4, source_referer_5
-        ) VALUES (
-          ${id},
-          ${input.anime_name ?? null},
-          ${input.episode_number ?? null},
-          ${input.opening_start_seconds ?? null},
-          ${input.opening_end_seconds ?? null},
-          ${input.title},
-          ${input.poster_url},
-          ${input.video_url},
-          ${input.video_url_2 ?? null},
-          ${input.video_url_3 ?? null},
-          ${input.video_url_4 ?? null},
-          ${input.video_url_5 ?? null},
-          ${input.source_kind ?? null},
-          ${input.source_kind_2 ?? null},
-          ${input.source_kind_3 ?? null},
-          ${input.source_kind_4 ?? null},
-          ${input.source_kind_5 ?? null},
-          ${input.force_proxy ?? true},
-          ${input.force_proxy_2 ?? true},
-          ${input.force_proxy_3 ?? true},
-          ${input.force_proxy_4 ?? true},
-          ${input.force_proxy_5 ?? true},
-          ${input.source_referer ?? null},
-          ${input.source_referer_2 ?? null},
-          ${input.source_referer_3 ?? null},
-          ${input.source_referer_4 ?? null},
-          ${input.source_referer_5 ?? null}
-        )
-        RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
-                  title, poster_url,
-                  video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-                  source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
-                  COALESCE(force_proxy, true) AS force_proxy,
-                  COALESCE(force_proxy_2, true) AS force_proxy_2,
-                  COALESCE(force_proxy_3, true) AS force_proxy_3,
-                  COALESCE(force_proxy_4, true) AS force_proxy_4,
-                  COALESCE(force_proxy_5, true) AS force_proxy_5,
-                  source_referer, source_referer_2, source_referer_3, source_referer_4, source_referer_5,
-                  created_at, updated_at
-      `;
-      return finalizeCreated((rows as Array<Record<string, unknown>>)[0]);
-    } catch (err0a: unknown) {
-      if (!isUndefinedColumnError(err0a)) {
-        throw err0a;
-      }
-    }
-
-    // Fallback 0: migration 0008 (source_referer) e 0009 (quality) pendentes, mas 0004/0005 presentes
+    // Fallback 0: migration 0008 (source_referer) pendente, mas 0004/0005 presentes
     try {
       const rows = await sql`
         INSERT INTO public.player_episodes (
@@ -984,10 +857,6 @@ export async function updateEpisode(
     rawInput.video_url_3 === undefined &&
     rawInput.video_url_4 === undefined &&
     rawInput.video_url_5 === undefined &&
-    rawInput.quality_2 === undefined &&
-    rawInput.quality_3 === undefined &&
-    rawInput.quality_4 === undefined &&
-    rawInput.quality_5 === undefined &&
     rawInput.source_kind_2 === undefined &&
     rawInput.source_kind_3 === undefined &&
     rawInput.source_kind_4 === undefined &&
@@ -1045,13 +914,11 @@ export async function updateEpisode(
             source_kind = ${input.source_kind ?? null},
             force_proxy = ${input.force_proxy ?? true},
             source_referer = ${input.source_referer ?? null},
-            quality = ${input.quality ?? null},
             updated_at = NOW()
           WHERE id = ${cleanId}
           RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
                     title, poster_url,
                     video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-                    quality, quality_2, quality_3, quality_4, quality_5,
                     source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
                     COALESCE(force_proxy, true) AS force_proxy,
                     COALESCE(force_proxy_2, true) AS force_proxy_2,
@@ -1075,11 +942,6 @@ export async function updateEpisode(
             video_url_3 = ${input.video_url_3 ?? null},
             video_url_4 = ${input.video_url_4 ?? null},
             video_url_5 = ${input.video_url_5 ?? null},
-            quality = ${input.quality ?? null},
-            quality_2 = ${input.quality_2 ?? null},
-            quality_3 = ${input.quality_3 ?? null},
-            quality_4 = ${input.quality_4 ?? null},
-            quality_5 = ${input.quality_5 ?? null},
             source_kind = ${input.source_kind ?? null},
             source_kind_2 = ${input.source_kind_2 ?? null},
             source_kind_3 = ${input.source_kind_3 ?? null},
@@ -1100,7 +962,6 @@ export async function updateEpisode(
           RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
                     title, poster_url,
                     video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-                    quality, quality_2, quality_3, quality_4, quality_5,
                     source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
                     COALESCE(force_proxy, true) AS force_proxy,
                     COALESCE(force_proxy_2, true) AS force_proxy_2,
@@ -1116,87 +977,7 @@ export async function updateEpisode(
       throw err;
     }
 
-    // Fallback 0a: migration 0009 (quality) pendente, mas 0008 (source_referer) presente
-    try {
-      const rows = preserveAdditionalSources
-        ? await sql`
-            UPDATE public.player_episodes
-            SET
-              anime_name = ${input.anime_name ?? null},
-              episode_number = ${input.episode_number ?? null},
-              opening_start_seconds = ${input.opening_start_seconds ?? null},
-              opening_end_seconds = ${input.opening_end_seconds ?? null},
-              title = ${input.title},
-              poster_url = ${input.poster_url},
-              video_url = ${input.video_url},
-              source_kind = ${input.source_kind ?? null},
-              force_proxy = ${input.force_proxy ?? true},
-              source_referer = ${input.source_referer ?? null},
-              updated_at = NOW()
-            WHERE id = ${cleanId}
-            RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
-                      title, poster_url,
-                      video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-                      source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
-                      COALESCE(force_proxy, true) AS force_proxy,
-                      COALESCE(force_proxy_2, true) AS force_proxy_2,
-                      COALESCE(force_proxy_3, true) AS force_proxy_3,
-                      COALESCE(force_proxy_4, true) AS force_proxy_4,
-                      COALESCE(force_proxy_5, true) AS force_proxy_5,
-                      source_referer, source_referer_2, source_referer_3, source_referer_4, source_referer_5,
-                      created_at, updated_at
-          `
-        : await sql`
-            UPDATE public.player_episodes
-            SET
-              anime_name = ${input.anime_name ?? null},
-              episode_number = ${input.episode_number ?? null},
-              opening_start_seconds = ${input.opening_start_seconds ?? null},
-              opening_end_seconds = ${input.opening_end_seconds ?? null},
-              title = ${input.title},
-              poster_url = ${input.poster_url},
-              video_url = ${input.video_url},
-              video_url_2 = ${input.video_url_2 ?? null},
-              video_url_3 = ${input.video_url_3 ?? null},
-              video_url_4 = ${input.video_url_4 ?? null},
-              video_url_5 = ${input.video_url_5 ?? null},
-              source_kind = ${input.source_kind ?? null},
-              source_kind_2 = ${input.source_kind_2 ?? null},
-              source_kind_3 = ${input.source_kind_3 ?? null},
-              source_kind_4 = ${input.source_kind_4 ?? null},
-              source_kind_5 = ${input.source_kind_5 ?? null},
-              force_proxy = ${input.force_proxy ?? true},
-              force_proxy_2 = ${input.force_proxy_2 ?? true},
-              force_proxy_3 = ${input.force_proxy_3 ?? true},
-              force_proxy_4 = ${input.force_proxy_4 ?? true},
-              force_proxy_5 = ${input.force_proxy_5 ?? true},
-              source_referer = ${input.source_referer ?? null},
-              source_referer_2 = ${input.source_referer_2 ?? null},
-              source_referer_3 = ${input.source_referer_3 ?? null},
-              source_referer_4 = ${input.source_referer_4 ?? null},
-              source_referer_5 = ${input.source_referer_5 ?? null},
-              updated_at = NOW()
-            WHERE id = ${cleanId}
-            RETURNING id, anime_name, episode_number, opening_start_seconds, opening_end_seconds,
-                      title, poster_url,
-                      video_url, video_url_2, video_url_3, video_url_4, video_url_5,
-                      source_kind, source_kind_2, source_kind_3, source_kind_4, source_kind_5,
-                      COALESCE(force_proxy, true) AS force_proxy,
-                      COALESCE(force_proxy_2, true) AS force_proxy_2,
-                      COALESCE(force_proxy_3, true) AS force_proxy_3,
-                      COALESCE(force_proxy_4, true) AS force_proxy_4,
-                      COALESCE(force_proxy_5, true) AS force_proxy_5,
-                      source_referer, source_referer_2, source_referer_3, source_referer_4, source_referer_5,
-                      created_at, updated_at
-          `;
-      return finalizeUpdated((rows as Array<Record<string, unknown>>)[0]);
-    } catch (err0a: unknown) {
-      if (!isUndefinedColumnError(err0a)) {
-        throw err0a;
-      }
-    }
-
-    // Fallback 0: migration 0008 (source_referer) e 0009 (quality) pendentes
+    // Fallback 0: migration 0008 (source_referer) pendente
     try {
       const rows = preserveAdditionalSources
         ? await sql`

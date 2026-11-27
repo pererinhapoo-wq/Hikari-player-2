@@ -1,8 +1,5 @@
 import {
   AlertCircle,
-  Check,
-  ChevronLeft,
-  ChevronRight,
   Film,
   Maximize,
   Minimize,
@@ -10,7 +7,6 @@ import {
   Play,
   RotateCcw,
   RotateCw,
-  Settings,
   SkipForward,
   Volume2,
   VolumeX,
@@ -27,14 +23,10 @@ import { isOpeningSkipVisible } from '@/lib/opening-skip';
 import type { PlayableSource } from '@/lib/types';
 import {
   buildIframeSrcWithFreshTime,
-  findSourceIndexForQuality,
-  getAvailableQualities,
   getIframeElementProps,
   getNextFallbackSourceIndex,
-  getValidPlayableSources,
   isDirectMediaUrl,
   isVercelBlobUrl,
-  shouldShowQualitySelector,
 } from '@/lib/video-sources';
 
 interface EpisodePlayerProps {
@@ -106,25 +98,6 @@ export function EpisodePlayer({
   const [isMuted, setIsMuted] = useState(false);
   const [playbackRate, setPlaybackRate] = useState<number>(1);
   const [speedMenuOpen, setSpeedMenuOpen] = useState(false);
-  const [settingsMenuOpen, setSettingsMenuOpen] = useState(false);
-  const [settingsSubmenu, setSettingsSubmenu] = useState<'root' | 'quality' | 'speed'>('root');
-  const pendingRestoreTimeRef = useRef<number | null>(null);
-  const manualSwitchOriginRef = useRef<{
-    previousIndex: number;
-    previousTime: number;
-    targetQuality: string;
-    targetSlot: number;
-  } | null>(null);
-
-  const validSources = useMemo(() => getValidPlayableSources(sources), [sources]);
-  const showQualityOption = useMemo(
-    () => shouldShowQualitySelector(validSources),
-    [validSources]
-  );
-  const availableQualities = useMemo(
-    () => getAvailableQualities(validSources),
-    [validSources]
-  );
 
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [controlsVisible, setControlsVisible] = useState(true);
@@ -140,8 +113,8 @@ export function EpisodePlayer({
   } | null>(null);
 
   const safeActiveIndex =
-    activeIndex >= 0 && activeIndex < validSources.length ? activeIndex : 0;
-  const activeSource = validSources[safeActiveIndex] ?? null;
+    activeIndex >= 0 && activeIndex < sources.length ? activeIndex : 0;
+  const activeSource = sources[safeActiveIndex] ?? null;
   const activeSourceRef = useRef(activeSource);
   activeSourceRef.current = activeSource;
 
@@ -150,9 +123,6 @@ export function EpisodePlayer({
 
   const speedMenuOpenRef = useRef(speedMenuOpen);
   speedMenuOpenRef.current = speedMenuOpen;
-
-  const settingsMenuOpenRef = useRef(settingsMenuOpen);
-  settingsMenuOpenRef.current = settingsMenuOpen;
 
   const isSeekingRef = useRef(isSeeking);
   isSeekingRef.current = isSeeking;
@@ -199,7 +169,6 @@ export function EpisodePlayer({
   const hasAutoHideBlocker = useCallback(() => {
     return (
       speedMenuOpenRef.current ||
-      settingsMenuOpenRef.current ||
       isSeekingRef.current ||
       isAdjustingVolumeRef.current ||
       isHoveringControlsRef.current
@@ -219,7 +188,6 @@ export function EpisodePlayer({
         videoRef.current &&
         !videoRef.current.paused &&
         !speedMenuOpenRef.current &&
-        !settingsMenuOpenRef.current &&
         !isSeekingRef.current &&
         !isAdjustingVolumeRef.current &&
         !isHoveringControlsRef.current
@@ -260,7 +228,6 @@ export function EpisodePlayer({
     if (
       !isPlaying ||
       speedMenuOpen ||
-      settingsMenuOpen ||
       isSeeking ||
       isAdjustingVolume ||
       isHoveringControls
@@ -278,7 +245,6 @@ export function EpisodePlayer({
     resolvedRuntime?.mode,
     isPlaying,
     speedMenuOpen,
-    settingsMenuOpen,
     isSeeking,
     isAdjustingVolume,
     isHoveringControls,
@@ -305,49 +271,18 @@ export function EpisodePlayer({
       clearIframeLoadTimer();
       cleanupHls();
 
-      const manualOrigin = manualSwitchOriginRef.current;
-      if (manualOrigin && manualOrigin.targetSlot === failedSlot) {
-        manualSwitchOriginRef.current = null;
-        const previousSource = validSources[manualOrigin.previousIndex];
-        setFailedSlots((prev) => {
-          const next = new Set(prev);
-          next.add(failedSlot);
-          if (previousSource && previousSource.slot !== failedSlot) {
-            next.delete(previousSource.slot);
-          }
-          return next;
-        });
-        if (previousSource && previousSource.slot !== failedSlot) {
-          pendingRestoreTimeRef.current =
-            manualOrigin.previousTime > 0 ? manualOrigin.previousTime : null;
-          setStatusNotice(
-            `Não foi possível carregar a qualidade ${manualOrigin.targetQuality}. Mantendo ${previousSource.quality ?? previousSource.label}.`
-          );
-          setFatalError(null);
-          setFatalErrorKind(null);
-          setActiveIndex(manualOrigin.previousIndex);
-          return;
-        }
-        setStatusNotice(null);
-        setFatalErrorKind(errorKind);
-        setFatalError(
-          `Não foi possível carregar a qualidade ${manualOrigin.targetQuality}.`
-        );
-        return;
-      }
-
       setFailedSlots((prev) => {
         const next = new Set(prev);
         next.add(failedSlot);
-        const fallbackIdx = getNextFallbackSourceIndex(validSources, safeActiveIndex, next);
+        const fallbackIdx = getNextFallbackSourceIndex(sources, safeActiveIndex, next);
         if (fallbackIdx !== null) {
-          const nextSource = validSources[fallbackIdx];
+          const nextSource = sources[fallbackIdx];
           const failureLabel =
             errorKind === 'iframe'
               ? 'player do provedor não carregou'
               : 'fonte indisponível';
           setStatusNotice(
-            `${validSources[safeActiveIndex]?.label ?? 'Fonte atual'} (${failureLabel}) — alternando para ${nextSource.label}...`
+            `${sources[safeActiveIndex]?.label ?? 'Fonte atual'} (${failureLabel}) — alternando para ${nextSource.label}...`
           );
           setActiveIndex(fallbackIdx);
           setFatalError(null);
@@ -365,7 +300,7 @@ export function EpisodePlayer({
         return next;
       });
     },
-    [safeActiveIndex, cleanupHls, clearIframeLoadTimer, validSources]
+    [safeActiveIndex, cleanupHls, clearIframeLoadTimer, sources]
   );
 
   const triggerFailoverRef = useRef(triggerFailover);
@@ -575,15 +510,10 @@ export function EpisodePlayer({
         if (cancelled) return;
 
         if (Hls.isSupported()) {
-          const requestedStartPosition =
-            pendingRestoreTimeRef.current !== null && pendingRestoreTimeRef.current > 0
-              ? pendingRestoreTimeRef.current
-              : -1;
           const hls = new Hls({
             enableWorker: true,
             lowLatencyMode: false,
             backBufferLength: 30,
-            startPosition: requestedStartPosition,
           });
           hlsInstanceRef.current = hls;
 
@@ -593,7 +523,6 @@ export function EpisodePlayer({
               `[Hikari Player] Manifesto HLS carregado (slot=${resolvedRuntime.slot}, estratégia=${resolvedRuntime.strategy}).`
             );
             setIsLoadingSource(false);
-            manualSwitchOriginRef.current = null;
             if (resolvedRuntime.strategy === 'direct') {
               setStatusNotice(null);
             }
@@ -972,10 +901,8 @@ export function EpisodePlayer({
 
       // Mouse / pen click preserves immediate Play/Pause behavior
       if (e.pointerType !== 'touch') {
-        if (speedMenuOpenRef.current || settingsMenuOpenRef.current) {
+        if (speedMenuOpenRef.current) {
           setSpeedMenuOpen(false);
-          setSettingsMenuOpen(false);
-          setSettingsSubmenu('root');
         }
         togglePlayPause();
         return;
@@ -1019,10 +946,8 @@ export function EpisodePlayer({
         lastTouchTapRef.current = null;
         if (!isMountedRef.current) return;
 
-        if (speedMenuOpenRef.current || settingsMenuOpenRef.current) {
+        if (speedMenuOpenRef.current) {
           setSpeedMenuOpen(false);
-          setSettingsMenuOpen(false);
-          setSettingsSubmenu('root');
           scheduleHideControls();
           return;
         }
@@ -1062,11 +987,9 @@ export function EpisodePlayer({
         return;
       }
 
-      if (e.key === 'Escape' && (speedMenuOpenRef.current || settingsMenuOpenRef.current)) {
+      if (e.key === 'Escape' && speedMenuOpenRef.current) {
         e.preventDefault();
         setSpeedMenuOpen(false);
-        setSettingsMenuOpen(false);
-        setSettingsSubmenu('root');
         scheduleHideControls();
         return;
       }
@@ -1121,7 +1044,7 @@ export function EpisodePlayer({
   ]);
 
   const selectSourceManually = (index: number, preserveNotice = false) => {
-    const target = validSources[index];
+    const target = sources[index];
     if (!target) return;
     clearIframeLoadTimer();
     attemptedDirectSlotsRef.current.delete(target.slot);
@@ -1143,39 +1066,8 @@ export function EpisodePlayer({
     }
   };
 
-  const handleSelectQuality = (quality: string) => {
-    const targetIdx = findSourceIndexForQuality(validSources, quality, failedSlots);
-    if (targetIdx === -1) return;
-
-    setSettingsMenuOpen(false);
-    setSettingsSubmenu('root');
-
-    if (targetIdx === safeActiveIndex && activeSource?.quality === quality) {
-      return;
-    }
-
-    const video = videoRef.current;
-    const savedTime =
-      video && Number.isFinite(video.currentTime) && video.currentTime > 0
-        ? video.currentTime
-        : currentTime > 0
-          ? currentTime
-          : 0;
-
-    pendingRestoreTimeRef.current = savedTime > 0 ? savedTime : null;
-    manualSwitchOriginRef.current = {
-      previousIndex: safeActiveIndex,
-      previousTime: savedTime,
-      targetQuality: quality,
-      targetSlot: validSources[targetIdx].slot,
-    };
-
-    selectSourceManually(targetIdx);
-  };
-
   const reloadIframeSource = () => {
     clearIframeLoadTimer();
-    manualSwitchOriginRef.current = null;
     const targetSlot = activeSource?.slot ?? resolvedRuntime?.slot;
     if (targetSlot !== undefined) {
       setFailedSlots((prev) => {
@@ -1194,8 +1086,6 @@ export function EpisodePlayer({
 
   const retryPlayback = () => {
     clearIframeLoadTimer();
-    manualSwitchOriginRef.current = null;
-    pendingRestoreTimeRef.current = null;
     attemptedDirectSlotsRef.current.clear();
     setFailedSlots(new Set());
     setFatalError(null);
@@ -1229,7 +1119,7 @@ export function EpisodePlayer({
     return Math.min(100, Math.max(0, (bufferedEnd / duration) * 100));
   }, [bufferedEnd, duration]);
 
-  if (validSources.length === 0) {
+  if (sources.length === 0) {
     return (
       <div className="w-full aspect-video bg-[#11151E] border border-white/10 rounded-xl flex flex-col items-center justify-center p-8 text-center">
         <AlertCircle className="w-10 h-10 text-rose-400 mb-3" />
@@ -1244,15 +1134,15 @@ export function EpisodePlayer({
   return (
     <div className="w-full space-y-3">
       {/* Segmented source selector when multiple sources exist (or iframe reload control) */}
-      {(validSources.length > 1 || (hasStarted && activeSource?.kind === 'iframe')) && (
+      {(sources.length > 1 || (hasStarted && activeSource?.kind === 'iframe')) && (
         <div className="flex flex-wrap items-center justify-between gap-3">
-          {validSources.length > 1 ? (
+          {sources.length > 1 ? (
             <div
               role="tablist"
               aria-label="Fontes de vídeo disponíveis"
               className="inline-flex flex-wrap items-center gap-1 p-1 bg-[#11151E] border border-white/10 rounded-lg"
             >
-              {validSources.map((src, idx) => {
+              {sources.map((src, idx) => {
                 const isActive = idx === safeActiveIndex;
                 const isFailed = failedSlots.has(src.slot);
                 return (
@@ -1261,11 +1151,7 @@ export function EpisodePlayer({
                     type="button"
                     role="tab"
                     aria-selected={isActive}
-                    onClick={() => {
-                      manualSwitchOriginRef.current = null;
-                      pendingRestoreTimeRef.current = null;
-                      selectSourceManually(idx);
-                    }}
+                    onClick={() => selectSourceManually(idx)}
                     className={`px-3 py-1.5 min-h-[36px] text-xs font-medium rounded-md transition-colors whitespace-nowrap shrink-0 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500 ${
                       isActive
                         ? 'bg-rose-600 text-white'
@@ -1274,7 +1160,7 @@ export function EpisodePlayer({
                           : 'text-slate-300 hover:text-white hover:bg-white/5'
                     }`}
                   >
-                    {src.quality ? `${src.label} · ${src.quality}` : src.label}
+                    {src.label}
                   </button>
                 );
               })}
@@ -1283,83 +1169,7 @@ export function EpisodePlayer({
             <div />
           )}
 
-          <div className="flex items-center gap-2.5 relative">
-            {hasStarted && resolvedRuntime?.mode === 'iframe' && showQualityOption && (
-              <div className="relative">
-                <button
-                  type="button"
-                  onClick={() => {
-                    setSettingsMenuOpen((prev) => {
-                      const next = !prev;
-                      if (!next) setSettingsSubmenu('root');
-                      return next;
-                    });
-                    setSpeedMenuOpen(false);
-                  }}
-                  aria-label="Configurações"
-                  aria-expanded={settingsMenuOpen}
-                  className="inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg border border-white/10 bg-[#11151E] hover:bg-white/5 text-xs font-medium text-slate-200 transition-colors cursor-pointer whitespace-nowrap"
-                >
-                  <Settings className="w-3.5 h-3.5" />
-                  <span>{activeSource?.quality ?? 'Qualidade'}</span>
-                </button>
-                {settingsMenuOpen && (
-                  <div
-                    role="menu"
-                    aria-label="Configurações"
-                    className="absolute right-0 top-10 bg-[#11151E]/95 backdrop-blur-md border border-white/15 rounded-xl p-2 shadow-2xl min-w-[180px] z-30 space-y-1"
-                  >
-                    {settingsSubmenu === 'root' ? (
-                      <>
-                        <div className="px-2.5 py-1 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                          Configurações
-                        </div>
-                        <button
-                          type="button"
-                          onClick={() => setSettingsSubmenu('quality')}
-                          className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs text-slate-200 hover:bg-white/10 transition-colors cursor-pointer"
-                        >
-                          <span>Qualidade</span>
-                          <span className="inline-flex items-center gap-1 font-mono text-slate-400">
-                            {activeSource?.quality}
-                            <ChevronRight className="w-3.5 h-3.5" />
-                          </span>
-                        </button>
-                      </>
-                    ) : (
-                      <>
-                        <button
-                          type="button"
-                          onClick={() => setSettingsSubmenu('root')}
-                          className="w-full flex items-center gap-1.5 px-2 py-1 text-[11px] font-semibold text-slate-300 hover:text-white uppercase tracking-wider cursor-pointer"
-                        >
-                          <ChevronLeft className="w-3.5 h-3.5" />
-                          <span>Qualidade</span>
-                        </button>
-                        {availableQualities.map((qual) => {
-                          const isCurrent = activeSource?.quality === qual;
-                          return (
-                            <button
-                              key={qual}
-                              type="button"
-                              onClick={() => handleSelectQuality(qual)}
-                              className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs font-mono tabular-nums transition-colors cursor-pointer ${
-                                isCurrent
-                                  ? 'bg-[#a855f7] text-white font-semibold'
-                                  : 'text-slate-300 hover:bg-white/10 hover:text-white'
-                              }`}
-                            >
-                              <span>{qual}</span>
-                              {isCurrent && <Check className="w-3.5 h-3.5" />}
-                            </button>
-                          );
-                        })}
-                      </>
-                    )}
-                  </div>
-                )}
-              </div>
-            )}
+          <div className="flex items-center gap-2.5">
             {hasStarted && activeSource?.kind === 'iframe' && (
               <button
                 type="button"
@@ -1372,9 +1182,7 @@ export function EpisodePlayer({
             )}
             {activeSource && (
               <span className="text-xs text-slate-400 font-mono tabular-nums">
-                {activeSource.quality
-                  ? `${activeSource.formatLabel} · ${activeSource.quality}`
-                  : activeSource.formatLabel}
+                {activeSource.formatLabel}
               </span>
             )}
           </div>
@@ -1444,7 +1252,6 @@ export function EpisodePlayer({
                 title={title}
                 onLoad={() => {
                   clearIframeLoadTimer();
-                  manualSwitchOriginRef.current = null;
                   setIframeLoaded(true);
                   setIsLoadingSource(false);
                 }}
@@ -1482,25 +1289,7 @@ export function EpisodePlayer({
               playsInline
               preload="metadata"
               onLoadStart={() => setIsLoadingSource(true)}
-              onCanPlay={() => {
-                setIsLoadingSource(false);
-                manualSwitchOriginRef.current = null;
-                if (pendingRestoreTimeRef.current !== null && videoRef.current) {
-                  const v = videoRef.current;
-                  const maxSeekable =
-                    Number.isFinite(v.duration) && v.duration > 0
-                      ? Math.max(0, v.duration - 0.25)
-                      : pendingRestoreTimeRef.current;
-                  const t = Math.max(0, Math.min(pendingRestoreTimeRef.current, maxSeekable));
-                  pendingRestoreTimeRef.current = null;
-                  try {
-                    v.currentTime = t;
-                    setCurrentTime(t);
-                  } catch {
-                    // Ignore seek errors on unready media
-                  }
-                }
-              }}
+              onCanPlay={() => setIsLoadingSource(false)}
               onPlay={() => {
                 setIsPlaying(true);
                 setIsLoadingSource(false);
@@ -1527,21 +1316,6 @@ export function EpisodePlayer({
                 const v = videoRef.current;
                 if (!v) return;
                 setDuration(Number.isFinite(v.duration) ? v.duration : 0);
-                if (pendingRestoreTimeRef.current !== null) {
-                  const maxSeekable =
-                    Number.isFinite(v.duration) && v.duration > 0
-                      ? Math.max(0, v.duration - 0.25)
-                      : pendingRestoreTimeRef.current;
-                  const t = Math.max(0, Math.min(pendingRestoreTimeRef.current, maxSeekable));
-                  pendingRestoreTimeRef.current = null;
-                  try {
-                    v.currentTime = t;
-                    setCurrentTime(t);
-                  } catch {
-                    // Fallback: will retry in onCanPlay if needed
-                    pendingRestoreTimeRef.current = t;
-                  }
-                }
               }}
               onVolumeChange={() => {
                 const v = videoRef.current;
@@ -1691,7 +1465,7 @@ export function EpisodePlayer({
               onPointerUp={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
               className={`absolute inset-x-2.5 bottom-2.5 sm:inset-x-4 sm:bottom-4 z-20 rounded-2xl bg-black/70 backdrop-blur-md border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.55)] px-2.5 sm:px-4 pt-2 pb-2 transition-all duration-200 ${
-                controlsVisible || !isPlaying || speedMenuOpen || settingsMenuOpen || isSeeking || isAdjustingVolume
+                controlsVisible || !isPlaying || speedMenuOpen || isSeeking || isAdjustingVolume
                   ? 'opacity-100 translate-y-0'
                   : 'opacity-0 translate-y-2 pointer-events-none'
               }`}
@@ -1812,137 +1586,8 @@ export function EpisodePlayer({
                   </div>
                 </div>
 
-                {/* Right controls: Settings (Qualidade when >= 2 valid sources + Velocidade) + Speed + Fullscreen */}
+                {/* Right controls: Speed + Fullscreen */}
                 <div className="flex items-center gap-1 relative shrink-0">
-                  <div className="relative">
-                    <button
-                      type="button"
-                      onClick={() => {
-                        setSettingsMenuOpen((prev) => {
-                          const next = !prev;
-                          if (!next) setSettingsSubmenu('root');
-                          return next;
-                        });
-                        setSpeedMenuOpen(false);
-                      }}
-                      aria-label="Configurações"
-                      aria-expanded={settingsMenuOpen}
-                      className={`w-9 h-9 flex items-center justify-center rounded-xl transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer shrink-0 ${
-                        settingsMenuOpen
-                          ? 'bg-[#a855f7]/25 text-white border border-[#a855f7]/50'
-                          : 'text-slate-200 hover:text-white hover:bg-white/10'
-                      }`}
-                    >
-                      <Settings className="w-4 h-4" />
-                    </button>
-
-                    {settingsMenuOpen && (
-                      <div
-                        role="menu"
-                        aria-label="Configurações"
-                        className="absolute right-0 bottom-12 bg-[#11151E]/95 backdrop-blur-md border border-white/15 rounded-xl p-2 shadow-2xl min-w-[185px] z-30 space-y-1"
-                      >
-                        {settingsSubmenu === 'root' && (
-                          <>
-                            <div className="px-2.5 py-1 text-[11px] font-semibold text-slate-400 uppercase tracking-wider">
-                              Configurações
-                            </div>
-                            {showQualityOption && (
-                              <button
-                                type="button"
-                                onClick={() => setSettingsSubmenu('quality')}
-                                className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs text-slate-200 hover:bg-white/10 transition-colors cursor-pointer"
-                              >
-                                <span>Qualidade</span>
-                                <span className="inline-flex items-center gap-1 font-mono text-slate-400">
-                                  {activeSource?.quality}
-                                  <ChevronRight className="w-3.5 h-3.5" />
-                                </span>
-                              </button>
-                            )}
-                            <button
-                              type="button"
-                              onClick={() => setSettingsSubmenu('speed')}
-                              className="w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs text-slate-200 hover:bg-white/10 transition-colors cursor-pointer"
-                            >
-                              <span>Velocidade</span>
-                              <span className="inline-flex items-center gap-1 font-mono text-slate-400">
-                                {playbackRate}x
-                                <ChevronRight className="w-3.5 h-3.5" />
-                              </span>
-                            </button>
-                          </>
-                        )}
-
-                        {settingsSubmenu === 'quality' && showQualityOption && (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => setSettingsSubmenu('root')}
-                              className="w-full flex items-center gap-1.5 px-2 py-1 text-[11px] font-semibold text-slate-300 hover:text-white uppercase tracking-wider cursor-pointer"
-                            >
-                              <ChevronLeft className="w-3.5 h-3.5" />
-                              <span>Qualidade</span>
-                            </button>
-                            {availableQualities.map((qual) => {
-                              const isCurrent = activeSource?.quality === qual;
-                              return (
-                                <button
-                                  key={qual}
-                                  type="button"
-                                  onClick={() => handleSelectQuality(qual)}
-                                  className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs font-mono tabular-nums transition-colors cursor-pointer ${
-                                    isCurrent
-                                      ? 'bg-[#a855f7] text-white font-semibold'
-                                      : 'text-slate-300 hover:bg-white/10 hover:text-white'
-                                  }`}
-                                >
-                                  <span>{qual}</span>
-                                  {isCurrent && <Check className="w-3.5 h-3.5" />}
-                                </button>
-                              );
-                            })}
-                          </>
-                        )}
-
-                        {settingsSubmenu === 'speed' && (
-                          <>
-                            <button
-                              type="button"
-                              onClick={() => setSettingsSubmenu('root')}
-                              className="w-full flex items-center gap-1.5 px-2 py-1 text-[11px] font-semibold text-slate-300 hover:text-white uppercase tracking-wider cursor-pointer"
-                            >
-                              <ChevronLeft className="w-3.5 h-3.5" />
-                              <span>Velocidade</span>
-                            </button>
-                            {SPEED_OPTIONS.map((rate) => {
-                              const isCurrent = playbackRate === rate;
-                              return (
-                                <button
-                                  key={rate}
-                                  type="button"
-                                  onClick={() => {
-                                    changePlaybackRate(rate);
-                                    setSettingsMenuOpen(false);
-                                    setSettingsSubmenu('root');
-                                  }}
-                                  className={`w-full flex items-center justify-between px-2.5 py-1.5 rounded-lg text-xs font-mono tabular-nums transition-colors cursor-pointer ${
-                                    isCurrent
-                                      ? 'bg-[#a855f7] text-white font-semibold'
-                                      : 'text-slate-300 hover:bg-white/10 hover:text-white'
-                                  }`}
-                                >
-                                  <span>{rate}x</span>
-                                  {isCurrent && <Check className="w-3.5 h-3.5" />}
-                                </button>
-                              );
-                            })}
-                          </>
-                        )}
-                      </div>
-                    )}
-                  </div>
-
                   <div className="relative">
                     <button
                       type="button"
