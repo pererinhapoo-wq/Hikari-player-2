@@ -10,6 +10,7 @@ import {
   ChevronRight,
   ChevronsDownUp,
   ChevronsUpDown,
+  Clock,
   Copy,
   CopyPlus,
   Database,
@@ -385,6 +386,15 @@ function AdminPage() {
   } | null>(null);
   const [actionError, setActionError] = useState<string | null>(null);
   const duplicateLockRef = useRef(false);
+
+  // Quick Opening times editing state
+  const [quickOpeningEpisodeId, setQuickOpeningEpisodeId] = useState<string | null>(null);
+  const [quickOpeningStart, setQuickOpeningStart] = useState('');
+  const [quickOpeningEnd, setQuickOpeningEnd] = useState('');
+  const [quickOpeningError, setQuickOpeningError] = useState<string | null>(null);
+  const [quickOpeningBusy, setQuickOpeningBusy] = useState(false);
+  const [quickOpeningSuccessNotice, setQuickOpeningSuccessNotice] = useState<string | null>(null);
+  const quickOpeningTimerRef = useRef<number | null>(null);
 
   // Source diagnostics (form Player 1 + episode list)
   const [slotTesting, setSlotTesting] = useState(false);
@@ -808,6 +818,9 @@ function AdminPage() {
       if (thumbCandidatesRef.current.length > 0) {
         revokeThumbnailCandidates(thumbCandidatesRef.current);
       }
+      if (quickOpeningTimerRef.current !== null) {
+        window.clearTimeout(quickOpeningTimerRef.current);
+      }
     };
   }, []);
 
@@ -852,6 +865,83 @@ function AdminPage() {
     setOpenMenuId(epId);
   };
 
+  const handleOpenQuickOpening = (ep: EpisodeDto) => {
+    setOpenMenuId(null);
+    setMenuPosition(null);
+    setQuickOpeningEpisodeId(ep.id);
+    setQuickOpeningStart(formatOpeningTimestamp(ep.opening_start_seconds));
+    setQuickOpeningEnd(formatOpeningTimestamp(ep.opening_end_seconds));
+    setQuickOpeningError(null);
+    setQuickOpeningSuccessNotice(null);
+  };
+
+  const handleCloseQuickOpening = () => {
+    setQuickOpeningEpisodeId(null);
+    setQuickOpeningStart('');
+    setQuickOpeningEnd('');
+    setQuickOpeningError(null);
+  };
+
+  const handleSaveQuickOpening = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!quickOpeningEpisodeId) return;
+    setQuickOpeningError(null);
+
+    let openingRange: { opening_start_seconds: number | null; opening_end_seconds: number | null };
+    try {
+      openingRange = parseOpeningRange(quickOpeningStart, quickOpeningEnd);
+    } catch (err) {
+      setQuickOpeningError(err instanceof Error ? err.message : 'Horários da opening inválidos.');
+      return;
+    }
+
+    const targetEp = initialState.episodes.find((item) => item.id === quickOpeningEpisodeId);
+    if (!targetEp) {
+      setQuickOpeningError('Episódio não encontrado.');
+      return;
+    }
+
+    setQuickOpeningBusy(true);
+    try {
+      const res = await adminUpdateEpisodeFn({
+        data: {
+          id: targetEp.id,
+          anime_name: targetEp.anime_name,
+          episode_number: targetEp.episode_number,
+          title: targetEp.title,
+          poster_url: targetEp.poster_url,
+          video_url: targetEp.video_url,
+          source_kind: targetEp.source_kind,
+          source_referer: targetEp.source_referer,
+          opening_start_seconds: openingRange.opening_start_seconds,
+          opening_end_seconds: openingRange.opening_end_seconds,
+        },
+      });
+
+      if (!res.ok) {
+        setQuickOpeningError(res.error);
+        return;
+      }
+
+      handleCloseQuickOpening();
+      setQuickOpeningSuccessNotice(targetEp.id);
+      if (quickOpeningTimerRef.current !== null) {
+        window.clearTimeout(quickOpeningTimerRef.current);
+      }
+      quickOpeningTimerRef.current = window.setTimeout(() => {
+        setQuickOpeningSuccessNotice(null);
+      }, 3500);
+
+      await router.invalidate();
+    } catch (err) {
+      setQuickOpeningError(
+        err instanceof Error ? err.message : 'Erro ao salvar tempos da opening.'
+      );
+    } finally {
+      setQuickOpeningBusy(false);
+    }
+  };
+
   const handleLogout = async () => {
     await adminLogoutFn();
     syncedFormRouteKeyRef.current = null;
@@ -866,6 +956,15 @@ function AdminPage() {
     setSavedBanner(null);
     setOpenMenuId(null);
     setMenuPosition(null);
+    setQuickOpeningEpisodeId(null);
+    setQuickOpeningStart('');
+    setQuickOpeningEnd('');
+    setQuickOpeningError(null);
+    setQuickOpeningSuccessNotice(null);
+    if (quickOpeningTimerRef.current !== null) {
+      window.clearTimeout(quickOpeningTimerRef.current);
+      quickOpeningTimerRef.current = null;
+    }
     Object.values(episodeCopyTimersRef.current).forEach((timerId) => {
       window.clearTimeout(timerId);
     });
@@ -4048,6 +4147,16 @@ function AdminPage() {
                                                 <button
                                                   type="button"
                                                   role="menuitem"
+                                                  onClick={() => handleOpenQuickOpening(ep)}
+                                                  className="w-full px-3.5 py-2.5 text-left text-xs font-medium text-slate-200 hover:bg-white/5 inline-flex items-center gap-2.5 cursor-pointer"
+                                                >
+                                                  <Clock className="w-3.5 h-3.5 text-slate-400" />
+                                                  Tempos da Opening
+                                                </button>
+
+                                                <button
+                                                  type="button"
+                                                  role="menuitem"
                                                   disabled={
                                                     duplicatingEpisodeId !== null ||
                                                     !initialState.databaseConfigured
@@ -4104,6 +4213,16 @@ function AdminPage() {
                                           </div>
                                         </div>
                                       </div>
+
+                                      {quickOpeningSuccessNotice === ep.id && (
+                                        <div
+                                          role="status"
+                                          className="rounded-xl border border-emerald-500/30 bg-emerald-950/25 px-3.5 py-2 text-xs text-emerald-300 flex items-center gap-2"
+                                        >
+                                          <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                          <span>Tempos da opening atualizados com sucesso!</span>
+                                        </div>
+                                      )}
 
                                       {inlineCopyErrors.length > 0 && (
                                         <div
@@ -4490,6 +4609,97 @@ function AdminPage() {
             )}
           </div>
         )}
+
+        {/* Quick Opening Times Modal Dialog */}
+        {quickOpeningEpisodeId && (() => {
+          const quickOpeningTargetEp = initialState.episodes.find(
+            (item) => item.id === quickOpeningEpisodeId
+          );
+          if (!quickOpeningTargetEp) return null;
+          return (
+            <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
+              <div className="w-full max-w-md rounded-2xl bg-[#11151E] border border-white/15 shadow-2xl p-5 sm:p-6 space-y-5 animate-in fade-in zoom-in-95 duration-150">
+                <div className="flex items-center justify-between pb-3 border-b border-white/10">
+                  <div className="flex items-center gap-2.5 min-w-0">
+                    <Clock className="w-4 h-4 text-rose-400 shrink-0" />
+                    <h2 className="text-sm font-semibold text-white truncate">
+                      Tempos da Opening · {formatEpisodeIdentification(quickOpeningTargetEp)}
+                    </h2>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={handleCloseQuickOpening}
+                    disabled={quickOpeningBusy}
+                    aria-label="Fechar"
+                    className="p-1.5 rounded-lg text-slate-400 hover:text-white hover:bg-white/5 cursor-pointer"
+                  >
+                    <X className="w-4 h-4" />
+                  </button>
+                </div>
+
+                <form onSubmit={handleSaveQuickOpening} className="space-y-4">
+                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                        Início da Opening
+                      </label>
+                      <input
+                        type="text"
+                        value={quickOpeningStart}
+                        onChange={(e) => setQuickOpeningStart(e.target.value)}
+                        placeholder="01:30 ou 90"
+                        disabled={quickOpeningBusy}
+                        className="w-full h-10 px-3 rounded-xl bg-[#090B10] border border-white/15 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-rose-500 disabled:opacity-50"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                        Fim da Opening
+                      </label>
+                      <input
+                        type="text"
+                        value={quickOpeningEnd}
+                        onChange={(e) => setQuickOpeningEnd(e.target.value)}
+                        placeholder="02:15 ou 135"
+                        disabled={quickOpeningBusy}
+                        className="w-full h-10 px-3 rounded-xl bg-[#090B10] border border-white/15 text-xs font-mono text-white placeholder:text-slate-600 focus:outline-none focus:border-rose-500 disabled:opacity-50"
+                      />
+                    </div>
+                  </div>
+
+                  <p className="text-[11px] text-slate-400">
+                    Informe os tempos no formato <code className="font-mono text-slate-300">MM:SS</code> (ex: <code className="font-mono text-slate-300">01:25</code>) ou em segundos (ex: <code className="font-mono text-slate-300">85</code>). Deixe em branco caso o episódio não possua opening.
+                  </p>
+
+                  {quickOpeningError && (
+                    <div role="alert" className="rounded-xl border border-rose-500/30 bg-rose-950/30 px-3 py-2 text-xs text-rose-300">
+                      {quickOpeningError}
+                    </div>
+                  )}
+
+                  <div className="flex items-center justify-end gap-2.5 pt-2 border-t border-white/10">
+                    <button
+                      type="button"
+                      onClick={handleCloseQuickOpening}
+                      disabled={quickOpeningBusy}
+                      className="min-h-[40px] sm:h-9 px-4 rounded-xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-xs font-medium text-slate-200 cursor-pointer transition-colors"
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="submit"
+                      disabled={quickOpeningBusy}
+                      className="min-h-[40px] sm:h-9 px-4 rounded-xl bg-rose-600 hover:bg-rose-500 disabled:opacity-50 text-xs font-medium text-white inline-flex items-center gap-2 cursor-pointer transition-colors"
+                    >
+                      {quickOpeningBusy && <Loader2 className="w-3.5 h-3.5 animate-spin" />}
+                      {quickOpeningBusy ? 'Salvando...' : 'Salvar'}
+                    </button>
+                  </div>
+                </form>
+              </div>
+            </div>
+          );
+        })()}
       </main>
     </div>
   );
