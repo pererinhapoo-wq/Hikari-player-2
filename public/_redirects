@@ -1,0 +1,4 @@
+https://hikaritv.cc.cd/* https://hikaritv.com/:splat 301
+https://hikariplayer.cc.cd/* https://hikaritv.com/:splat 301
+/watch/:id/ep-:n /e/:id#ep-:n 301
+/watch/:id /e/:id 301

@@ -1,0 +1,11 @@
+name: rebuild
+on:
+  schedule:
+    - cron: '0 6 * * *'
+  workflow_dispatch:
+jobs:
+  hook:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Pages deploy
+        run: curl -fsS -X POST "${{ secrets.PAGES_DEPLOY_HOOK }}"
