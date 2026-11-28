@@ -370,6 +370,7 @@ function AdminPage() {
 
   // Episode actions state
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
+  const [menuPosition, setMenuPosition] = useState<{ top: number; left: number } | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
   const [episodeCopyFeedback, setEpisodeCopyFeedback] = useState<
     Record<string, EpisodeCopyOutcome>
@@ -459,23 +460,38 @@ function AdminPage() {
 
     const handlePointerDown = (event: PointerEvent) => {
       const target = event.target as HTMLElement | null;
-      if (target?.closest('[data-episode-menu-root="true"]')) {
+      if (
+        target?.closest('[data-episode-menu-root="true"]') ||
+        target?.closest('[role="menu"]')
+      ) {
         return;
       }
       setOpenMenuId(null);
+      setMenuPosition(null);
     };
 
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setOpenMenuId(null);
+        setMenuPosition(null);
       }
+    };
+
+    const handleScrollOrResize = () => {
+      setOpenMenuId(null);
+      setMenuPosition(null);
     };
 
     document.addEventListener('pointerdown', handlePointerDown);
     document.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('scroll', handleScrollOrResize, { passive: true });
+    window.addEventListener('resize', handleScrollOrResize);
+
     return () => {
       document.removeEventListener('pointerdown', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown);
+      window.removeEventListener('scroll', handleScrollOrResize);
+      window.removeEventListener('resize', handleScrollOrResize);
     };
   }, [openMenuId]);
 
@@ -808,6 +824,34 @@ function AdminPage() {
     resetThumbnailState();
   }, [resetThumbnailState]);
 
+  const handleToggleMenu = (e: React.MouseEvent<HTMLButtonElement>, epId: string) => {
+    if (openMenuId === epId) {
+      setOpenMenuId(null);
+      setMenuPosition(null);
+      return;
+    }
+    const rect = e.currentTarget.getBoundingClientRect();
+    const menuWidth = 224; // w-56 (14rem)
+    const menuHeight = 210;
+    const margin = 12;
+
+    let left = rect.right - menuWidth;
+    if (left < margin) {
+      left = margin;
+    }
+    if (left + menuWidth > window.innerWidth - margin) {
+      left = window.innerWidth - menuWidth - margin;
+    }
+
+    let top = rect.bottom + 6;
+    if (top + menuHeight > window.innerHeight - margin && rect.top - menuHeight - 6 >= margin) {
+      top = rect.top - menuHeight - 6;
+    }
+
+    setMenuPosition({ top, left });
+    setOpenMenuId(epId);
+  };
+
   const handleLogout = async () => {
     await adminLogoutFn();
     syncedFormRouteKeyRef.current = null;
@@ -820,6 +864,8 @@ function AdminPage() {
     setGroupPage(1);
     setSearchQuery('');
     setSavedBanner(null);
+    setOpenMenuId(null);
+    setMenuPosition(null);
     Object.values(episodeCopyTimersRef.current).forEach((timerId) => {
       window.clearTimeout(timerId);
     });
@@ -3964,9 +4010,7 @@ function AdminPage() {
                                           <div className="relative" data-episode-menu-root="true">
                                             <button
                                               type="button"
-                                              onClick={() =>
-                                                setOpenMenuId((curr) => (curr === ep.id ? null : ep.id))
-                                              }
+                                              onClick={(e) => handleToggleMenu(e, ep.id)}
                                               aria-label={`Mais ações para ${epLabel}`}
                                               aria-haspopup="menu"
                                               aria-expanded={isMenuOpen}
@@ -3975,16 +4019,26 @@ function AdminPage() {
                                               <MoreVertical className="w-4 h-4" />
                                             </button>
 
-                                            {isMenuOpen && (
+                                            {isMenuOpen && menuPosition && (
                                               <div
                                                 role="menu"
                                                 aria-label={`Ações de ${epLabel}`}
-                                                className="absolute right-0 top-full mt-1.5 z-30 w-56 rounded-xl bg-[#0D1018] border border-white/15 shadow-xl py-1"
+                                                style={{
+                                                  position: 'fixed',
+                                                  top: `${menuPosition.top}px`,
+                                                  left: `${menuPosition.left}px`,
+                                                  width: '14rem',
+                                                }}
+                                                className="z-50 rounded-xl bg-[#0D1018] border border-white/15 shadow-2xl py-1"
                                               >
                                                 <button
                                                   type="button"
                                                   role="menuitem"
-                                                  onClick={() => handleEditStart(ep)}
+                                                  onClick={() => {
+                                                    setOpenMenuId(null);
+                                                    setMenuPosition(null);
+                                                    handleEditStart(ep);
+                                                  }}
                                                   className="w-full px-3.5 py-2.5 text-left text-xs font-medium text-slate-200 hover:bg-white/5 inline-flex items-center gap-2.5 cursor-pointer"
                                                 >
                                                   <Pencil className="w-3.5 h-3.5 text-slate-400" />
@@ -3998,7 +4052,11 @@ function AdminPage() {
                                                     duplicatingEpisodeId !== null ||
                                                     !initialState.databaseConfigured
                                                   }
-                                                  onClick={() => void handleDuplicateToDubbed(ep)}
+                                                  onClick={() => {
+                                                    setOpenMenuId(null);
+                                                    setMenuPosition(null);
+                                                    void handleDuplicateToDubbed(ep);
+                                                  }}
                                                   className="w-full px-3.5 py-2.5 text-left text-xs font-medium text-slate-200 hover:bg-white/5 disabled:opacity-50 inline-flex items-center gap-2.5 cursor-pointer"
                                                 >
                                                   {duplicatingEpisodeId === ep.id ? (
@@ -4015,7 +4073,11 @@ function AdminPage() {
                                                   type="button"
                                                   role="menuitem"
                                                   disabled={isTesting}
-                                                  onClick={() => void handleTestEpisodeSources(ep)}
+                                                  onClick={() => {
+                                                    setOpenMenuId(null);
+                                                    setMenuPosition(null);
+                                                    void handleTestEpisodeSources(ep);
+                                                  }}
                                                   className="w-full px-3.5 py-2.5 text-left text-xs font-medium text-slate-200 hover:bg-white/5 disabled:opacity-50 inline-flex items-center gap-2.5 cursor-pointer"
                                                 >
                                                   <Activity className="w-3.5 h-3.5 text-slate-400" />
@@ -4029,6 +4091,7 @@ function AdminPage() {
                                                   role="menuitem"
                                                   onClick={() => {
                                                     setOpenMenuId(null);
+                                                    setMenuPosition(null);
                                                     setConfirmDeleteId(ep.id);
                                                   }}
                                                   className="w-full px-3.5 py-2.5 text-left text-xs font-medium text-rose-300 hover:bg-rose-500/10 inline-flex items-center gap-2.5 cursor-pointer"
