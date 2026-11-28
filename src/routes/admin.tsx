@@ -37,6 +37,7 @@ import {
   X,
 } from 'lucide-react';
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import {
   type AdminBackPlan,
   getActiveAdminView,
@@ -85,6 +86,7 @@ import { getOptimizedImageProps } from '@/lib/image-optimization';
 import { formatOpeningTimestamp, parseOpeningRange } from '@/lib/opening-skip';
 import { PLAYBACK_SOURCE_CATEGORY_LABELS } from '@/lib/playback-diagnostics';
 import type { PlaybackDiagnosticsSnapshot } from '@/lib/playback-diagnostics-store';
+import { acquireBodyScrollLock } from '@/lib/scroll-lock';
 import {
   adminClearPlaybackDiagnosticsFn,
   adminCreateEpisodeFn,
@@ -395,6 +397,18 @@ function AdminPage() {
   const [quickOpeningBusy, setQuickOpeningBusy] = useState(false);
   const [quickOpeningSuccessNotice, setQuickOpeningSuccessNotice] = useState<string | null>(null);
   const quickOpeningTimerRef = useRef<number | null>(null);
+  const quickOpeningDialogRef = useRef<HTMLDivElement | null>(null);
+  const quickOpeningBusyRef = useRef(false);
+  quickOpeningBusyRef.current = quickOpeningBusy;
+
+  const quickOpeningTargetEp = useMemo(
+    () =>
+      quickOpeningEpisodeId
+        ? initialState.episodes.find((item) => item.id === quickOpeningEpisodeId) ?? null
+        : null,
+    [initialState.episodes, quickOpeningEpisodeId]
+  );
+  const isQuickOpeningModalOpen = Boolean(quickOpeningTargetEp);
 
   // Source diagnostics (form Player 1 + episode list)
   const [slotTesting, setSlotTesting] = useState(false);
@@ -875,12 +889,33 @@ function AdminPage() {
     setQuickOpeningSuccessNotice(null);
   };
 
-  const handleCloseQuickOpening = () => {
+  const handleCloseQuickOpening = useCallback(() => {
     setQuickOpeningEpisodeId(null);
     setQuickOpeningStart('');
     setQuickOpeningEnd('');
     setQuickOpeningError(null);
-  };
+  }, []);
+
+  // Lock background page scroll while Quick Opening modal is open and restore exact position on close/unmount
+  useEffect(() => {
+    if (!isQuickOpeningModalOpen) return;
+
+    const releaseScrollLock = acquireBodyScrollLock({
+      getAllowedContainer: () => quickOpeningDialogRef.current,
+    });
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape' && !quickOpeningBusyRef.current) {
+        handleCloseQuickOpening();
+      }
+    };
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('keydown', handleKeyDown);
+      releaseScrollLock();
+    };
+  }, [isQuickOpeningModalOpen, handleCloseQuickOpening]);
 
   const handleSaveQuickOpening = async (e: FormEvent) => {
     e.preventDefault();
@@ -4610,19 +4645,33 @@ function AdminPage() {
           </div>
         )}
 
-        {/* Quick Opening Times Modal Dialog */}
-        {quickOpeningEpisodeId && (() => {
-          const quickOpeningTargetEp = initialState.episodes.find(
-            (item) => item.id === quickOpeningEpisodeId
-          );
-          if (!quickOpeningTargetEp) return null;
-          return (
-            <div className="fixed inset-0 z-50 bg-black/70 backdrop-blur-sm flex items-center justify-center p-4">
-              <div className="w-full max-w-md rounded-2xl bg-[#11151E] border border-white/15 shadow-2xl p-5 sm:p-6 space-y-5 animate-in fade-in zoom-in-95 duration-150">
+        {/* Quick Opening Times Modal Dialog (portaled to body to isolate from page transform & lock background scroll) */}
+        {typeof document !== 'undefined' &&
+          quickOpeningTargetEp &&
+          createPortal(
+            <div
+              className="fixed inset-0 z-50 flex items-center justify-center p-4 overscroll-contain"
+              data-quick-opening-overlay="true"
+            >
+              <div
+                aria-hidden="true"
+                className="fixed inset-0 bg-black/70 backdrop-blur-sm touch-none overscroll-none"
+              />
+              <div
+                ref={quickOpeningDialogRef}
+                role="dialog"
+                aria-modal="true"
+                aria-labelledby="quick-opening-modal-title"
+                data-quick-opening-dialog="true"
+                className="relative z-10 w-full max-w-md max-h-[calc(100dvh-2rem)] overflow-y-auto overscroll-contain rounded-2xl bg-[#11151E] border border-white/15 shadow-2xl p-5 sm:p-6 space-y-5 animate-in fade-in zoom-in-95 duration-150"
+              >
                 <div className="flex items-center justify-between pb-3 border-b border-white/10">
                   <div className="flex items-center gap-2.5 min-w-0">
                     <Clock className="w-4 h-4 text-rose-400 shrink-0" />
-                    <h2 className="text-sm font-semibold text-white truncate">
+                    <h2
+                      id="quick-opening-modal-title"
+                      className="text-sm font-semibold text-white truncate"
+                    >
                       Tempos da Opening · {formatEpisodeIdentification(quickOpeningTargetEp)}
                     </h2>
                   </div>
@@ -4640,10 +4689,14 @@ function AdminPage() {
                 <form onSubmit={handleSaveQuickOpening} className="space-y-4">
                   <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
                     <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                      <label
+                        htmlFor="quick-opening-start"
+                        className="block text-xs font-medium text-slate-300 mb-1.5"
+                      >
                         Início da Opening
                       </label>
                       <input
+                        id="quick-opening-start"
                         type="text"
                         value={quickOpeningStart}
                         onChange={(e) => setQuickOpeningStart(e.target.value)}
@@ -4653,10 +4706,14 @@ function AdminPage() {
                       />
                     </div>
                     <div>
-                      <label className="block text-xs font-medium text-slate-300 mb-1.5">
+                      <label
+                        htmlFor="quick-opening-end"
+                        className="block text-xs font-medium text-slate-300 mb-1.5"
+                      >
                         Fim da Opening
                       </label>
                       <input
+                        id="quick-opening-end"
                         type="text"
                         value={quickOpeningEnd}
                         onChange={(e) => setQuickOpeningEnd(e.target.value)}
@@ -4697,9 +4754,9 @@ function AdminPage() {
                   </div>
                 </form>
               </div>
-            </div>
-          );
-        })()}
+            </div>,
+            document.body
+          )}
       </main>
     </div>
   );
