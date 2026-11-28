@@ -1,3 +1,9 @@
+import type {
+  InternalPlayableSource,
+  PlayableSource,
+  PublicPlayableSource,
+} from '@/lib/types';
+
 export type SourceKind = 'mp4' | 'webm' | 'hls' | 'bunny' | 'iframe';
 
 export type ExplicitSourceKind = 'iframe' | 'hls' | 'mp4';
@@ -93,7 +99,8 @@ export function isDirectMediaHost(hostname: string): boolean {
   return matchesHostList(hostname, DIRECT_MEDIA_HOSTS);
 }
 
-export function isDirectMediaUrl(rawUrl: string): boolean {
+export function isDirectMediaUrl(rawUrl: string | null | undefined): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
   try {
     const parsed = new URL(rawUrl.trim());
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -542,7 +549,8 @@ export function isVercelBlobHost(hostname: string): boolean {
   );
 }
 
-export function isVercelBlobUrl(rawUrl: string): boolean {
+export function isVercelBlobUrl(rawUrl: string | null | undefined): boolean {
+  if (!rawUrl || typeof rawUrl !== 'string') return false;
   try {
     const parsed = new URL(rawUrl.trim());
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
@@ -1332,8 +1340,45 @@ export function getEpisodeMirrorInfo(
   };
 }
 
+export function sanitizePlayableSourceForPublic(
+  source: InternalPlayableSource | PlayableSource
+): PublicPlayableSource {
+  if (source.needsProxy) {
+    return {
+      slot: source.slot,
+      label: source.label,
+      kind: source.kind,
+      provider: source.provider,
+      needsProxy: true,
+      requiresServerResolve: source.requiresServerResolve,
+      formatLabel: source.formatLabel,
+      playUrl: source.playUrl,
+      ...(source.isMirror !== undefined ? { isMirror: source.isMirror } : {}),
+      ...(source.isExpirable !== undefined ? { isExpirable: source.isExpirable } : {}),
+    };
+  }
+
+  return {
+    slot: source.slot,
+    label: source.label,
+    rawUrl: source.rawUrl ?? source.playUrl,
+    resolvedUrl: source.resolvedUrl ?? source.playUrl,
+    ...(source.fallbackIframeUrl !== undefined
+      ? { fallbackIframeUrl: source.fallbackIframeUrl }
+      : {}),
+    kind: source.kind,
+    provider: source.provider,
+    needsProxy: false,
+    requiresServerResolve: source.requiresServerResolve,
+    formatLabel: source.formatLabel,
+    playUrl: source.playUrl,
+    ...(source.isMirror !== undefined ? { isMirror: source.isMirror } : {}),
+    ...(source.isExpirable !== undefined ? { isExpirable: source.isExpirable } : {}),
+  };
+}
+
 export function getNextFallbackSourceIndex(
-  sources: NormalizedVideoSource[],
+  sources: ReadonlyArray<Pick<NormalizedVideoSource, 'slot'>>,
   currentIndex: number,
   failedSlots: ReadonlySet<number>
 ): number | null {

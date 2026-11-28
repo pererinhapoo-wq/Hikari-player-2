@@ -467,17 +467,19 @@ export function EpisodePlayer({
 
     async function prepareActiveSource(source: PlayableSource) {
       const isBlobDirect =
-        isDirectMediaUrl(source.resolvedUrl) ||
-        isDirectMediaUrl(source.rawUrl) ||
-        isVercelBlobUrl(source.resolvedUrl) ||
-        isVercelBlobUrl(source.rawUrl);
+        Boolean(source.resolvedUrl && isDirectMediaUrl(source.resolvedUrl)) ||
+        Boolean(source.rawUrl && isDirectMediaUrl(source.rawUrl)) ||
+        Boolean(source.resolvedUrl && isVercelBlobUrl(source.resolvedUrl)) ||
+        Boolean(source.rawUrl && isVercelBlobUrl(source.rawUrl)) ||
+        isDirectMediaUrl(source.playUrl) ||
+        isVercelBlobUrl(source.playUrl);
       if (isBlobDirect) {
         clearIframeLoadTimer();
         if (!cancelled) {
           setResolvedRuntime({
             slot: source.slot,
             mode: 'video',
-            url: source.resolvedUrl || source.rawUrl,
+            url: source.resolvedUrl || source.rawUrl || source.playUrl,
             strategy: 'direct',
           });
         }
@@ -501,9 +503,10 @@ export function EpisodePlayer({
       }
 
       if (source.kind === 'bunny' && source.requiresServerResolve) {
+        const targetBunnyUrl = source.rawUrl || source.resolvedUrl || source.playUrl;
         try {
           const res = await fetch(
-            `/api/resolve-bunny?url=${encodeURIComponent(source.rawUrl)}`
+            `/api/resolve-bunny?url=${encodeURIComponent(targetBunnyUrl)}`
           );
           const payload = (await res.json()) as {
             ok: boolean;
@@ -706,7 +709,7 @@ export function EpisodePlayer({
             },
             onFallbackDirect: (_reason, diagnostic) => {
               const source = activeSourceRef.current;
-              if (!source) {
+              if (!source || !source.resolvedUrl) {
                 triggerFailoverRef.current(resolvedRuntime.slot, diagnostic.userMessage);
                 return;
               }
@@ -1776,6 +1779,7 @@ export function EpisodePlayer({
                 }
                 if (
                   activeSource &&
+                  activeSource.resolvedUrl &&
                   resolvedRuntime?.mode === 'hls' &&
                   canUseDirectMaximaimgFallback(
                     activeSource,

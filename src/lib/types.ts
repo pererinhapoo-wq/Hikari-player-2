@@ -1,7 +1,36 @@
 import type { ExplicitSourceKind, NormalizedVideoSource } from '@/lib/video-sources';
 
-export interface PlayableSource extends NormalizedVideoSource {
+export interface InternalPlayableSource extends NormalizedVideoSource {
   playUrl: string;
+}
+
+export type PublicSafeSourceFields = Omit<
+  NormalizedVideoSource,
+  'rawUrl' | 'resolvedUrl' | 'fallbackIframeUrl'
+>;
+
+export interface ProxiedPublicPlayableSource extends PublicSafeSourceFields {
+  needsProxy: true;
+  playUrl: string;
+  rawUrl?: never;
+  resolvedUrl?: never;
+  fallbackIframeUrl?: never;
+}
+
+export interface DirectPublicPlayableSource extends NormalizedVideoSource {
+  needsProxy: false;
+  playUrl: string;
+}
+
+export type PublicPlayableSource =
+  | ProxiedPublicPlayableSource
+  | DirectPublicPlayableSource;
+
+export interface PlayableSource extends PublicSafeSourceFields {
+  playUrl: string;
+  rawUrl?: string;
+  resolvedUrl?: string;
+  fallbackIframeUrl?: string;
 }
 
 export interface EpisodeDto {
@@ -91,7 +120,7 @@ export type PublicEpisodeResult =
         poster_url: string;
         opening_start_seconds: number | null;
         opening_end_seconds: number | null;
-        sources: PlayableSource[];
+        sources: PublicPlayableSource[];
       };
     }
   | { status: 'not_found' }

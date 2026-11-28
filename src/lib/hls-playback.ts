@@ -164,6 +164,9 @@ export function canUseDirectMaximaimgFallback(
   if (currentStrategy !== 'proxy' || alreadyAttemptedDirect) {
     return false;
   }
+  if (!source.resolvedUrl) {
+    return false;
+  }
 
   const check = validateHttpUrl(source.resolvedUrl);
   if (!check.valid || !check.normalizedUrl) {

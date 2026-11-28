@@ -76,8 +76,9 @@ import type {
   DatabaseDiagnosticResult,
   EpisodeDto,
   EpisodeFormPayload,
-  PlayableSource,
+  InternalPlayableSource,
   PublicEpisodeResult,
+  PublicPlayableSource,
   SourceTestReport,
 } from '@/lib/types';
 import { resolveThumbnailSourceForAdmin } from '@/lib/thumbnails';
@@ -91,6 +92,7 @@ import {
   isGoogleVideoUrl,
   isR2StorageUrl,
   isVercelBlobUrl,
+  sanitizePlayableSourceForPublic,
 } from '@/lib/video-sources';
 
 export function resolveProxyPlayUrl(
@@ -286,7 +288,7 @@ export function buildPublicEpisodeResult(episode: PlayerEpisode): PublicEpisodeR
   };
 
   const normalizedSources = collectEpisodeSources(episode);
-  const sources: PlayableSource[] = normalizedSources.map((src) => {
+  const sources: PublicPlayableSource[] = normalizedSources.map((src) => {
     const isMirrorSource = Boolean(
       src.isMirror || isDirectMediaUrl(src.resolvedUrl) || isVercelBlobUrl(src.resolvedUrl)
     );
@@ -319,12 +321,13 @@ export function buildPublicEpisodeResult(episode: PlayerEpisode): PublicEpisodeR
               Boolean(src.isExpirable)
             )
           : src.resolvedUrl;
-    return {
+    const internalSource: InternalPlayableSource = {
       ...src,
       isMirror: isMirrorSource,
       needsProxy: shouldProxy,
       playUrl,
     };
+    return sanitizePlayableSourceForPublic(internalSource);
   });
 
   const cleanAnimeName = sanitizeAnimeName(episode.anime_name);
