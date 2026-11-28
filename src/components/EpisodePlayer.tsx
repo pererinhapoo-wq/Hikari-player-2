@@ -16,7 +16,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   canUseDirectMaximaimgFallback,
   classifyHlsError,
-  decideHlsErrorAction,
+  createHlsRecoveryController,
   type PlaybackStrategy,
 } from '@/lib/hls-playback';
 import { isOpeningSkipVisible } from '@/lib/opening-skip';
@@ -61,6 +61,7 @@ export function EpisodePlayer({
   const videoRef = useRef<HTMLVideoElement>(null);
   const scrubberRef = useRef<HTMLDivElement>(null);
   const hlsInstanceRef = useRef<{ destroy: () => void } | null>(null);
+  const hlsRecoveryCleanupRef = useRef<(() => void) | null>(null);
   const hideControlsTimerRef = useRef<number | null>(null);
   const singleTapTimerRef = useRef<number | null>(null);
   const seekFeedbackTimerRef = useRef<number | null>(null);
@@ -149,6 +150,14 @@ export function EpisodePlayer({
   const activeScrubPointerIdRef = useRef<number | null>(null);
 
   const cleanupHls = useCallback(() => {
+    if (hlsRecoveryCleanupRef.current) {
+      try {
+        hlsRecoveryCleanupRef.current();
+      } catch {
+        // Ignore cleanup errors
+      }
+      hlsRecoveryCleanupRef.current = null;
+    }
     if (hlsInstanceRef.current) {
       try {
         hlsInstanceRef.current.destroy();
@@ -511,9 +520,6 @@ export function EpisodePlayer({
       const el = videoRef.current;
       if (!el || !resolvedRuntime) return;
 
-      let networkRetriesUsed = 0;
-      let mediaRecoveriesUsed = 0;
-
       console.info(
         `[Hikari Player] Iniciando reprodução HLS (slot=${resolvedRuntime.slot}, estratégia=${resolvedRuntime.strategy}).`
       );
@@ -532,6 +538,43 @@ export function EpisodePlayer({
           });
           hlsInstanceRef.current = hls;
 
+          const recoveryController = createHlsRecoveryController({
+            source: activeSourceRef.current,
+            strategy: resolvedRuntime.strategy,
+            alreadyAttemptedDirect: attemptedDirectSlotsRef.current.has(
+              resolvedRuntime.slot
+            ),
+            hls,
+            onRetryScheduled: ({ attempt, maxRetries, delayMs }) => {
+              console.info(
+                `[Hikari Player] Tentando recuperação controlada com hls.startLoad() (tentativa ${attempt}/${maxRetries} em ${delayMs}ms, slot=${resolvedRuntime.slot}, estratégia=${resolvedRuntime.strategy}).`
+              );
+            },
+            onFallbackDirect: (_reason, diagnostic) => {
+              const source = activeSourceRef.current;
+              if (!source) {
+                triggerFailoverRef.current(resolvedRuntime.slot, diagnostic.userMessage);
+                return;
+              }
+              attemptedDirectSlotsRef.current.add(resolvedRuntime.slot);
+              console.warn(
+                `[Hikari Player] Proxy HLS falhou (${diagnostic.category}, HTTP ${diagnostic.httpCode ?? 'N/A'}); tentando URL original direta Maximaimg (tentativa única).`
+              );
+              cleanupHls();
+              setStatusNotice('Tentando conexão direta com o servidor de vídeo...');
+              setResolvedRuntime({
+                slot: resolvedRuntime.slot,
+                mode: 'hls',
+                url: source.resolvedUrl,
+                strategy: 'direct',
+              });
+            },
+            onFailover: (reason) => {
+              triggerFailoverRef.current(resolvedRuntime.slot, reason);
+            },
+          });
+          hlsRecoveryCleanupRef.current = recoveryController.dispose;
+
           hls.on(Hls.Events.MANIFEST_PARSED, () => {
             if (cancelled) return;
             console.info(
@@ -547,12 +590,13 @@ export function EpisodePlayer({
           hls.on(Hls.Events.ERROR, (_event, data) => {
             if (cancelled || !data.fatal) return;
 
-            const diagnostic = classifyHlsError({
+            const errorInput = {
               type: data.type,
               details: data.details,
               httpCode: data.response?.code,
               url: data.url ?? data.frag?.url ?? data.context?.url ?? resolvedRuntime.url,
-            });
+            };
+            const diagnostic = classifyHlsError(errorInput);
 
             console.warn('[Hikari Player] Erro fatal HLS.js:', {
               slot: resolvedRuntime.slot,
@@ -570,6 +614,7 @@ export function EpisodePlayer({
               source?.fallbackIframeUrl &&
               source.provider === 'mux'
             ) {
+              recoveryController.dispose();
               setStatusNotice('Stream HLS indisponível — alternando para embed Mux.');
               setResolvedRuntime({
                 slot: source.slot,
@@ -581,50 +626,7 @@ export function EpisodePlayer({
               return;
             }
 
-            const alreadyAttemptedDirect = attemptedDirectSlotsRef.current.has(
-              resolvedRuntime.slot
-            );
-            const decision = decideHlsErrorAction({
-              source,
-              strategy: resolvedRuntime.strategy,
-              alreadyAttemptedDirect,
-              networkRetriesUsed,
-              mediaRecoveriesUsed,
-              diagnostic,
-            });
-
-            if (decision.action === 'recover_media') {
-              mediaRecoveriesUsed += 1;
-              hls.recoverMediaError();
-              return;
-            }
-
-            if (decision.action === 'retry_load') {
-              networkRetriesUsed += 1;
-              console.info(
-                `[Hikari Player] Tentando recuperação controlada com hls.startLoad() (slot=${resolvedRuntime.slot}, estratégia=${resolvedRuntime.strategy}).`
-              );
-              hls.startLoad();
-              return;
-            }
-
-            if (decision.action === 'fallback_direct' && source) {
-              attemptedDirectSlotsRef.current.add(resolvedRuntime.slot);
-              console.warn(
-                `[Hikari Player] Proxy HLS falhou (${diagnostic.category}, HTTP ${diagnostic.httpCode ?? 'N/A'}); tentando URL original direta Maximaimg (tentativa única).`
-              );
-              cleanupHls();
-              setStatusNotice('Tentando conexão direta com o servidor de vídeo...');
-              setResolvedRuntime({
-                slot: resolvedRuntime.slot,
-                mode: 'hls',
-                url: source.resolvedUrl,
-                strategy: 'direct',
-              });
-              return;
-            }
-
-            triggerFailoverRef.current(resolvedRuntime.slot, decision.reason);
+            recoveryController.handleFatalError(errorInput);
           });
 
           hls.loadSource(resolvedRuntime.url);

@@ -30,12 +30,24 @@ export interface HlsDiagnosticInfo {
 
 export type HlsErrorAction =
   | { action: 'recover_media' }
-  | { action: 'retry_load' }
+  | { action: 'retry_load'; attempt: number; delayMs: number }
   | { action: 'fallback_direct'; reason: string }
   | { action: 'failover'; reason: string };
 
-export const MAX_HLS_NETWORK_RETRIES = 1;
+export const MAX_HLS_NETWORK_RETRIES = 2;
 export const MAX_HLS_MEDIA_RECOVERIES = 2;
+export const HLS_NETWORK_RETRY_BASE_DELAY_MS = 500;
+export const HLS_NETWORK_RETRY_MAX_DELAY_MS = 2000;
+
+export function getHlsNetworkRetryDelayMs(retryAttemptIndex: number): number {
+  const safeAttempt = Number.isFinite(retryAttemptIndex)
+    ? Math.max(0, Math.floor(retryAttemptIndex))
+    : 0;
+  return Math.min(
+    HLS_NETWORK_RETRY_MAX_DELAY_MS,
+    HLS_NETWORK_RETRY_BASE_DELAY_MS * 2 ** safeAttempt
+  );
+}
 
 export function sanitizeUrlForConsole(rawUrl: string | undefined | null): string | null {
   if (!rawUrl) return null;
@@ -241,7 +253,11 @@ export function decideHlsErrorAction(params: {
     diagnostic.category === 'server_error';
 
   if (isRetryableTransient && networkRetriesUsed < MAX_HLS_NETWORK_RETRIES) {
-    return { action: 'retry_load' };
+    return {
+      action: 'retry_load',
+      attempt: networkRetriesUsed + 1,
+      delayMs: getHlsNetworkRetryDelayMs(networkRetriesUsed),
+    };
   }
 
   if (eligibleForDirectFallback && shouldFallbackToDirectOnCategory(diagnostic.category)) {
@@ -254,5 +270,148 @@ export function decideHlsErrorAction(params: {
   return {
     action: 'failover',
     reason: diagnostic.userMessage,
+  };
+}
+
+export interface HlsRecoveryTarget {
+  startLoad: (startPosition?: number) => void;
+  recoverMediaError: () => void;
+}
+
+export interface HlsTimerApi {
+  setTimeout: (fn: () => void, delayMs: number) => ReturnType<typeof setTimeout>;
+  clearTimeout: (id: ReturnType<typeof setTimeout>) => void;
+}
+
+export interface CreateHlsRecoveryControllerOptions {
+  source: Pick<PlayableSource, 'provider' | 'kind' | 'resolvedUrl' | 'playUrl'> | null | undefined;
+  strategy: PlaybackStrategy;
+  alreadyAttemptedDirect: boolean;
+  hls: HlsRecoveryTarget;
+  onRetryScheduled?: (info: {
+    attempt: number;
+    maxRetries: number;
+    delayMs: number;
+    diagnostic: HlsDiagnosticInfo;
+  }) => void;
+  onRetryExecuted?: (info: {
+    attempt: number;
+    maxRetries: number;
+    delayMs: number;
+    diagnostic: HlsDiagnosticInfo;
+  }) => void;
+  onRecoverMedia?: (info: {
+    attempt: number;
+    maxRecoveries: number;
+    diagnostic: HlsDiagnosticInfo;
+  }) => void;
+  onFallbackDirect: (reason: string, diagnostic: HlsDiagnosticInfo) => void;
+  onFailover: (reason: string, diagnostic: HlsDiagnosticInfo) => void;
+  timers?: HlsTimerApi;
+}
+
+export function createHlsRecoveryController(options: CreateHlsRecoveryControllerOptions) {
+  const timers: HlsTimerApi = options.timers ?? {
+    setTimeout: (fn, ms) => globalThis.setTimeout(fn, ms),
+    clearTimeout: (id) => globalThis.clearTimeout(id),
+  };
+
+  let disposed = false;
+  let networkRetriesUsed = 0;
+  let mediaRecoveriesUsed = 0;
+  let pendingRetryTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const clearPendingTimer = () => {
+    if (pendingRetryTimer !== null) {
+      timers.clearTimeout(pendingRetryTimer);
+      pendingRetryTimer = null;
+    }
+  };
+
+  const dispose = () => {
+    disposed = true;
+    clearPendingTimer();
+  };
+
+  const handleFatalError = (input: HlsErrorInput): HlsErrorAction | null => {
+    if (disposed) {
+      return null;
+    }
+
+    if (pendingRetryTimer !== null) {
+      return null;
+    }
+
+    const diagnostic = classifyHlsError(input);
+    const decision = decideHlsErrorAction({
+      source: options.source,
+      strategy: options.strategy,
+      alreadyAttemptedDirect: options.alreadyAttemptedDirect,
+      networkRetriesUsed,
+      mediaRecoveriesUsed,
+      diagnostic,
+    });
+
+    if (decision.action === 'recover_media') {
+      mediaRecoveriesUsed += 1;
+      options.onRecoverMedia?.({
+        attempt: mediaRecoveriesUsed,
+        maxRecoveries: MAX_HLS_MEDIA_RECOVERIES,
+        diagnostic,
+      });
+      options.hls.recoverMediaError();
+      return decision;
+    }
+
+    if (decision.action === 'retry_load') {
+      networkRetriesUsed += 1;
+      const currentAttempt = decision.attempt;
+      const delayMs = decision.delayMs;
+
+      options.onRetryScheduled?.({
+        attempt: currentAttempt,
+        maxRetries: MAX_HLS_NETWORK_RETRIES,
+        delayMs,
+        diagnostic,
+      });
+
+      pendingRetryTimer = timers.setTimeout(() => {
+        pendingRetryTimer = null;
+        if (disposed) {
+          return;
+        }
+        options.onRetryExecuted?.({
+          attempt: currentAttempt,
+          maxRetries: MAX_HLS_NETWORK_RETRIES,
+          delayMs,
+          diagnostic,
+        });
+        options.hls.startLoad();
+      }, delayMs);
+
+      return decision;
+    }
+
+    if (decision.action === 'fallback_direct') {
+      clearPendingTimer();
+      options.onFallbackDirect(decision.reason, diagnostic);
+      return decision;
+    }
+
+    clearPendingTimer();
+    options.onFailover(decision.reason, diagnostic);
+    return decision;
+  };
+
+  return {
+    handleFatalError,
+    dispose,
+    hasPendingRetry: () => pendingRetryTimer !== null,
+    getState: () => ({
+      disposed,
+      networkRetriesUsed,
+      mediaRecoveriesUsed,
+      hasPendingRetry: pendingRetryTimer !== null,
+    }),
   };
 }

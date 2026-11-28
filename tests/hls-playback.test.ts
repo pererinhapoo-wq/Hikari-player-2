@@ -4,7 +4,12 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 import {
   canUseDirectMaximaimgFallback,
   classifyHlsError,
+  createHlsRecoveryController,
   decideHlsErrorAction,
+  getHlsNetworkRetryDelayMs,
+  HLS_NETWORK_RETRY_BASE_DELAY_MS,
+  HLS_NETWORK_RETRY_MAX_DELAY_MS,
+  MAX_HLS_NETWORK_RETRIES,
 } from '@/lib/hls-playback';
 import {
   buildSignedProxyPath,
@@ -121,7 +126,7 @@ describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () =
       url: maxHls.resolvedUrl,
     });
 
-    // 1ª falha de rede transitória na tentativa direta permite no máximo 1 retry controlado
+    // 1ª e 2ª falhas de rede transitórias na tentativa direta permitem até 2 retries progressivos
     const firstDirectFail = decideHlsErrorAction({
       source: maxHls,
       strategy: 'direct',
@@ -132,7 +137,6 @@ describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () =
     });
     expect(firstDirectFail.action).toBe('retry_load');
 
-    // Após esgotar o retry controlado, vai obrigatoriamente para failover (sem loop)
     const secondDirectFail = decideHlsErrorAction({
       source: maxHls,
       strategy: 'direct',
@@ -141,7 +145,18 @@ describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () =
       mediaRecoveriesUsed: 0,
       diagnostic: corsFailure,
     });
-    expect(secondDirectFail.action).toBe('failover');
+    expect(secondDirectFail.action).toBe('retry_load');
+
+    // Após esgotar as 2 tentativas controladas, vai obrigatoriamente para failover (sem loop)
+    const thirdDirectFail = decideHlsErrorAction({
+      source: maxHls,
+      strategy: 'direct',
+      alreadyAttemptedDirect: true,
+      networkRetriesUsed: 2,
+      mediaRecoveriesUsed: 0,
+      diagnostic: corsFailure,
+    });
+    expect(thirdDirectFail.action).toBe('failover');
   });
 
   it('4. avança para failover dos slots 2–5 quando proxy e acesso direto falham', () => {
@@ -2137,5 +2152,246 @@ describe('Reprodução HLS Maximaimg, Fallback Direto, Proxy e Segurança', () =
     expect(segRes.headers.get('cache-control')).toBe('no-store');
     expect(segRes.headers.get('x-hikari-source-expirable')).toBe('1');
     expect(Array.from(new Uint8Array(await segRes.arrayBuffer()))).toEqual(Array.from(segBytes));
+  });
+
+  it('34. recupera falhas transitórias de rede HLS em até 2 tentativas com intervalo progressivo e failover após esgotar', () => {
+    vi.useFakeTimers();
+    try {
+      expect(MAX_HLS_NETWORK_RETRIES).toBe(2);
+      const firstDelay = getHlsNetworkRetryDelayMs(0);
+      const secondDelay = getHlsNetworkRetryDelayMs(1);
+      const cappedDelay = getHlsNetworkRetryDelayMs(10);
+      expect(firstDelay).toBe(HLS_NETWORK_RETRY_BASE_DELAY_MS);
+      expect(secondDelay).toBeGreaterThan(firstDelay);
+      expect(secondDelay).toBeLessThanOrEqual(HLS_NETWORK_RETRY_MAX_DELAY_MS);
+      expect(cappedDelay).toBe(HLS_NETWORK_RETRY_MAX_DELAY_MS);
+
+      const genericHls = toPlayable('https://cdn.example.com/hls/master.m3u8', 1);
+      const startLoad = vi.fn();
+      const recoverMediaError = vi.fn();
+      const onFallbackDirect = vi.fn();
+      const onFailover = vi.fn();
+      const scheduledDelays: number[] = [];
+
+      const controller = createHlsRecoveryController({
+        source: genericHls,
+        strategy: 'direct',
+        alreadyAttemptedDirect: false,
+        hls: { startLoad, recoverMediaError },
+        onRetryScheduled: ({ delayMs }) => scheduledDelays.push(delayMs),
+        onFallbackDirect,
+        onFailover,
+      });
+
+      // 1ª falha transitória (timeout) -> agenda 1ª tentativa após firstDelay
+      controller.handleFatalError({
+        type: 'networkError',
+        details: 'fragLoadTimeOut',
+        httpCode: 0,
+        url: genericHls.playUrl,
+      });
+      expect(controller.hasPendingRetry()).toBe(true);
+      expect(startLoad).not.toHaveBeenCalled();
+
+      vi.advanceTimersByTime(firstDelay - 1);
+      expect(startLoad).not.toHaveBeenCalled();
+      vi.advanceTimersByTime(1);
+      expect(startLoad).toHaveBeenCalledTimes(1);
+      expect(controller.hasPendingRetry()).toBe(false);
+      expect(onFailover).not.toHaveBeenCalled();
+
+      // 2ª falha transitória (HTTP 503) -> agenda última tentativa adicional após secondDelay progressivo
+      controller.handleFatalError({
+        type: 'networkError',
+        details: 'fragLoadError',
+        httpCode: 503,
+        url: genericHls.playUrl,
+      });
+      expect(controller.hasPendingRetry()).toBe(true);
+      expect(startLoad).toHaveBeenCalledTimes(1);
+
+      vi.advanceTimersByTime(secondDelay - 1);
+      expect(startLoad).toHaveBeenCalledTimes(1);
+      vi.advanceTimersByTime(1);
+      expect(startLoad).toHaveBeenCalledTimes(2);
+      expect(controller.hasPendingRetry()).toBe(false);
+      expect(onFailover).not.toHaveBeenCalled();
+      expect(scheduledDelays).toEqual([firstDelay, secondDelay]);
+
+      // 3ª falha transitória (HTTP 502) -> esgotou as 2 tentativas, aciona failover imediatamente
+      controller.handleFatalError({
+        type: 'networkError',
+        details: 'manifestLoadError',
+        httpCode: 502,
+        url: genericHls.playUrl,
+      });
+      expect(startLoad).toHaveBeenCalledTimes(2);
+      expect(controller.hasPendingRetry()).toBe(false);
+      expect(onFailover).toHaveBeenCalledTimes(1);
+      expect(onFallbackDirect).not.toHaveBeenCalled();
+      expect(recoverMediaError).not.toHaveBeenCalled();
+
+      controller.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('35. não insiste em erros 401, 403 e 404 e preserva tratamento de decode com recoverMediaError()', () => {
+    vi.useFakeTimers();
+    try {
+      const genericHls = toPlayable('https://cdn.example.com/hls/master.m3u8', 1);
+
+      for (const statusCode of [401, 403, 404]) {
+        const startLoad = vi.fn();
+        const recoverMediaError = vi.fn();
+        const onFailover = vi.fn();
+
+        const controller = createHlsRecoveryController({
+          source: genericHls,
+          strategy: 'direct',
+          alreadyAttemptedDirect: false,
+          hls: { startLoad, recoverMediaError },
+          onFallbackDirect: vi.fn(),
+          onFailover,
+        });
+
+        controller.handleFatalError({
+          type: 'networkError',
+          details: 'fragLoadError',
+          httpCode: statusCode,
+          url: genericHls.playUrl,
+        });
+
+        vi.runAllTimers();
+        expect(startLoad).not.toHaveBeenCalled();
+        expect(recoverMediaError).not.toHaveBeenCalled();
+        expect(controller.hasPendingRetry()).toBe(false);
+        expect(onFailover).toHaveBeenCalledTimes(1);
+        controller.dispose();
+      }
+
+      // Erros de decodificação preservam recoverMediaError() até 2 vezes e depois failover
+      const startLoad = vi.fn();
+      const recoverMediaError = vi.fn();
+      const onFailover = vi.fn();
+
+      const decodeController = createHlsRecoveryController({
+        source: genericHls,
+        strategy: 'direct',
+        alreadyAttemptedDirect: false,
+        hls: { startLoad, recoverMediaError },
+        onFallbackDirect: vi.fn(),
+        onFailover,
+      });
+
+      decodeController.handleFatalError({ type: 'mediaError', details: 'fragParsingError' });
+      decodeController.handleFatalError({ type: 'mediaError', details: 'bufferAppendError' });
+      expect(recoverMediaError).toHaveBeenCalledTimes(2);
+      expect(startLoad).not.toHaveBeenCalled();
+      expect(onFailover).not.toHaveBeenCalled();
+
+      decodeController.handleFatalError({ type: 'mediaError', details: 'fragParsingError' });
+      expect(recoverMediaError).toHaveBeenCalledTimes(2);
+      expect(onFailover).toHaveBeenCalledTimes(1);
+      decodeController.dispose();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('36. cancela timers e evita tentativas pendentes após destruição da instância HLS', () => {
+    vi.useFakeTimers();
+    try {
+      const genericHls = toPlayable('https://cdn.example.com/hls/master.m3u8', 1);
+      const startLoad = vi.fn();
+      const recoverMediaError = vi.fn();
+      const onFailover = vi.fn();
+
+      const controller = createHlsRecoveryController({
+        source: genericHls,
+        strategy: 'direct',
+        alreadyAttemptedDirect: false,
+        hls: { startLoad, recoverMediaError },
+        onFallbackDirect: vi.fn(),
+        onFailover,
+      });
+
+      // Agenda tentativa de recuperação para falha transitória
+      controller.handleFatalError({
+        type: 'networkError',
+        details: 'fragLoadError',
+        httpCode: 0,
+        url: genericHls.playUrl,
+      });
+      expect(controller.hasPendingRetry()).toBe(true);
+      expect(vi.getTimerCount()).toBe(1);
+
+      // Destrói a instância antes de o timer disparar
+      controller.dispose();
+      expect(controller.hasPendingRetry()).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+
+      // Avançar o relógio não dispara startLoad nem failover; novos erros pós-dispose são ignorados
+      vi.advanceTimersByTime(10_000);
+      controller.handleFatalError({
+        type: 'networkError',
+        details: 'fragLoadTimeOut',
+        httpCode: 503,
+        url: genericHls.playUrl,
+      });
+      expect(startLoad).not.toHaveBeenCalled();
+      expect(onFailover).not.toHaveBeenCalled();
+      expect(vi.getTimerCount()).toBe(0);
+
+      // Garante que EpisodePlayer.tsx integra cleanupHls com hlsRecoveryCleanupRef
+      const playerSource = fs.readFileSync(
+        path.resolve(process.cwd(), 'src/components/EpisodePlayer.tsx'),
+        'utf8'
+      );
+      expect(playerSource).toContain('createHlsRecoveryController');
+      expect(playerSource).toContain('hlsRecoveryCleanupRef.current = recoveryController.dispose');
+      expect(playerSource).toContain('hlsRecoveryCleanupRef.current()');
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('37. mantém reprodução normal sem timers nem alterações em buffers quando não há falha', () => {
+    vi.useFakeTimers();
+    try {
+      const genericHls = toPlayable('https://cdn.example.com/hls/master.m3u8', 1);
+      const startLoad = vi.fn();
+      const recoverMediaError = vi.fn();
+      const onFailover = vi.fn();
+
+      const controller = createHlsRecoveryController({
+        source: genericHls,
+        strategy: 'direct',
+        alreadyAttemptedDirect: false,
+        hls: { startLoad, recoverMediaError },
+        onFallbackDirect: vi.fn(),
+        onFailover,
+      });
+
+      expect(controller.hasPendingRetry()).toBe(false);
+      expect(vi.getTimerCount()).toBe(0);
+      expect(startLoad).not.toHaveBeenCalled();
+      expect(recoverMediaError).not.toHaveBeenCalled();
+      expect(onFailover).not.toHaveBeenCalled();
+
+      controller.dispose();
+
+      // Preserva configurações de buffer existentes em EpisodePlayer.tsx
+      const playerSource = fs.readFileSync(
+        path.resolve(process.cwd(), 'src/components/EpisodePlayer.tsx'),
+        'utf8'
+      );
+      expect(playerSource).toContain('enableWorker: true');
+      expect(playerSource).toContain('lowLatencyMode: false');
+      expect(playerSource).toContain('backBufferLength: 30');
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });
