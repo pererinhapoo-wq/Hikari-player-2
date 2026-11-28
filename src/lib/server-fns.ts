@@ -286,6 +286,8 @@ export function buildPublicEpisodeResult(episode: PlayerEpisode): PublicEpisodeR
 export const getAdminDashboardFn = createServerFn({ method: 'GET' }).handler(
   async (): Promise<AdminDashboardState> => {
     trySetResponseHeader('Cache-Control', 'private, no-store');
+    trySetResponseHeader('Pragma', 'no-cache');
+    trySetResponseHeader('Vary', 'Cookie');
 
     const authEnv = isAuthEnvConfigured();
     const databaseConfigured = isDatabaseConfigured();

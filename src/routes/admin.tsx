@@ -1,4 +1,4 @@
-import { createFileRoute, useRouter } from '@tanstack/react-router';
+import { createFileRoute, useCanGoBack, useRouter } from '@tanstack/react-router';
 import {
   Activity,
   AlertTriangle,
@@ -36,6 +36,13 @@ import {
   X,
 } from 'lucide-react';
 import { type FormEvent, useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import {
+  type AdminBackPlan,
+  getActiveAdminView,
+  parseAdminSearch,
+  resolveAdminBackPlan,
+  resolvePostSaveNavigationPlan,
+} from '@/lib/admin-navigation';
 import {
   type AnimeSortMode,
   countEpisodeSources,
@@ -129,12 +136,16 @@ import {
 } from '@/lib/r2-resolver';
 
 export const Route = createFileRoute('/admin')({
+  validateSearch: parseAdminSearch,
+  staleTime: 0,
+  gcTime: 0,
   loader: async () => {
     return await getAdminDashboardFn();
   },
   headers: () => ({
     'Cache-Control': 'private, no-store',
     'CDN-Cache-Control': 'private, no-store',
+    Vary: 'Cookie',
   }),
   head: () => ({
     meta: [{ title: 'Administração · Player' }],
@@ -302,6 +313,18 @@ function AnimeThumbnail({
 function AdminPage() {
   const router = useRouter();
   const initialState = Route.useLoaderData();
+  const search = Route.useSearch();
+  const navigate = Route.useNavigate();
+  const canGoBack = useCanGoBack();
+
+  const activeView = getActiveAdminView(search);
+  const batchOpen = activeView === 'batch';
+  const formOpen = activeView === 'create' || activeView === 'edit';
+  const editingId = activeView === 'edit' ? (search.ep ?? null) : null;
+
+  const syncedFormRouteKeyRef = useRef<string | null>(null);
+  const lastLibraryIndexRef = useRef<number | null>(null);
+  const hasAutoOpenedBatchRef = useRef(false);
 
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
@@ -318,8 +341,6 @@ function AdminPage() {
   const [sortBy, setSortBy] = useState<AnimeSortMode>('recent');
 
   // Form modal/panel state (single primary URL)
-  const [formOpen, setFormOpen] = useState(false);
-  const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<SinglePlayerFormState>(EMPTY_FORM);
   const [formError, setFormError] = useState<string | null>(null);
   const [saveBusy, setSaveBusy] = useState(false);
@@ -401,7 +422,6 @@ function AdminPage() {
   const [playbackDiagnosticsError, setPlaybackDiagnosticsError] = useState<string | null>(null);
 
   // Batch import state ("Importar em lote")
-  const [batchOpen, setBatchOpen] = useState(false);
   const [batchInput, setBatchInput] = useState('');
   const [batchJob, setBatchJob] = useState<BatchImportJobState | null>(null);
   const [batchRunning, setBatchRunning] = useState(false);
@@ -418,10 +438,20 @@ function AdminPage() {
     if (saved.rawInput && !batchInput) {
       setBatchInput(saved.rawInput);
     }
-    if (hasPendingBatchResume(saved)) {
-      setBatchOpen(true);
+    if (
+      !hasAutoOpenedBatchRef.current &&
+      initialState.authenticated &&
+      activeView === 'library' &&
+      hasPendingBatchResume(saved)
+    ) {
+      hasAutoOpenedBatchRef.current = true;
+      lastLibraryIndexRef.current = router.history.location.state.__TSR_index ?? null;
+      void navigate({
+        to: '/admin',
+        search: { view: 'batch' },
+      });
     }
-  }, []);
+  }, [activeView, initialState.authenticated, navigate, router]);
 
   // Close three-dots menu when clicking outside or pressing Escape
   useEffect(() => {
@@ -714,28 +744,29 @@ function AdminPage() {
     }
   };
 
-  const handleLogout = async () => {
-    await adminLogoutFn();
-    setFormOpen(false);
-    setEditingId(null);
-    setForm(EMPTY_FORM);
-    setDuplicatedNotice(null);
-    resetFormTestState();
-    setExpandedGroups({});
-    setPendingFocusGroupKey(null);
-    setGroupPage(1);
-    setSearchQuery('');
-    setSavedBanner(null);
-    Object.values(episodeCopyTimersRef.current).forEach((timerId) => {
-      window.clearTimeout(timerId);
-    });
-    episodeCopyTimersRef.current = {};
-    setEpisodeCopyFeedback({});
-    setShowDiagnostic(false);
-    setDiagnostic(null);
-    setDiagnosticError(null);
-    await router.invalidate();
-  };
+  const executeBackPlan = useCallback(
+    (plan: AdminBackPlan) => {
+      if (plan.type === 'history_back') {
+        router.history.back();
+        return;
+      }
+      void navigate({
+        to: plan.to,
+        search: plan.search,
+        replace: plan.replace,
+      });
+    },
+    [navigate, router]
+  );
+
+  const handleGoBackFromSubView = useCallback(() => {
+    executeBackPlan(
+      resolveAdminBackPlan({
+        canGoBack,
+        currentView: activeView,
+      })
+    );
+  }, [activeView, canGoBack, executeBackPlan]);
 
   const resetThumbnailState = useCallback(() => {
     if (thumbAbortRef.current) {
@@ -764,7 +795,7 @@ function AdminPage() {
     };
   }, []);
 
-  const resetFormTestState = () => {
+  const resetFormTestState = useCallback(() => {
     setFormError(null);
     setPosterPreviewError(false);
     setSlotTesting(false);
@@ -775,25 +806,56 @@ function AdminPage() {
     setR2ResolveError(null);
     setR2AppliedNotice(null);
     resetThumbnailState();
+  }, [resetThumbnailState]);
+
+  const handleLogout = async () => {
+    await adminLogoutFn();
+    syncedFormRouteKeyRef.current = null;
+    lastLibraryIndexRef.current = null;
+    setForm(EMPTY_FORM);
+    setDuplicatedNotice(null);
+    resetFormTestState();
+    setExpandedGroups({});
+    setPendingFocusGroupKey(null);
+    setGroupPage(1);
+    setSearchQuery('');
+    setSavedBanner(null);
+    Object.values(episodeCopyTimersRef.current).forEach((timerId) => {
+      window.clearTimeout(timerId);
+    });
+    episodeCopyTimersRef.current = {};
+    setEpisodeCopyFeedback({});
+    setShowDiagnostic(false);
+    setDiagnostic(null);
+    setDiagnosticError(null);
+    if (activeView !== 'library') {
+      await navigate({ to: '/admin', search: {}, replace: true });
+    }
+    await router.invalidate();
   };
 
   const handleOpenCreateForm = (prefillAnimeName?: string) => {
-    setEditingId(null);
+    const cleanPrefill = prefillAnimeName?.trim() ?? '';
     setDuplicatedNotice(null);
+    syncedFormRouteKeyRef.current = `create:${cleanPrefill}`;
     setForm({
       ...EMPTY_FORM,
-      anime_name: prefillAnimeName ?? '',
+      anime_name: cleanPrefill,
     });
     resetFormTestState();
     setOpenMenuId(null);
     setConfirmDeleteId(null);
-    setFormOpen(true);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    lastLibraryIndexRef.current =
+      activeView === 'library' ? (router.history.location.state.__TSR_index ?? null) : null;
+    void navigate({
+      to: '/admin',
+      search: cleanPrefill ? { view: 'create', anime: cleanPrefill } : { view: 'create' },
+    });
   };
 
   const handleEditStart = (ep: EpisodeDto) => {
-    setEditingId(ep.id);
     setDuplicatedNotice(null);
+    syncedFormRouteKeyRef.current = `edit:${ep.id}`;
     setForm({
       anime_name: ep.anime_name ?? '',
       episode_number: ep.episode_number ?? '',
@@ -809,16 +871,20 @@ function AdminPage() {
     resetFormTestState();
     setOpenMenuId(null);
     setConfirmDeleteId(null);
-    setFormOpen(true);
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    lastLibraryIndexRef.current =
+      activeView === 'library' ? (router.history.location.state.__TSR_index ?? null) : null;
+    void navigate({
+      to: '/admin',
+      search: { view: 'edit', ep: ep.id },
+    });
   };
 
   const handleCloseForm = () => {
-    setFormOpen(false);
-    setEditingId(null);
+    syncedFormRouteKeyRef.current = null;
     setDuplicatedNotice(null);
     setForm(EMPTY_FORM);
     resetFormTestState();
+    handleGoBackFromSubView();
   };
 
   const handleClearPrimarySource = () => {
@@ -974,6 +1040,58 @@ function AdminPage() {
     if (!editingId) return null;
     return initialState.episodes.find((item) => item.id === editingId) ?? null;
   }, [editingId, initialState.episodes]);
+
+  // Keep form state synchronized when navigating via browser history (Back/Forward) or direct URL
+  useEffect(() => {
+    if (!initialState.authenticated) {
+      syncedFormRouteKeyRef.current = null;
+      return;
+    }
+
+    if (activeView === 'create') {
+      const key = `create:${search.anime ?? ''}`;
+      if (syncedFormRouteKeyRef.current !== key) {
+        syncedFormRouteKeyRef.current = key;
+        setDuplicatedNotice(null);
+        setForm({
+          ...EMPTY_FORM,
+          anime_name: search.anime ?? '',
+        });
+        resetFormTestState();
+      }
+      return;
+    }
+
+    if (activeView === 'edit' && editingId) {
+      const key = `edit:${editingId}`;
+      if (editingEpisode && syncedFormRouteKeyRef.current !== key) {
+        syncedFormRouteKeyRef.current = key;
+        setForm({
+          anime_name: editingEpisode.anime_name ?? '',
+          episode_number: editingEpisode.episode_number ?? '',
+          title: editingEpisode.title ?? '',
+          opening_start: formatOpeningTimestamp(editingEpisode.opening_start_seconds),
+          opening_end: formatOpeningTimestamp(editingEpisode.opening_end_seconds),
+          poster_url: editingEpisode.poster_url,
+          video_url: editingEpisode.video_url,
+          source_kind: editingEpisode.source_kind ?? '',
+          source_referer: editingEpisode.source_referer ?? '',
+          force_proxy: editingEpisode.force_proxy !== false,
+        });
+        resetFormTestState();
+      }
+      return;
+    }
+
+    syncedFormRouteKeyRef.current = null;
+  }, [
+    activeView,
+    editingEpisode,
+    editingId,
+    initialState.authenticated,
+    resetFormTestState,
+    search.anime,
+  ]);
 
   const editingEpisodeSources = useMemo(() => {
     return editingEpisode ? getEpisodeSourcesList(editingEpisode) : [];
@@ -1183,10 +1301,6 @@ function AdminPage() {
         const targetKey = normalizeAnimeKey(res.episode.anime_name);
         setExpandedGroups((prev) => ({ ...prev, [targetKey]: true }));
         setPendingFocusGroupKey(targetKey);
-        setEditingId(null);
-        setDuplicatedNotice(null);
-        setForm(EMPTY_FORM);
-        setFormOpen(false);
       } else {
         const res = await adminCreateEpisodeFn({ data: payload });
         if (!res.ok) {
@@ -1201,11 +1315,25 @@ function AdminPage() {
         const targetKey = normalizeAnimeKey(res.episode.anime_name);
         setExpandedGroups((prev) => ({ ...prev, [targetKey]: true }));
         setPendingFocusGroupKey(targetKey);
-        setForm(EMPTY_FORM);
-        setFormOpen(false);
       }
+
+      syncedFormRouteKeyRef.current = null;
+      setDuplicatedNotice(null);
+      setForm(EMPTY_FORM);
       resetFormTestState();
       await router.invalidate();
+
+      const openedDirectlyFromLibrary =
+        lastLibraryIndexRef.current !== null &&
+        router.history.location.state.__TSR_index === lastLibraryIndexRef.current + 1;
+      lastLibraryIndexRef.current = null;
+
+      executeBackPlan(
+        resolvePostSaveNavigationPlan({
+          canGoBack: router.history.canGoBack(),
+          openedDirectlyFromLibrary,
+        })
+      );
     } catch (err) {
       setFormError(err instanceof Error ? err.message : 'Erro ao salvar episódio.');
     } finally {
@@ -1532,8 +1660,18 @@ function AdminPage() {
                 <button
                   type="button"
                   onClick={() => {
-                    setFormOpen(false);
-                    setBatchOpen((prev) => !prev);
+                    if (batchOpen) {
+                      handleGoBackFromSubView();
+                      return;
+                    }
+                    lastLibraryIndexRef.current =
+                      activeView === 'library'
+                        ? (router.history.location.state.__TSR_index ?? null)
+                        : null;
+                    void navigate({
+                      to: '/admin',
+                      search: { view: 'batch' },
+                    });
                   }}
                   aria-pressed={batchOpen}
                   className={`min-h-[40px] sm:h-9 px-2.5 sm:px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/70 ${
@@ -2102,7 +2240,7 @@ function AdminPage() {
                   <div className="flex items-center gap-3 min-w-0">
                     <button
                       type="button"
-                      onClick={() => setBatchOpen(false)}
+                      onClick={handleGoBackFromSubView}
                       className="min-h-[40px] sm:h-9 px-3 rounded-xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer shrink-0 transition-colors"
                     >
                       <ArrowLeft className="w-3.5 h-3.5" />
@@ -2364,10 +2502,12 @@ function AdminPage() {
                 )}
               </section>
             ) : formOpen ? (
-              /* VIEW 1: Create / Edit Episode Form */
-              <section className="bg-[#11151E] border border-white/[0.08] rounded-2xl p-4 sm:p-6 space-y-6">
-                <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-white/[0.08]">
-                  <div className="flex items-center gap-3 min-w-0">
+              activeView === 'edit' &&
+              editingId &&
+              !editingEpisode &&
+              syncedFormRouteKeyRef.current !== `edit:${editingId}` ? (
+                <section className="bg-[#11151E] border border-white/[0.08] rounded-2xl p-4 sm:p-6 space-y-4">
+                  <div className="flex items-center gap-3 pb-4 border-b border-white/[0.08]">
                     <button
                       type="button"
                       onClick={handleCloseForm}
@@ -2376,48 +2516,69 @@ function AdminPage() {
                       <ArrowLeft className="w-3.5 h-3.5" />
                       Voltar
                     </button>
-                    <div className="min-w-0">
-                      <h1 className="text-base sm:text-lg font-semibold text-white truncate">
-                        {editingId ? 'Editar episódio' : 'Novo episódio'}
-                      </h1>
-                      {editingId && (
-                        <p className="text-[11px] font-mono text-slate-400 truncate">
-                          ID: {editingId}
-                        </p>
-                      )}
+                    <h1 className="text-base sm:text-lg font-semibold text-white truncate">
+                      Episódio não encontrado
+                    </h1>
+                  </div>
+                  <p className="text-xs sm:text-sm text-slate-400">
+                    Este episódio não existe ou já foi removido da biblioteca.
+                  </p>
+                </section>
+              ) : (
+                /* VIEW 1: Create / Edit Episode Form */
+                <section className="bg-[#11151E] border border-white/[0.08] rounded-2xl p-4 sm:p-6 space-y-6">
+                  <div className="flex flex-wrap items-center justify-between gap-3 pb-4 border-b border-white/[0.08]">
+                    <div className="flex items-center gap-3 min-w-0">
+                      <button
+                        type="button"
+                        onClick={handleCloseForm}
+                        className="min-h-[40px] sm:h-9 px-3 rounded-xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer shrink-0 transition-colors"
+                      >
+                        <ArrowLeft className="w-3.5 h-3.5" />
+                        Voltar
+                      </button>
+                      <div className="min-w-0">
+                        <h1 className="text-base sm:text-lg font-semibold text-white truncate">
+                          {editingId ? 'Editar episódio' : 'Novo episódio'}
+                        </h1>
+                        {editingId && (
+                          <p className="text-[11px] font-mono text-slate-400 truncate">
+                            ID: {editingId}
+                          </p>
+                        )}
+                      </div>
                     </div>
+
+                    {editingId && editingEpisode && (
+                      <button
+                        type="button"
+                        disabled={
+                          duplicatingEpisodeId !== null ||
+                          saveBusy ||
+                          !initialState.databaseConfigured
+                        }
+                        onClick={() => void handleDuplicateToDubbed(editingEpisode)}
+                        className="min-h-[40px] sm:h-9 px-3.5 rounded-xl border border-white/15 bg-white/[0.04] hover:bg-white/[0.09] disabled:opacity-50 text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer shrink-0 whitespace-nowrap transition-colors"
+                      >
+                        {duplicatingEpisodeId === editingEpisode.id ? (
+                          <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                        ) : (
+                          <CopyPlus className="w-3.5 h-3.5 text-rose-400" />
+                        )}
+                        <span>
+                          {duplicatingEpisodeId === editingEpisode.id
+                            ? 'Duplicando...'
+                            : 'Duplicar para dublado'}
+                        </span>
+                      </button>
+                    )}
                   </div>
 
-                  {editingId && editingEpisode && (
-                    <button
-                      type="button"
-                      disabled={
-                        duplicatingEpisodeId !== null ||
-                        saveBusy ||
-                        !initialState.databaseConfigured
-                      }
-                      onClick={() => void handleDuplicateToDubbed(editingEpisode)}
-                      className="min-h-[40px] sm:h-9 px-3.5 rounded-xl border border-white/15 bg-white/[0.04] hover:bg-white/[0.09] disabled:opacity-50 text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer shrink-0 whitespace-nowrap transition-colors"
+                  {duplicatedNotice && editingId === duplicatedNotice.newId && (
+                    <div
+                      role="status"
+                      className="rounded-xl border border-emerald-500/30 bg-emerald-950/30 px-3.5 py-2.5 text-xs text-emerald-200 leading-relaxed"
                     >
-                      {duplicatingEpisodeId === editingEpisode.id ? (
-                        <Loader2 className="w-3.5 h-3.5 animate-spin" />
-                      ) : (
-                        <CopyPlus className="w-3.5 h-3.5 text-rose-400" />
-                      )}
-                      <span>
-                        {duplicatingEpisodeId === editingEpisode.id
-                          ? 'Duplicando...'
-                          : 'Duplicar para dublado'}
-                      </span>
-                    </button>
-                  )}
-                </div>
-
-                {duplicatedNotice && editingId === duplicatedNotice.newId && (
-                  <div
-                    role="status"
-                    className="rounded-xl border border-emerald-500/30 bg-emerald-950/30 px-3.5 py-2.5 text-xs text-emerald-200 leading-relaxed"
-                  >
                     Versão dublada criada a partir de “{duplicatedNotice.sourceTitle}” com o novo
                     ID exclusivo <code className="font-mono text-emerald-100">{duplicatedNotice.newId}</code>.
                     O episódio original permanece intacto. Insira o link do vídeo dublado no
@@ -3320,6 +3481,7 @@ function AdminPage() {
                   </div>
                 </form>
               </section>
+              )
             ) : (
               /* VIEW 2: Grouped Expandable & Collapsible Anime Library */
               <section className="space-y-4">
