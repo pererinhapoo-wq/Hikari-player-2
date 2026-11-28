@@ -65,6 +65,7 @@ export const DIRECT_MEDIA_HOSTS = ['public.blob.vercel-storage.com'] as const;
 export const DIRECT_IFRAME_ALLOW = 'autoplay; fullscreen; encrypted-media';
 export const DIRECT_IFRAME_SANDBOX =
   'allow-scripts allow-same-origin allow-presentation allow-popups';
+export const PROXIED_EMBED_SANDBOX = 'allow-scripts allow-forms allow-presentation';
 
 function matchesHostList(hostname: string, allowlist: readonly string[]): boolean {
   const lower = hostname.toLowerCase().replace(/\.+$/, '');
@@ -127,6 +128,29 @@ export function getIframeReferrerPolicy(
   return 'no-referrer-when-downgrade';
 }
 
+export function isProxiedEmbedRouteUrl(rawUrl: string, currentOrigin?: string): boolean {
+  const trimmed = rawUrl.trim();
+  if (!trimmed) return false;
+
+  const isRelativePath = trimmed.startsWith('/') && !trimmed.startsWith('//');
+  try {
+    const parsed = new URL(trimmed, 'http://localhost');
+    const normalizedPath = parsed.pathname.replace(/\/+$/, '');
+    if (normalizedPath !== '/api/embed') {
+      return false;
+    }
+    if (isRelativePath) {
+      return true;
+    }
+    if (currentOrigin) {
+      return parsed.origin.toLowerCase() === currentOrigin.toLowerCase();
+    }
+    return false;
+  } catch {
+    return false;
+  }
+}
+
 export function classifyEmbedHost(rawUrl: string): 'direct' | 'proxied' | 'other' {
   try {
     const parsed = new URL(rawUrl);
@@ -146,12 +170,22 @@ export function buildIframePlayUrl(rawUrl: string): string {
   return rawUrl;
 }
 
-export function getIframeElementProps(rawUrl: string): {
+export function getIframeElementProps(
+  rawUrl: string,
+  currentOrigin?: string
+): {
   referrerPolicy: 'no-referrer' | 'no-referrer-when-downgrade';
   allow: string;
   sandbox?: string;
 } {
   const referrerPolicy = getIframeReferrerPolicy(rawUrl);
+  if (isProxiedEmbedRouteUrl(rawUrl, currentOrigin)) {
+    return {
+      referrerPolicy,
+      allow: 'autoplay; fullscreen; picture-in-picture; encrypted-media',
+      sandbox: PROXIED_EMBED_SANDBOX,
+    };
+  }
   const isDirectHost = classifyEmbedHost(rawUrl) === 'direct';
   if (isDirectHost) {
     return {

@@ -1549,7 +1549,9 @@ export function EpisodePlayer({
 
         {/* ACTIVE PLAYBACK: Iframe mode */}
         {hasStarted && resolvedRuntime?.mode === 'iframe' && !fatalError && (() => {
-          const iframeProps = getIframeElementProps(resolvedRuntime.url);
+          const currentOrigin =
+            typeof window !== 'undefined' ? window.location.origin : undefined;
+          const iframeProps = getIframeElementProps(resolvedRuntime.url, currentOrigin);
           return (
             <>
               <iframe

@@ -864,6 +864,15 @@ export async function handleMirrorRequest(
     );
   }
 
+  const contentTypeRaw = request.headers.get('content-type') ?? '';
+  const mediaType = contentTypeRaw.split(';')[0]?.trim().toLowerCase() ?? '';
+  if (mediaType !== 'application/json') {
+    return Response.json(
+      { ok: false, error: 'Content-Type inválido. Utilize application/json.' },
+      { status: 415, headers: { 'Cache-Control': 'no-store' } }
+    );
+  }
+
   let body: Record<string, unknown>;
   try {
     const parsed = await request.json();

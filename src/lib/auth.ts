@@ -187,22 +187,156 @@ export function parseCookieValue(
   return null;
 }
 
-export function isSameOriginPostRequest(request: Request): boolean {
-  const originHeader = request.headers.get('origin');
-  if (!originHeader) {
-    return true;
+function parseNormalizedHttpOrigin(raw: string | null | undefined): string | null {
+  const trimmed = raw?.trim();
+  if (!trimmed) return null;
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    if (parsed.username || parsed.password) {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+function normalizeVercelHostOrigin(rawHost: string | null | undefined): string | null {
+  const trimmed = rawHost?.trim();
+  if (!trimmed) return null;
+  if (/^https?:\/\//i.test(trimmed)) {
+    return parseNormalizedHttpOrigin(trimmed);
+  }
+  if (/[\s/\\?#]/.test(trimmed)) {
+    return null;
+  }
+  return parseNormalizedHttpOrigin(`https://${trimmed}`);
+}
+
+export function getCanonicalAllowedOrigins(): string[] {
+  const origins = new Set<string>();
+
+  const configuredPublicOrigin = parseNormalizedHttpOrigin(process.env.PLAYER_PUBLIC_BASE_URL);
+  if (configuredPublicOrigin) {
+    origins.add(configuredPublicOrigin);
   }
 
+  const configuredAppOrigin = parseNormalizedHttpOrigin(process.env.APP_URL);
+  if (configuredAppOrigin) {
+    origins.add(configuredAppOrigin);
+  }
+
+  const vercelEnv = process.env.VERCEL_ENV?.trim().toLowerCase();
+  const hasExplicitConfiguredOrigin = origins.size > 0;
+
+  if (vercelEnv === 'preview') {
+    const previewOrigin = normalizeVercelHostOrigin(process.env.VERCEL_URL);
+    if (previewOrigin) origins.add(previewOrigin);
+    const branchOrigin = normalizeVercelHostOrigin(process.env.VERCEL_BRANCH_URL);
+    if (branchOrigin) origins.add(branchOrigin);
+  } else if (!hasExplicitConfiguredOrigin) {
+    const prodVercelOrigin = normalizeVercelHostOrigin(process.env.VERCEL_PROJECT_PRODUCTION_URL);
+    if (prodVercelOrigin) origins.add(prodVercelOrigin);
+    const branchOrigin = normalizeVercelHostOrigin(process.env.VERCEL_BRANCH_URL);
+    if (branchOrigin) origins.add(branchOrigin);
+    const vercelOrigin = normalizeVercelHostOrigin(process.env.VERCEL_URL);
+    if (vercelOrigin) origins.add(vercelOrigin);
+  }
+
+  if (origins.size === 0) {
+    const fallbackOrigin = parseNormalizedHttpOrigin(getPublicBaseUrl());
+    if (fallbackOrigin) {
+      origins.add(fallbackOrigin);
+    }
+    if (process.env.NODE_ENV !== 'production') {
+      origins.add('http://localhost:3000');
+      origins.add('http://127.0.0.1:3000');
+    }
+  }
+
+  return Array.from(origins);
+}
+
+function parseStrictOriginHeader(rawOrigin: string): string | null {
+  const trimmed = rawOrigin.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'null') {
+    return null;
+  }
+  if (/\s/.test(trimmed) || trimmed.endsWith('/')) {
+    return null;
+  }
   try {
-    const originUrl = new URL(originHeader);
-    const forwardedHost = request.headers.get('x-forwarded-host')?.split(',')[0]?.trim();
-    const hostHeader = request.headers.get('host')?.trim();
-    const requestUrlHost = new URL(request.url).host;
-    const expectedHost = forwardedHost || hostHeader || requestUrlHost;
-    return originUrl.host.toLowerCase() === expectedHost.toLowerCase();
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    if (parsed.username || parsed.password) {
+      return null;
+    }
+    if (parsed.pathname !== '/' || parsed.search || parsed.hash) {
+      return null;
+    }
+    return parsed.origin;
   } catch {
+    return null;
+  }
+}
+
+function parseRefererOrigin(rawReferer: string): string | null {
+  const trimmed = rawReferer.trim();
+  if (!trimmed || trimmed.toLowerCase() === 'null') {
+    return null;
+  }
+  try {
+    const parsed = new URL(trimmed);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return null;
+    }
+    if (parsed.username || parsed.password) {
+      return null;
+    }
+    return parsed.origin;
+  } catch {
+    return null;
+  }
+}
+
+export function isSameOriginPostRequest(request: Request): boolean {
+  const secFetchSite = request.headers.get('sec-fetch-site');
+  if (secFetchSite !== null) {
+    if (secFetchSite.trim().toLowerCase() !== 'same-origin') {
+      return false;
+    }
+  }
+
+  const allowedOrigins = new Set(getCanonicalAllowedOrigins());
+  if (allowedOrigins.size === 0) {
     return false;
   }
+
+  const originHeader = request.headers.get('origin');
+  if (originHeader !== null) {
+    const parsedOrigin = parseStrictOriginHeader(originHeader);
+    if (!parsedOrigin) {
+      return false;
+    }
+    return allowedOrigins.has(parsedOrigin);
+  }
+
+  const refererHeader = request.headers.get('referer');
+  if (!refererHeader) {
+    return false;
+  }
+
+  const refererOrigin = parseRefererOrigin(refererHeader);
+  if (!refererOrigin) {
+    return false;
+  }
+
+  return allowedOrigins.has(refererOrigin);
 }
 
 export function verifyAdminRequest(request: Request): {

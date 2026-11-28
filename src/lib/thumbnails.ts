@@ -324,6 +324,18 @@ export async function handleThumbnailUploadRequest(
     );
   }
 
+  const contentTypeRaw = request.headers.get('content-type') ?? '';
+  const mediaType = contentTypeRaw.split(';')[0]?.trim().toLowerCase() ?? '';
+  if (mediaType !== 'multipart/form-data') {
+    return Response.json(
+      {
+        ok: false,
+        error: 'Content-Type inválido. Utilize multipart/form-data com o arquivo de imagem.',
+      },
+      { status: 415, headers: { 'Cache-Control': 'no-store' } }
+    );
+  }
+
   const token = (deps.blobToken ?? process.env.BLOB_READ_WRITE_TOKEN ?? '').trim();
   if (!token) {
     return Response.json(

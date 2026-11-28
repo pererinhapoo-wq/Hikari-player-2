@@ -57,6 +57,7 @@ export function formatEmbedAttemptSequence(
 }
 
 export const EMBED_CACHE_CONTROL = 'public, s-maxage=300, stale-while-revalidate=900';
+export const EMBED_SANDBOX_CSP = 'sandbox allow-scripts allow-forms allow-presentation';
 
 const HOP_BY_HOP_HEADERS = new Set([
   'connection',
@@ -73,7 +74,30 @@ const HOP_BY_HOP_HEADERS = new Set([
 const STRIPPED_EMBED_HEADERS = new Set([
   'content-security-policy',
   'content-security-policy-report-only',
+  'x-content-security-policy',
+  'x-webkit-csp',
   'x-frame-options',
+  'x-content-type-options',
+  'referrer-policy',
+  'cross-origin-opener-policy',
+  'cross-origin-embedder-policy',
+  'cross-origin-resource-policy',
+  'access-control-allow-origin',
+  'access-control-allow-credentials',
+  'access-control-allow-methods',
+  'access-control-allow-headers',
+  'access-control-expose-headers',
+  'access-control-max-age',
+  'cache-control',
+  'cdn-cache-control',
+  'vercel-cdn-cache-control',
+  'surrogate-control',
+  'pragma',
+  'expires',
+  'vary',
+  'refresh',
+  'location',
+  'clear-site-data',
   'content-encoding',
   'content-length',
   'transfer-encoding',
@@ -135,14 +159,23 @@ export function buildMinimalEmbedErrorHtml(reason: string, title = 'Falha ao car
   ].join('');
 }
 
-function buildErrorResponse(status: number, reason: string, title?: string): Response {
+function buildErrorResponse(
+  status: number,
+  reason: string,
+  title?: string,
+  extraHeaders?: Record<string, string>
+): Response {
   return new Response(buildMinimalEmbedErrorHtml(reason, title), {
     status,
     headers: {
       'Content-Type': 'text/html; charset=utf-8',
+      'Content-Security-Policy': EMBED_SANDBOX_CSP,
+      'X-Frame-Options': 'SAMEORIGIN',
+      'X-Content-Type-Options': 'nosniff',
+      'Referrer-Policy': 'no-referrer',
       'Cache-Control': 'no-store',
       'CDN-Cache-Control': 'no-store',
-      'Access-Control-Allow-Origin': '*',
+      ...extraHeaders,
     },
   });
 }
@@ -168,8 +201,12 @@ function sanitizeResponseHeaders(upstreamHeaders: Headers): Headers {
 
   headers.delete('set-cookie');
   headers.set('Content-Type', 'text/html; charset=utf-8');
+  headers.set('Content-Security-Policy', EMBED_SANDBOX_CSP);
+  headers.set('X-Frame-Options', 'SAMEORIGIN');
+  headers.set('X-Content-Type-Options', 'nosniff');
+  headers.set('Referrer-Policy', 'no-referrer');
   headers.set('Cache-Control', EMBED_CACHE_CONTROL);
-  headers.set('Access-Control-Allow-Origin', '*');
+  headers.set('CDN-Cache-Control', EMBED_CACHE_CONTROL);
 
   return headers;
 }
@@ -452,11 +489,29 @@ export async function resolveEmbedProxy(
       response: new Response(null, {
         status: 204,
         headers: {
-          'Access-Control-Allow-Origin': '*',
-          'Access-Control-Allow-Methods': 'GET, OPTIONS',
-          'Access-Control-Allow-Headers': '*',
+          Allow: 'GET, OPTIONS',
+          'Content-Security-Policy': EMBED_SANDBOX_CSP,
+          'X-Frame-Options': 'SAMEORIGIN',
+          'X-Content-Type-Options': 'nosniff',
+          'Referrer-Policy': 'no-referrer',
+          'Cache-Control': 'no-store',
+          'CDN-Cache-Control': 'no-store',
         },
       }),
+      redirectChain: [],
+      successfulStrategy: null,
+      finalUrl: null,
+    };
+  }
+
+  if (request.method !== 'GET') {
+    return {
+      response: buildErrorResponse(
+        405,
+        'Método não permitido. Use GET.',
+        'Método não permitido',
+        { Allow: 'GET, OPTIONS' }
+      ),
       redirectChain: [],
       successfulStrategy: null,
       finalUrl: null,

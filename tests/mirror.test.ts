@@ -229,17 +229,29 @@ describe('Espelhamento no Vercel Blob (/api/mirror)', () => {
     expect(isExpiredUpstreamResponse(500, 'Internal Error')).toBe(false);
   });
 
-  it('5. protege /api/mirror com autenticação admin (POST only + cookie assinado + mesma origem)', async () => {
+  it('5. protege /api/mirror com autenticação admin (POST only + cookie assinado + mesma origem canônica + JSON)', async () => {
     const prevSecret = process.env.PLAYER_SESSION_SECRET;
+    const prevPublicBaseUrl = process.env.PLAYER_PUBLIC_BASE_URL;
     process.env.PLAYER_SESSION_SECRET = 'test-secret-for-mirror-route-123456';
+    process.env.PLAYER_PUBLIC_BASE_URL = 'https://app.test';
 
     try {
       const getReq = new Request('https://app.test/api/mirror', { method: 'GET' });
       expect((await handleMirrorRequest(getReq)).status).toBe(405);
 
-      const unauthReq = new Request('https://app.test/api/mirror', {
+      const missingOriginReq = new Request('https://app.test/api/mirror', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ episodeId: 'ep1', sourceUrl: 'https://a.r2.cloudflarestorage.com/1.mp4' }),
+      });
+      expect((await handleMirrorRequest(missingOriginReq)).status).toBe(403);
+
+      const unauthReq = new Request('https://app.test/api/mirror', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Origin: 'https://app.test',
+        },
         body: JSON.stringify({ episodeId: 'ep1', sourceUrl: 'https://a.r2.cloudflarestorage.com/1.mp4' }),
       });
       expect((await handleMirrorRequest(unauthReq)).status).toBe(401);
@@ -256,6 +268,17 @@ describe('Espelhamento no Vercel Blob (/api/mirror)', () => {
       });
       expect((await handleMirrorRequest(crossOriginReq)).status).toBe(403);
 
+      const textPlainReq = new Request('https://app.test/api/mirror', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'text/plain',
+          Origin: 'https://app.test',
+          Cookie: `${ADMIN_SESSION_COOKIE_NAME}=${token}`,
+        },
+        body: JSON.stringify({ episodeId: 'ep1', sourceUrl: 'https://a.r2.cloudflarestorage.com/1.mp4' }),
+      });
+      expect((await handleMirrorRequest(textPlainReq)).status).toBe(415);
+
       const badHostReq = new Request('https://app.test/api/mirror', {
         method: 'POST',
         headers: {
@@ -270,8 +293,15 @@ describe('Espelhamento no Vercel Blob (/api/mirror)', () => {
         blobToken: 'vercel_blob_rw_test_token',
       });
       expect(badHostRes.status).toBe(403);
+      const badHostJson = (await badHostRes.json()) as { error?: string };
+      expect(badHostJson.error).not.toContain('Origem da requisição');
     } finally {
       process.env.PLAYER_SESSION_SECRET = prevSecret;
+      if (prevPublicBaseUrl === undefined) {
+        delete process.env.PLAYER_PUBLIC_BASE_URL;
+      } else {
+        process.env.PLAYER_PUBLIC_BASE_URL = prevPublicBaseUrl;
+      }
     }
   });
 

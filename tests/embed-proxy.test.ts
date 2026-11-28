@@ -1,18 +1,24 @@
-import { describe, it, expect, vi } from 'vitest';
+import fs from 'node:fs';
+import path from 'node:path';
+import { describe, it, expect } from 'vitest';
 import {
   EMBED_PROXIED_HOSTS,
   EMBED_ALLOWED_FINAL_HOSTS,
   EMBED_DIRECT_HOSTS,
   EMBED_NO_REFERRER_HOSTS,
+  DIRECT_IFRAME_SANDBOX,
+  PROXIED_EMBED_SANDBOX,
   buildIframePlayUrl,
   getIframeElementProps,
   getIframeReferrerPolicy,
   buildIframeSrcWithFreshTime,
   collectEpisodeSources,
+  isProxiedEmbedRouteUrl,
   normalizeVideoSource,
 } from '@/lib/video-sources';
 import {
   CLOUDFLARE_SERVER_BLOCK_MESSAGE,
+  EMBED_SANDBOX_CSP,
   handleEmbedRequest,
   resolveEmbedProxy,
 } from '@/lib/embed-proxy';
@@ -213,8 +219,14 @@ describe('Part B: /api/embed, redirecionamentos validados, Referer da entrada e 
     expect(fetchedCalls).toHaveLength(1);
     expect(fetchedCalls[0].referer).toBe('https://www.coempregos.com.br/');
     expect(fetchedCalls[0].origin).toBeUndefined();
-    expect(res.headers.get('content-security-policy')).toBeNull();
-    expect(res.headers.get('x-frame-options')).toBeNull();
+    expect(res.headers.get('content-security-policy')).toBe(
+      'sandbox allow-scripts allow-forms allow-presentation'
+    );
+    expect(res.headers.get('content-security-policy')).not.toContain('default-src *');
+    expect(res.headers.get('x-frame-options')).toBe('SAMEORIGIN');
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
     expect(res.headers.get('set-cookie')).toBeNull();
     expect(res.headers.get('cache-control')).toContain('s-maxage=300');
   });
@@ -409,5 +421,171 @@ describe('Part C: diagnóstico "Testar fonte" com cadeia de saltos e estratégia
     expect(report.verdict).toBe('direto_ok');
     expect(report.verdictReason).toBe('Host bloqueia acesso de servidor — abrindo direto no navegador');
     expect(report.verdictReason.toLowerCase()).not.toContain('erro ao carregar embed');
+  });
+});
+
+describe('Part D: Isolamento de segurança do /api/embed (CRÍTICO-01)', () => {
+  it('aplica sandbox restritivo sem allow-same-origin exclusivamente para iframes /api/embed', () => {
+    const proxiedSrc = buildIframePlayUrl('https://allappinc.com/embed/ep01');
+    expect(proxiedSrc).toBe(`/api/embed?u=${encodeURIComponent('https://allappinc.com/embed/ep01')}`);
+
+    const props = getIframeElementProps(proxiedSrc);
+    expect(props.sandbox).toBe('allow-scripts allow-forms allow-presentation');
+    expect(props.sandbox).toBe(PROXIED_EMBED_SANDBOX);
+    expect(props.sandbox).not.toContain('allow-same-origin');
+    expect(props.sandbox).not.toContain('allow-top-navigation');
+    expect(props.allow).toContain('fullscreen');
+    expect(props.allow).toContain('autoplay');
+    expect(props.referrerPolicy).toBe('no-referrer-when-downgrade');
+
+    // Também protege URL absoluta na mesma origem
+    const absSameOrigin = `https://hikariplayer.cc.cd/api/embed?u=${encodeURIComponent('https://anitube.biz/playerricas.php?id=1')}`;
+    expect(isProxiedEmbedRouteUrl(absSameOrigin, 'https://hikariplayer.cc.cd')).toBe(true);
+    const absProps = getIframeElementProps(absSameOrigin, 'https://hikariplayer.cc.cd');
+    expect(absProps.sandbox).toBe('allow-scripts allow-forms allow-presentation');
+    expect(absProps.sandbox).not.toContain('allow-same-origin');
+
+    // URL de terceiro externo com path /api/embed não é confundida com a rota local
+    expect(isProxiedEmbedRouteUrl('https://terceiro.example.com/api/embed?id=1', 'https://hikariplayer.cc.cd')).toBe(false);
+    expect(getIframeElementProps('https://terceiro.example.com/api/embed?id=1', 'https://hikariplayer.cc.cd').sandbox).toBeUndefined();
+  });
+
+  it('mantém inalterados os atributos de iframe para EMBED_DIRECT_HOSTS, Bunny, Mux e outros provedores', () => {
+    for (const url of [
+      'https://animesdigital.org/embed/1',
+      'https://filevideo1.com/remote_control.php?file=ep1.mp4',
+      'https://anitube22.vip/playerricas.php?id=10',
+      'https://hinatasoul.com/embed/10',
+    ]) {
+      const props = getIframeElementProps(url, 'https://hikariplayer.cc.cd');
+      expect(props.sandbox).toBe(DIRECT_IFRAME_SANDBOX);
+      expect(props.allow).toBe('autoplay; fullscreen; encrypted-media');
+    }
+
+    for (const url of [
+      'https://player.mediadelivery.net/embed/123/abc',
+      'https://iframe.mediadelivery.net/embed/123/abc',
+      'https://player.mux.com/playback123',
+      'https://embeds.example.com/player/1',
+    ]) {
+      const props = getIframeElementProps(url, 'https://hikariplayer.cc.cd');
+      expect(props.sandbox).toBeUndefined();
+      expect(props.allow).toBe('autoplay; fullscreen; picture-in-picture; encrypted-media');
+    }
+  });
+
+  it('confirma que EpisodePlayer.tsx repassa sandbox, allowFullScreen e origem atual para getIframeElementProps', () => {
+    const playerSource = fs.readFileSync(
+      path.resolve(process.cwd(), 'src/components/EpisodePlayer.tsx'),
+      'utf8'
+    );
+    expect(playerSource).toContain('getIframeElementProps(resolvedRuntime.url, currentOrigin)');
+    expect(playerSource).toContain('sandbox={iframeProps.sandbox}');
+    expect(playerSource).toContain('allow={iframeProps.allow}');
+    expect(playerSource).toContain('allowFullScreen');
+    expect(playerSource).toContain('referrerPolicy={iframeProps.referrerPolicy}');
+  });
+
+  it('aplica Content-Security-Policy sandbox estrita e remove CORS aberto em acesso direto 200 OK ao /api/embed', async () => {
+    const req = new Request(
+      `https://hikariplayer.cc.cd/api/embed?u=${encodeURIComponent('https://allappinc.com/embed/ep01')}`
+    );
+
+    const res = await handleEmbedRequest(req, {
+      assertSafeUrl: async (raw) => new URL(raw),
+      fetchImpl: (async () =>
+        new Response('<html><head><title>Player</title></head><body><script>console.log(1)</script></body></html>', {
+          status: 200,
+          headers: {
+            'Content-Type': 'text/html; charset=utf-8',
+            'Content-Security-Policy': 'default-src *; frame-ancestors *',
+            'X-Frame-Options': 'ALLOWALL',
+            'Access-Control-Allow-Origin': '*',
+            'Access-Control-Allow-Credentials': 'true',
+            'CDN-Cache-Control': 'public, max-age=86400',
+            'Refresh': '0; url=https://evil.example',
+            'Set-Cookie': 'upstream=1; Path=/',
+          },
+        })) as any,
+    });
+
+    expect(res.status).toBe(200);
+    const csp = res.headers.get('content-security-policy');
+    expect(csp).toBe(EMBED_SANDBOX_CSP);
+    expect(csp).toBe('sandbox allow-scripts allow-forms allow-presentation');
+    expect(csp).not.toContain('allow-same-origin');
+    expect(csp).not.toContain('allow-top-navigation');
+    expect(res.headers.get('x-frame-options')).toBe('SAMEORIGIN');
+    expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+    expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+    expect(res.headers.get('access-control-allow-origin')).toBeNull();
+    expect(res.headers.get('access-control-allow-credentials')).toBeNull();
+    expect(res.headers.get('refresh')).toBeNull();
+    expect(res.headers.get('set-cookie')).toBeNull();
+    expect(res.headers.get('cdn-cache-control')).toContain('s-maxage=300');
+  });
+
+  it('protege também respostas de erro (400, 403, 405, 413, 502) e OPTIONS sem abrir CORS ou omitir CSP sandbox', async () => {
+    const cases: Request[] = [
+      new Request('https://hikariplayer.cc.cd/api/embed?u=http://allappinc.com/embed/1'),
+      new Request(
+        `https://hikariplayer.cc.cd/api/embed?u=${encodeURIComponent('https://evil.example/embed/1')}`
+      ),
+      new Request(
+        `https://hikariplayer.cc.cd/api/embed?u=${encodeURIComponent('https://allappinc.com/embed/1')}`,
+        { method: 'POST' }
+      ),
+      new Request(
+        `https://hikariplayer.cc.cd/api/embed?u=${encodeURIComponent('https://allappinc.com/embed/1')}`,
+        { method: 'OPTIONS' }
+      ),
+    ];
+
+    const responses = await Promise.all(cases.map((r) => handleEmbedRequest(r)));
+    expect(responses.map((r) => r.status)).toEqual([400, 403, 405, 204]);
+
+    for (const res of responses) {
+      const csp = res.headers.get('content-security-policy');
+      expect(csp).toBe('sandbox allow-scripts allow-forms allow-presentation');
+      expect(csp).not.toContain('allow-same-origin');
+      expect(csp).not.toContain('allow-top-navigation');
+      expect(res.headers.get('x-frame-options')).toBe('SAMEORIGIN');
+      expect(res.headers.get('x-content-type-options')).toBe('nosniff');
+      expect(res.headers.get('referrer-policy')).toBe('no-referrer');
+      expect(res.headers.get('access-control-allow-origin')).toBeNull();
+      expect(res.headers.get('cache-control')).toBe('no-store');
+      expect(res.headers.get('cdn-cache-control')).toBe('no-store');
+    }
+
+    // Erro 502 por falha upstream e 413 por tamanho excedido também mantêm proteção
+    const res502 = await handleEmbedRequest(
+      new Request(
+        `https://hikariplayer.cc.cd/api/embed?u=${encodeURIComponent('https://allappinc.com/embed/1')}`
+      ),
+      {
+        assertSafeUrl: async (raw) => new URL(raw),
+        fetchImpl: (async () => new Response('upstream fail', { status: 500 })) as any,
+      }
+    );
+    expect(res502.status).toBe(502);
+    expect(res502.headers.get('content-security-policy')).toBe(EMBED_SANDBOX_CSP);
+    expect(res502.headers.get('access-control-allow-origin')).toBeNull();
+
+    const res413 = await handleEmbedRequest(
+      new Request(
+        `https://hikariplayer.cc.cd/api/embed?u=${encodeURIComponent('https://allappinc.com/embed/1')}`
+      ),
+      {
+        assertSafeUrl: async (raw) => new URL(raw),
+        fetchImpl: (async () =>
+          new Response('x', {
+            status: 200,
+            headers: { 'Content-Length': String(2 * 1024 * 1024) },
+          })) as any,
+      }
+    );
+    expect(res413.status).toBe(413);
+    expect(res413.headers.get('content-security-policy')).toBe(EMBED_SANDBOX_CSP);
+    expect(res413.headers.get('access-control-allow-origin')).toBeNull();
   });
 });

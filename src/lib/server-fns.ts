@@ -6,6 +6,7 @@ import {
   getRequestIP,
   setCookie,
   setResponseHeader,
+  setResponseStatus,
 } from '@tanstack/react-start/server';
 import {
   formatEpisodeIdentification,
@@ -20,6 +21,7 @@ import {
   createSessionToken,
   getPublicBaseUrl,
   isAuthEnvConfigured,
+  isSameOriginPostRequest,
   recordFailedLogin,
   verifyAdminPassword,
   verifySessionToken,
@@ -144,11 +146,37 @@ export function resolveProxyPlayUrl(
   );
 }
 
+export class ServerAuthError extends Error {
+  readonly status: number;
+
+  constructor(message: string, status: number) {
+    super(message);
+    this.name = 'ServerAuthError';
+    this.status = status;
+  }
+}
+
 function trySetResponseHeader(name: string, value: string): void {
   try {
     setResponseHeader(name, value);
   } catch {
     // Ignorado fora do contexto HTTP (ex.: testes unitários)
+  }
+}
+
+function trySetResponseStatus(status: number): void {
+  try {
+    setResponseStatus(status);
+  } catch {
+    // Ignorado fora do contexto HTTP (ex.: testes unitários)
+  }
+}
+
+function tryGetRequest(): Request | null {
+  try {
+    return getRequest();
+  } catch {
+    return null;
   }
 }
 
@@ -169,12 +197,55 @@ function isRequestHttps(): boolean {
   }
 }
 
-function requireAdminSession(): void {
-  const token = getCookie(ADMIN_SESSION_COOKIE_NAME);
+export function validateMutableServerFnRequest(request: Request | null): void {
+  if (!request) {
+    throw new ServerAuthError('Contexto HTTP da requisição ausente para operação administrativa.', 403);
+  }
+
+  if (request.method.toUpperCase() !== 'POST') {
+    throw new ServerAuthError('Método não permitido. Use POST.', 405);
+  }
+
+  if (!isSameOriginPostRequest(request)) {
+    throw new ServerAuthError('Origem da requisição não permitida.', 403);
+  }
+
+  const contentTypeRaw = request.headers.get('content-type');
+  if (contentTypeRaw !== null) {
+    const mediaType = contentTypeRaw.split(';')[0]?.trim().toLowerCase() ?? '';
+    if (mediaType !== 'application/json') {
+      throw new ServerAuthError('Content-Type inválido. Utilize application/json.', 415);
+    }
+  }
+}
+
+export function validateAdminRequestContext(options: {
+  request: Request | null;
+  token: string | undefined | null;
+}): void {
+  const { request, token } = options;
+  const method = request?.method?.toUpperCase() ?? 'POST';
+  const isMutation = method !== 'GET' && method !== 'HEAD';
+
+  if (isMutation) {
+    validateMutableServerFnRequest(request);
+  }
+
   const session = verifySessionToken(token);
   if (!session) {
-    throw new Error('Sessão administrativa expirada ou não autenticada.');
+    throw new ServerAuthError('Sessão administrativa expirada ou não autenticada.', 401);
   }
+}
+
+function requireSameOriginMutationRequest(): void {
+  validateMutableServerFnRequest(tryGetRequest());
+}
+
+function requireAdminSession(): void {
+  validateAdminRequestContext({
+    request: tryGetRequest(),
+    token: getCookie(ADMIN_SESSION_COOKIE_NAME),
+  });
 }
 
 export const getPublicEpisodeFn = createServerFn({ method: 'GET' })
@@ -359,6 +430,18 @@ export const adminLoginFn = createServerFn({ method: 'POST' })
     password: typeof data?.password === 'string' ? data.password : '',
   }))
   .handler(async ({ data }): Promise<{ ok: boolean; error?: string }> => {
+    try {
+      requireSameOriginMutationRequest();
+    } catch (err) {
+      if (err instanceof ServerAuthError) {
+        trySetResponseStatus(err.status);
+      }
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : 'Origem da requisição não permitida.',
+      };
+    }
+
     const authEnv = isAuthEnvConfigured();
     if (!authEnv.passwordConfigured) {
       return {
@@ -405,10 +488,23 @@ export const adminLoginFn = createServerFn({ method: 'POST' })
     return { ok: true };
   });
 
-export const adminLogoutFn = createServerFn({ method: 'POST' }).handler(async () => {
-  deleteCookie(ADMIN_SESSION_COOKIE_NAME, { path: '/' });
-  return { ok: true };
-});
+export const adminLogoutFn = createServerFn({ method: 'POST' }).handler(
+  async (): Promise<{ ok: true } | { ok: false; error: string }> => {
+    try {
+      requireSameOriginMutationRequest();
+      deleteCookie(ADMIN_SESSION_COOKIE_NAME, { path: '/' });
+      return { ok: true };
+    } catch (err) {
+      if (err instanceof ServerAuthError) {
+        trySetResponseStatus(err.status);
+      }
+      return {
+        ok: false,
+        error: err instanceof Error ? err.message : 'Origem da requisição não permitida.',
+      };
+    }
+  }
+);
 
 export const adminCreateEpisodeFn = createServerFn({ method: 'POST' })
   .validator((data: EpisodeFormPayload) => data)
@@ -418,6 +514,9 @@ export const adminCreateEpisodeFn = createServerFn({ method: 'POST' })
       const created = await createEpisode(data);
       return { ok: true, episode: toEpisodeDto(created) };
     } catch (err) {
+      if (err instanceof ServerAuthError) {
+        trySetResponseStatus(err.status);
+      }
       return {
         ok: false,
         error: err instanceof Error ? err.message : 'Falha ao cadastrar episódio.',
@@ -437,6 +536,9 @@ export const adminUpdateEpisodeFn = createServerFn({ method: 'POST' })
       }
       return { ok: true, episode: toEpisodeDto(updated) };
     } catch (err) {
+      if (err instanceof ServerAuthError) {
+        trySetResponseStatus(err.status);
+      }
       return {
         ok: false,
         error: err instanceof Error ? err.message : 'Falha ao atualizar episódio.',
@@ -455,6 +557,9 @@ export const adminDeleteEpisodeFn = createServerFn({ method: 'POST' })
       }
       return { ok: true };
     } catch (err) {
+      if (err instanceof ServerAuthError) {
+        trySetResponseStatus(err.status);
+      }
       return {
         ok: false,
         error: err instanceof Error ? err.message : 'Falha ao excluir episódio.',
@@ -475,6 +580,9 @@ export const adminDuplicateEpisodeFn = createServerFn({ method: 'POST' })
         const duplicated = await duplicateEpisodeToDubbed(data.sourceId);
         return { ok: true, episode: toEpisodeDto(duplicated) };
       } catch (err) {
+        if (err instanceof ServerAuthError) {
+          trySetResponseStatus(err.status);
+        }
         return {
           ok: false,
           error:
@@ -493,6 +601,9 @@ export const adminDiagnoseDatabaseFn = createServerFn({ method: 'POST' }).handle
       const diagnostic = await diagnoseDatabaseConnection();
       return { ok: true, diagnostic };
     } catch (err) {
+      if (err instanceof ServerAuthError) {
+        trySetResponseStatus(err.status);
+      }
       return {
         ok: false,
         error:
@@ -544,6 +655,9 @@ export const adminTestSourceFn = createServerFn({ method: 'POST' })
         const report = await diagnoseVideoSource(data);
         return { ok: true, report };
       } catch (err) {
+        if (err instanceof ServerAuthError) {
+          trySetResponseStatus(err.status);
+        }
         return {
           ok: false,
           error:
@@ -566,6 +680,9 @@ export const adminTestEpisodeSourcesFn = createServerFn({ method: 'POST' })
         const reports = await diagnoseEpisodeSources(data.sources);
         return { ok: true, reports };
       } catch (err) {
+        if (err instanceof ServerAuthError) {
+          trySetResponseStatus(err.status);
+        }
         return {
           ok: false,
           error:
@@ -672,6 +789,9 @@ export const adminProcessBatchItemFn = createServerFn({ method: 'POST' })
         const report = await processBatchItemServer(data);
         return { ok: true, report };
       } catch (err) {
+        if (err instanceof ServerAuthError) {
+          trySetResponseStatus(err.status);
+        }
         return {
           ok: false,
           error:
@@ -709,6 +829,9 @@ export const adminResolveThumbnailSourceFn = createServerFn({ method: 'POST' })
         const plan = await resolveThumbnailSourceForAdmin(data);
         return { ok: true, plan };
       } catch (err) {
+        if (err instanceof ServerAuthError) {
+          trySetResponseStatus(err.status);
+        }
         return {
           ok: false,
           error:
@@ -745,6 +868,9 @@ export const adminResolveR2SourceFn = createServerFn({ method: 'POST' })
         const resolution = await processControlledR2ResolutionServer({ url: data.url });
         return { ok: true, resolution };
       } catch (err) {
+        if (err instanceof ServerAuthError) {
+          trySetResponseStatus(err.status);
+        }
         return {
           ok: false,
           error:
@@ -768,6 +894,9 @@ export const adminGetPlaybackDiagnosticsFn = createServerFn({ method: 'GET' }).h
         snapshot: getPlaybackDiagnosticsSnapshot(30),
       };
     } catch (err) {
+      if (err instanceof ServerAuthError) {
+        trySetResponseStatus(err.status);
+      }
       return {
         ok: false,
         error:
@@ -792,6 +921,9 @@ export const adminClearPlaybackDiagnosticsFn = createServerFn({ method: 'POST' }
         snapshot: getPlaybackDiagnosticsSnapshot(30),
       };
     } catch (err) {
+      if (err instanceof ServerAuthError) {
+        trySetResponseStatus(err.status);
+      }
       return {
         ok: false,
         error:
