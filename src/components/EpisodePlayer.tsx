@@ -19,6 +19,13 @@ import {
   createHlsRecoveryController,
   type PlaybackStrategy,
 } from '@/lib/hls-playback';
+import {
+  classifyPlaybackSourceCategory,
+  createPlaybackDiagnosticsCollector,
+  mapHlsErrorToDiagnostic,
+  type PlaybackDeliveryMode,
+  type PlaybackDiagnosticEvent,
+} from '@/lib/playback-diagnostics';
 import { isOpeningSkipVisible } from '@/lib/opening-skip';
 import type { PlayableSource } from '@/lib/types';
 import {
@@ -62,6 +69,16 @@ export function EpisodePlayer({
   const scrubberRef = useRef<HTMLDivElement>(null);
   const hlsInstanceRef = useRef<{ destroy: () => void } | null>(null);
   const hlsRecoveryCleanupRef = useRef<(() => void) | null>(null);
+  const diagnosticsCollectorRef = useRef<ReturnType<typeof createPlaybackDiagnosticsCollector> | null>(
+    null
+  );
+  const playClickedAtRef = useRef<number | null>(null);
+  const sourceLoadStartedAtRef = useRef<number | null>(null);
+  const hasInitialLoadRecordedRef = useRef(false);
+  const hasPlaybackStartedRef = useRef(false);
+  const hasCompletedRunRef = useRef(false);
+  const isBufferingRef = useRef(false);
+  const pendingHlsRecoveryRef = useRef<'network' | 'media' | null>(null);
   const hideControlsTimerRef = useRef<number | null>(null);
   const singleTapTimerRef = useRef<number | null>(null);
   const seekFeedbackTimerRef = useRef<number | null>(null);
@@ -213,10 +230,81 @@ export function EpisodePlayer({
     }
   }, []);
 
+  const getDiagnosticsCollector = useCallback(() => {
+    try {
+      if (!diagnosticsCollectorRef.current) {
+        diagnosticsCollectorRef.current = createPlaybackDiagnosticsCollector();
+      }
+      return diagnosticsCollectorRef.current;
+    } catch {
+      return null;
+    }
+  }, []);
+
+  const emitDiagnostic = useCallback(
+    (
+      event: Omit<
+        PlaybackDiagnosticEvent,
+        'timestamp' | 'sessionId' | 'slot' | 'sourceCategory' | 'deliveryMode'
+      > & {
+        slot?: 1 | 2 | 3 | 4 | 5;
+        source?: PlayableSource | null;
+        strategy?: PlaybackStrategy | null;
+      }
+    ) => {
+      try {
+        const collector = getDiagnosticsCollector();
+        if (!collector) return;
+        const targetSource = event.source ?? activeSourceRef.current;
+        const slot = event.slot ?? targetSource?.slot;
+        if (!slot) return;
+        const strategy =
+          event.strategy ??
+          (targetSource?.kind === 'iframe'
+            ? 'iframe'
+            : targetSource?.needsProxy
+              ? 'proxy'
+              : 'direct');
+        const deliveryMode: PlaybackDeliveryMode =
+          strategy === 'iframe' ? 'iframe' : strategy === 'proxy' ? 'proxy' : 'direct';
+        const sourceCategory = classifyPlaybackSourceCategory(targetSource, strategy);
+
+        const { source: _s, strategy: _st, slot: _sl, ...rest } = event;
+        collector.record({
+          ...rest,
+          slot,
+          sourceCategory,
+          deliveryMode,
+        });
+      } catch {
+        // Diagnóstico é estritamente fail-open e nunca interrompe a reprodução
+      }
+    },
+    [getDiagnosticsCollector]
+  );
+
+  const emitDiagnosticRef = useRef(emitDiagnostic);
+  emitDiagnosticRef.current = emitDiagnostic;
+
   useEffect(() => {
     isMountedRef.current = true;
+    const handlePageHide = () => {
+      try {
+        diagnosticsCollectorRef.current?.flush();
+      } catch {
+        // Ignore flush errors
+      }
+    };
+    window.addEventListener('pagehide', handlePageHide);
     return () => {
       isMountedRef.current = false;
+      window.removeEventListener('pagehide', handlePageHide);
+      try {
+        diagnosticsCollectorRef.current?.dispose();
+        diagnosticsCollectorRef.current = null;
+      } catch {
+        // Ignore cleanup errors
+      }
       clearHideControlsTimer();
       clearIframeLoadTimer();
       if (singleTapTimerRef.current !== null) {
@@ -295,12 +383,28 @@ export function EpisodePlayer({
       clearIframeLoadTimer();
       cleanupHls();
 
+      const failedSource = sources.find((s) => s.slot === failedSlot) ?? activeSourceRef.current;
+
       setFailedSlots((prev) => {
         const next = new Set(prev);
         next.add(failedSlot);
         const fallbackIdx = getNextFallbackSourceIndex(sources, safeActiveIndex, next);
         if (fallbackIdx !== null) {
           const nextSource = sources[fallbackIdx];
+          emitDiagnosticRef.current({
+            type: 'failover',
+            slot: failedSource?.slot ?? (failedSlot as 1 | 2 | 3 | 4 | 5),
+            source: failedSource,
+            errorCode: errorKind === 'iframe' ? 'iframe_failover' : 'media_failover',
+          });
+          emitDiagnosticRef.current({
+            type: 'source_switch',
+            slot: nextSource.slot,
+            source: nextSource,
+            fromSlot: failedSource?.slot ?? (failedSlot as 1 | 2 | 3 | 4 | 5),
+            toSlot: nextSource.slot,
+            switchReason: 'failover',
+          });
           const failureLabel =
             errorKind === 'iframe'
               ? 'player do provedor não carregou'
@@ -312,6 +416,18 @@ export function EpisodePlayer({
           setFatalError(null);
           setFatalErrorKind(null);
         } else {
+          emitDiagnosticRef.current({
+            type: 'failover',
+            slot: failedSource?.slot ?? (failedSlot as 1 | 2 | 3 | 4 | 5),
+            source: failedSource,
+            errorCode: 'failover_exhausted',
+          });
+          emitDiagnosticRef.current({
+            type: 'fatal_playback_failure',
+            slot: failedSource?.slot ?? (failedSlot as 1 | 2 | 3 | 4 | 5),
+            source: failedSource,
+            errorCode: errorKind === 'iframe' ? 'iframe_unavailable' : 'all_sources_failed',
+          });
           setStatusNotice(null);
           setFatalErrorKind(errorKind);
           setFatalError(
@@ -335,6 +451,12 @@ export function EpisodePlayer({
     if (!hasStarted || !activeSource) return;
 
     let cancelled = false;
+    hasInitialLoadRecordedRef.current = false;
+    hasPlaybackStartedRef.current = false;
+    hasCompletedRunRef.current = false;
+    isBufferingRef.current = false;
+    pendingHlsRecoveryRef.current = null;
+    sourceLoadStartedAtRef.current = Date.now();
     setFatalError(null);
     setFatalErrorKind(null);
     setIsLoadingSource(true);
@@ -468,6 +590,14 @@ export function EpisodePlayer({
       iframeLoadTimerRef.current = null;
       if (!isMountedRef.current) return;
       setIsLoadingSource(false);
+      emitDiagnosticRef.current({
+        type: 'timeout',
+        slot: targetSlot as 1 | 2 | 3 | 4 | 5,
+        source: activeSourceRef.current,
+        strategy: 'iframe',
+        errorCode: 'iframe_timeout',
+        durationMs: 12000,
+      });
       triggerFailoverRef.current(
         targetSlot,
         'Player do provedor não carregou.',
@@ -545,10 +675,34 @@ export function EpisodePlayer({
               resolvedRuntime.slot
             ),
             hls,
-            onRetryScheduled: ({ attempt, maxRetries, delayMs }) => {
+            onRetryScheduled: ({ attempt, maxRetries, delayMs, diagnostic }) => {
               console.info(
                 `[Hikari Player] Tentando recuperação controlada com hls.startLoad() (tentativa ${attempt}/${maxRetries} em ${delayMs}ms, slot=${resolvedRuntime.slot}, estratégia=${resolvedRuntime.strategy}).`
               );
+              emitDiagnosticRef.current({
+                type: 'hls_retry_scheduled',
+                slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                source: activeSourceRef.current,
+                strategy: resolvedRuntime.strategy,
+                attempt,
+                durationMs: delayMs,
+                httpStatus: diagnostic.httpCode,
+                errorCode: diagnostic.category,
+              });
+            },
+            onRetryExecuted: () => {
+              pendingHlsRecoveryRef.current = 'network';
+            },
+            onRecoverMedia: ({ attempt }) => {
+              pendingHlsRecoveryRef.current = 'media';
+              emitDiagnosticRef.current({
+                type: 'hls_recovery_media',
+                slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                source: activeSourceRef.current,
+                strategy: resolvedRuntime.strategy,
+                attempt,
+                errorCode: 'decode_error',
+              });
             },
             onFallbackDirect: (_reason, diagnostic) => {
               const source = activeSourceRef.current;
@@ -557,6 +711,15 @@ export function EpisodePlayer({
                 return;
               }
               attemptedDirectSlotsRef.current.add(resolvedRuntime.slot);
+              emitDiagnosticRef.current({
+                type: 'source_switch',
+                slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                source,
+                strategy: 'direct',
+                fromSlot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                toSlot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                switchReason: 'direct_fallback',
+              });
               console.warn(
                 `[Hikari Player] Proxy HLS falhou (${diagnostic.category}, HTTP ${diagnostic.httpCode ?? 'N/A'}); tentando URL original direta Maximaimg (tentativa única).`
               );
@@ -580,6 +743,31 @@ export function EpisodePlayer({
             console.info(
               `[Hikari Player] Manifesto HLS carregado (slot=${resolvedRuntime.slot}, estratégia=${resolvedRuntime.strategy}).`
             );
+            if (!hasInitialLoadRecordedRef.current) {
+              hasInitialLoadRecordedRef.current = true;
+              const initialLoadMs =
+                sourceLoadStartedAtRef.current !== null
+                  ? Math.max(0, Date.now() - sourceLoadStartedAtRef.current)
+                  : null;
+              emitDiagnosticRef.current({
+                type: 'initial_loaded',
+                slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                source: activeSourceRef.current,
+                strategy: resolvedRuntime.strategy,
+                durationMs: initialLoadMs,
+              });
+            }
+            if (pendingHlsRecoveryRef.current) {
+              const recoveryMode = pendingHlsRecoveryRef.current;
+              pendingHlsRecoveryRef.current = null;
+              emitDiagnosticRef.current({
+                type: 'hls_recovery_succeeded',
+                slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                source: activeSourceRef.current,
+                strategy: resolvedRuntime.strategy,
+                errorCode: recoveryMode === 'media' ? 'media_recovery' : 'network_recovery',
+              });
+            }
             setIsLoadingSource(false);
             if (resolvedRuntime.strategy === 'direct') {
               setStatusNotice(null);
@@ -587,8 +775,21 @@ export function EpisodePlayer({
             void startPlayback();
           });
 
+          hls.on(Hls.Events.FRAG_LOADED, () => {
+            if (cancelled || !pendingHlsRecoveryRef.current) return;
+            const recoveryMode = pendingHlsRecoveryRef.current;
+            pendingHlsRecoveryRef.current = null;
+            emitDiagnosticRef.current({
+              type: 'hls_recovery_succeeded',
+              slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+              source: activeSourceRef.current,
+              strategy: resolvedRuntime.strategy,
+              errorCode: recoveryMode === 'media' ? 'media_recovery' : 'network_recovery',
+            });
+          });
+
           hls.on(Hls.Events.ERROR, (_event, data) => {
-            if (cancelled || !data.fatal) return;
+            if (cancelled) return;
 
             const errorInput = {
               type: data.type,
@@ -597,6 +798,22 @@ export function EpisodePlayer({
               url: data.url ?? data.frag?.url ?? data.context?.url ?? resolvedRuntime.url,
             };
             const diagnostic = classifyHlsError(errorInput);
+
+            if (!data.fatal) {
+              if (data.type === 'networkError') {
+                const mapped = mapHlsErrorToDiagnostic(errorInput, diagnostic);
+                emitDiagnosticRef.current({
+                  type: mapped.type,
+                  slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                  source: activeSourceRef.current,
+                  strategy: resolvedRuntime.strategy,
+                  httpStatus: mapped.httpStatus,
+                  errorCode: mapped.errorCode,
+                  hlsResource: mapped.hlsResource,
+                });
+              }
+              return;
+            }
 
             console.warn('[Hikari Player] Erro fatal HLS.js:', {
               slot: resolvedRuntime.slot,
@@ -608,6 +825,19 @@ export function EpisodePlayer({
               url: diagnostic.url,
             });
 
+            if (diagnostic.category !== 'decode') {
+              const mapped = mapHlsErrorToDiagnostic(errorInput, diagnostic);
+              emitDiagnosticRef.current({
+                type: mapped.type,
+                slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                source: activeSourceRef.current,
+                strategy: resolvedRuntime.strategy,
+                httpStatus: mapped.httpStatus,
+                errorCode: mapped.errorCode,
+                hlsResource: mapped.hlsResource,
+              });
+            }
+
             const source = activeSourceRef.current;
             if (
               diagnostic.category !== 'decode' &&
@@ -615,6 +845,15 @@ export function EpisodePlayer({
               source.provider === 'mux'
             ) {
               recoveryController.dispose();
+              emitDiagnosticRef.current({
+                type: 'source_switch',
+                slot: source.slot,
+                source,
+                strategy: 'iframe',
+                fromSlot: source.slot,
+                toSlot: source.slot,
+                switchReason: 'mux_embed',
+              });
               setStatusNotice('Stream HLS indisponível — alternando para embed Mux.');
               setResolvedRuntime({
                 slot: source.slot,
@@ -1070,6 +1309,18 @@ export function EpisodePlayer({
     if (!target) return;
     clearIframeLoadTimer();
     attemptedDirectSlotsRef.current.delete(target.slot);
+    if (activeSource && activeSource.slot !== target.slot) {
+      emitDiagnostic({
+        type: 'source_switch',
+        slot: target.slot,
+        source: target,
+        fromSlot: activeSource.slot,
+        toSlot: target.slot,
+        switchReason: 'manual',
+      });
+    }
+    playClickedAtRef.current = Date.now();
+    sourceLoadStartedAtRef.current = Date.now();
     setFailedSlots((prev) => {
       const next = new Set(prev);
       next.delete(target.slot);
@@ -1098,6 +1349,8 @@ export function EpisodePlayer({
         return next;
       });
     }
+    playClickedAtRef.current = Date.now();
+    sourceLoadStartedAtRef.current = Date.now();
     setFatalError(null);
     setFatalErrorKind(null);
     setStatusNotice(null);
@@ -1109,6 +1362,15 @@ export function EpisodePlayer({
   const retryPlayback = () => {
     clearIframeLoadTimer();
     attemptedDirectSlotsRef.current.clear();
+    playClickedAtRef.current = Date.now();
+    sourceLoadStartedAtRef.current = Date.now();
+    if (sources[0]) {
+      emitDiagnostic({
+        type: 'play_clicked',
+        slot: sources[0].slot,
+        source: sources[0],
+      });
+    }
     setFailedSlots(new Set());
     setFatalError(null);
     setFatalErrorKind(null);
@@ -1260,6 +1522,16 @@ export function EpisodePlayer({
               <button
                 type="button"
                 onClick={() => {
+                  const now = Date.now();
+                  playClickedAtRef.current = now;
+                  sourceLoadStartedAtRef.current = now;
+                  if (activeSource) {
+                    emitDiagnostic({
+                      type: 'play_clicked',
+                      slot: activeSource.slot,
+                      source: activeSource,
+                    });
+                  }
                   setHasStarted(true);
                   scheduleHideControls();
                 }}
@@ -1288,10 +1560,45 @@ export function EpisodePlayer({
                   clearIframeLoadTimer();
                   setIframeLoaded(true);
                   setIsLoadingSource(false);
+                  const now = Date.now();
+                  if (!hasInitialLoadRecordedRef.current) {
+                    hasInitialLoadRecordedRef.current = true;
+                    const loadDurationMs =
+                      sourceLoadStartedAtRef.current !== null
+                        ? Math.max(0, now - sourceLoadStartedAtRef.current)
+                        : null;
+                    emitDiagnostic({
+                      type: 'initial_loaded',
+                      slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                      source: activeSourceRef.current,
+                      strategy: 'iframe',
+                      durationMs: loadDurationMs,
+                    });
+                  }
+                  if (!hasPlaybackStartedRef.current) {
+                    hasPlaybackStartedRef.current = true;
+                    const startAnchor = playClickedAtRef.current ?? sourceLoadStartedAtRef.current;
+                    const startupMs =
+                      startAnchor !== null ? Math.max(0, now - startAnchor) : null;
+                    emitDiagnostic({
+                      type: 'playback_started',
+                      slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                      source: activeSourceRef.current,
+                      strategy: 'iframe',
+                      durationMs: startupMs,
+                    });
+                  }
                 }}
                 onError={() => {
                   clearIframeLoadTimer();
                   setIsLoadingSource(false);
+                  emitDiagnostic({
+                    type: 'network_error',
+                    slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                    source: activeSourceRef.current,
+                    strategy: 'iframe',
+                    errorCode: 'iframe_error',
+                  });
                   triggerFailoverRef.current(
                     resolvedRuntime.slot,
                     'Player do provedor não carregou.',
@@ -1323,15 +1630,63 @@ export function EpisodePlayer({
               playsInline
               preload="metadata"
               onLoadStart={() => setIsLoadingSource(true)}
-              onCanPlay={() => setIsLoadingSource(false)}
+              onCanPlay={() => {
+                setIsLoadingSource(false);
+                if (!hasInitialLoadRecordedRef.current && resolvedRuntime.mode === 'video') {
+                  hasInitialLoadRecordedRef.current = true;
+                  const initialLoadMs =
+                    sourceLoadStartedAtRef.current !== null
+                      ? Math.max(0, Date.now() - sourceLoadStartedAtRef.current)
+                      : null;
+                  emitDiagnostic({
+                    type: 'initial_loaded',
+                    slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                    source: activeSourceRef.current,
+                    strategy: resolvedRuntime.strategy,
+                    durationMs: initialLoadMs,
+                  });
+                }
+              }}
               onPlay={() => {
                 setIsPlaying(true);
                 setIsLoadingSource(false);
+                if (
+                  hasCompletedRunRef.current &&
+                  videoRef.current &&
+                  videoRef.current.currentTime < 1
+                ) {
+                  hasCompletedRunRef.current = false;
+                }
                 scheduleHideControls();
               }}
               onPlaying={() => {
                 setIsPlaying(true);
                 setIsLoadingSource(false);
+                isBufferingRef.current = false;
+                if (!hasPlaybackStartedRef.current) {
+                  hasPlaybackStartedRef.current = true;
+                  const startAnchor = playClickedAtRef.current ?? sourceLoadStartedAtRef.current;
+                  const startupMs =
+                    startAnchor !== null ? Math.max(0, Date.now() - startAnchor) : null;
+                  emitDiagnostic({
+                    type: 'playback_started',
+                    slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                    source: activeSourceRef.current,
+                    strategy: resolvedRuntime.strategy,
+                    durationMs: startupMs,
+                  });
+                }
+                if (pendingHlsRecoveryRef.current) {
+                  const recoveryMode = pendingHlsRecoveryRef.current;
+                  pendingHlsRecoveryRef.current = null;
+                  emitDiagnostic({
+                    type: 'hls_recovery_succeeded',
+                    slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                    source: activeSourceRef.current,
+                    strategy: resolvedRuntime.strategy,
+                    errorCode: recoveryMode === 'media' ? 'media_recovery' : 'network_recovery',
+                  });
+                }
               }}
               onPause={() => {
                 setIsPlaying(false);
@@ -1340,9 +1695,31 @@ export function EpisodePlayer({
               onEnded={() => {
                 setIsPlaying(false);
                 setControlsVisible(true);
+                if (!hasCompletedRunRef.current) {
+                  hasCompletedRunRef.current = true;
+                  emitDiagnostic({
+                    type: 'playback_completed',
+                    slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                    source: activeSourceRef.current,
+                    strategy: resolvedRuntime.strategy,
+                  });
+                }
               }}
               onWaiting={() => {
                 setIsLoadingSource(true);
+                if (
+                  hasPlaybackStartedRef.current &&
+                  !isSeekingRef.current &&
+                  !isBufferingRef.current
+                ) {
+                  isBufferingRef.current = true;
+                  emitDiagnostic({
+                    type: 'buffering',
+                    slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                    source: activeSourceRef.current,
+                    strategy: resolvedRuntime.strategy,
+                  });
+                }
               }}
               onTimeUpdate={() => {
                 const v = videoRef.current;
@@ -1364,6 +1741,20 @@ export function EpisodePlayer({
                 const v = videoRef.current;
                 if (!v) return;
                 setDuration(Number.isFinite(v.duration) ? v.duration : 0);
+                if (!hasInitialLoadRecordedRef.current && resolvedRuntime.mode === 'video') {
+                  hasInitialLoadRecordedRef.current = true;
+                  const initialLoadMs =
+                    sourceLoadStartedAtRef.current !== null
+                      ? Math.max(0, Date.now() - sourceLoadStartedAtRef.current)
+                      : null;
+                  emitDiagnostic({
+                    type: 'initial_loaded',
+                    slot: resolvedRuntime.slot as 1 | 2 | 3 | 4 | 5,
+                    source: activeSourceRef.current,
+                    strategy: resolvedRuntime.strategy,
+                    durationMs: initialLoadMs,
+                  });
+                }
               }}
               onVolumeChange={() => {
                 const v = videoRef.current;
@@ -1372,6 +1763,15 @@ export function EpisodePlayer({
                 setIsMuted(v.muted);
               }}
               onError={() => {
+                if (activeSource) {
+                  emitDiagnostic({
+                    type: 'network_error',
+                    slot: activeSource.slot,
+                    source: activeSource,
+                    strategy: resolvedRuntime?.strategy,
+                    errorCode: 'video_element_error',
+                  });
+                }
                 if (
                   activeSource &&
                   resolvedRuntime?.mode === 'hls' &&
@@ -1382,6 +1782,15 @@ export function EpisodePlayer({
                   )
                 ) {
                   attemptedDirectSlotsRef.current.add(activeSource.slot);
+                  emitDiagnostic({
+                    type: 'source_switch',
+                    slot: activeSource.slot,
+                    source: activeSource,
+                    strategy: 'direct',
+                    fromSlot: activeSource.slot,
+                    toSlot: activeSource.slot,
+                    switchReason: 'direct_fallback',
+                  });
                   console.warn(
                     `[Hikari Player] Reprodução HLS via proxy falhou no elemento de vídeo (slot=${activeSource.slot}); tentando URL original direta Maximaimg.`
                   );

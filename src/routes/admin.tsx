@@ -67,11 +67,15 @@ import {
 } from '@/lib/client-thumbnail-extractor';
 import { getOptimizedImageProps } from '@/lib/image-optimization';
 import { formatOpeningTimestamp, parseOpeningRange } from '@/lib/opening-skip';
+import { PLAYBACK_SOURCE_CATEGORY_LABELS } from '@/lib/playback-diagnostics';
+import type { PlaybackDiagnosticsSnapshot } from '@/lib/playback-diagnostics-store';
 import {
+  adminClearPlaybackDiagnosticsFn,
   adminCreateEpisodeFn,
   adminDeleteEpisodeFn,
   adminDiagnoseDatabaseFn,
   adminDuplicateEpisodeFn,
+  adminGetPlaybackDiagnosticsFn,
   adminLoginFn,
   adminLogoutFn,
   adminProcessBatchItemFn,
@@ -376,6 +380,14 @@ function AdminPage() {
   const [diagnosticBusy, setDiagnosticBusy] = useState(false);
   const [diagnosticError, setDiagnosticError] = useState<string | null>(null);
 
+  // Playback stability diagnostic state
+  const [showPlaybackDiagnostics, setShowPlaybackDiagnostics] = useState(false);
+  const [playbackDiagnostics, setPlaybackDiagnostics] = useState<PlaybackDiagnosticsSnapshot | null>(
+    null
+  );
+  const [playbackDiagnosticsBusy, setPlaybackDiagnosticsBusy] = useState(false);
+  const [playbackDiagnosticsError, setPlaybackDiagnosticsError] = useState<string | null>(null);
+
   // Batch import state ("Importar em lote")
   const [batchOpen, setBatchOpen] = useState(false);
   const [batchInput, setBatchInput] = useState('');
@@ -534,6 +546,45 @@ function AdminPage() {
       setDiagnostic(null);
     } finally {
       setDiagnosticBusy(false);
+    }
+  };
+
+  const loadPlaybackDiagnostics = async () => {
+    setShowPlaybackDiagnostics(true);
+    setPlaybackDiagnosticsBusy(true);
+    setPlaybackDiagnosticsError(null);
+    try {
+      const res = await adminGetPlaybackDiagnosticsFn();
+      if (!res.ok) {
+        setPlaybackDiagnosticsError(res.error);
+        return;
+      }
+      setPlaybackDiagnostics(res.snapshot);
+    } catch (err) {
+      setPlaybackDiagnosticsError(
+        err instanceof Error ? err.message : 'Falha ao carregar diagnóstico de reprodução.'
+      );
+    } finally {
+      setPlaybackDiagnosticsBusy(false);
+    }
+  };
+
+  const clearPlaybackDiagnostics = async () => {
+    setPlaybackDiagnosticsBusy(true);
+    setPlaybackDiagnosticsError(null);
+    try {
+      const res = await adminClearPlaybackDiagnosticsFn();
+      if (!res.ok) {
+        setPlaybackDiagnosticsError(res.error);
+        return;
+      }
+      setPlaybackDiagnostics(res.snapshot);
+    } catch (err) {
+      setPlaybackDiagnosticsError(
+        err instanceof Error ? err.message : 'Falha ao limpar diagnóstico de reprodução.'
+      );
+    } finally {
+      setPlaybackDiagnosticsBusy(false);
     }
   };
 
@@ -1450,6 +1501,33 @@ function AdminPage() {
                 <button
                   type="button"
                   onClick={() => {
+                    if (showPlaybackDiagnostics && !playbackDiagnosticsBusy) {
+                      setShowPlaybackDiagnostics(false);
+                    } else {
+                      void loadPlaybackDiagnostics();
+                    }
+                  }}
+                  disabled={playbackDiagnosticsBusy}
+                  aria-pressed={showPlaybackDiagnostics}
+                  className={`min-h-[40px] sm:h-9 px-2.5 sm:px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 whitespace-nowrap cursor-pointer transition-colors disabled:opacity-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-rose-500/70 ${
+                    showPlaybackDiagnostics
+                      ? 'border-white/25 bg-white/10 text-white'
+                      : 'border-white/10 bg-white/[0.03] text-slate-300 hover:bg-white/[0.08] hover:text-white'
+                  }`}
+                  title="Diagnóstico técnico da reprodução"
+                >
+                  {playbackDiagnosticsBusy ? (
+                    <Loader2 className="w-3.5 h-3.5 animate-spin shrink-0" />
+                  ) : (
+                    <Activity className="w-3.5 h-3.5 shrink-0" />
+                  )}
+                  <span className="hidden sm:inline">Estabilidade</span>
+                  <span className="sm:hidden">Player</span>
+                </button>
+
+                <button
+                  type="button"
+                  onClick={() => {
                     if (showDiagnostic && !diagnosticBusy) {
                       setShowDiagnostic(false);
                     } else {
@@ -1717,6 +1795,187 @@ function AdminPage() {
                           </button>
                         </div>
                       </div>
+                    )}
+                  </div>
+                )}
+              </section>
+            )}
+
+            {/* Collapsible Playback stability diagnostic panel */}
+            {showPlaybackDiagnostics && (
+              <section className="rounded-2xl border border-white/[0.08] bg-[#11151E] p-4 sm:p-5 space-y-3.5">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div className="flex items-center gap-2 min-w-0">
+                    <h2 className="text-xs font-semibold uppercase tracking-wider text-slate-300 truncate">
+                      Diagnóstico de estabilidade do streaming
+                    </h2>
+                    {playbackDiagnostics && (
+                      <span className="text-[11px] font-mono text-slate-400 shrink-0">
+                        {playbackDiagnostics.retainedEventsCount}/{playbackDiagnostics.maxRetainedEvents} eventos (memória)
+                      </span>
+                    )}
+                  </div>
+                  <div className="flex items-center gap-1.5 shrink-0">
+                    <button
+                      type="button"
+                      onClick={() => void loadPlaybackDiagnostics()}
+                      disabled={playbackDiagnosticsBusy}
+                      className="h-8 px-2.5 rounded-lg border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-[11px] font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      <RotateCcw className="w-3 h-3" />
+                      Atualizar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => void clearPlaybackDiagnostics()}
+                      disabled={playbackDiagnosticsBusy}
+                      className="h-8 px-2.5 rounded-lg border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-[11px] font-medium text-slate-300 inline-flex items-center gap-1.5 cursor-pointer disabled:opacity-50"
+                    >
+                      Limpar
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setShowPlaybackDiagnostics(false)}
+                      aria-label="Fechar diagnóstico de estabilidade"
+                      className="w-8 h-8 flex items-center justify-center rounded-xl text-slate-400 hover:text-white hover:bg-white/5 cursor-pointer"
+                    >
+                      <X className="w-4 h-4" />
+                    </button>
+                  </div>
+                </div>
+
+                {playbackDiagnosticsBusy && !playbackDiagnostics && (
+                  <p className="text-xs text-slate-400 inline-flex items-center gap-2">
+                    <Loader2 className="w-3.5 h-3.5 animate-spin" />
+                    Carregando métricas de reprodução...
+                  </p>
+                )}
+
+                {playbackDiagnosticsError && (
+                  <p className="text-xs text-rose-400" role="alert">
+                    {playbackDiagnosticsError}
+                  </p>
+                )}
+
+                {playbackDiagnostics && (
+                  <div className="space-y-3 text-xs">
+                    {playbackDiagnostics.retainedEventsCount === 0 ? (
+                      <p className="text-slate-400 bg-[#090B10] border border-white/[0.08] rounded-xl p-3.5">
+                        Nenhum evento de reprodução registrado nesta instância até o momento. Os eventos são coletados sem URLs, tokens ou IPs durante o uso do player.
+                      </p>
+                    ) : (
+                      <>
+                        <dl className="grid grid-cols-2 sm:grid-cols-4 gap-2.5 font-mono">
+                          <div className="bg-[#090B10] border border-white/[0.08] rounded-xl p-3">
+                            <dt className="text-[11px] text-slate-400">Iniciadas</dt>
+                            <dd className="mt-1 text-sm font-semibold text-white tabular-nums">
+                              {playbackDiagnostics.summary.playsStarted}
+                            </dd>
+                          </div>
+                          <div className="bg-[#090B10] border border-white/[0.08] rounded-xl p-3">
+                            <dt className="text-[11px] text-slate-400">Concluídas</dt>
+                            <dd className="mt-1 text-sm font-semibold text-emerald-400 tabular-nums">
+                              {playbackDiagnostics.summary.playsCompleted}
+                            </dd>
+                          </div>
+                          <div className="bg-[#090B10] border border-white/[0.08] rounded-xl p-3">
+                            <dt className="text-[11px] text-slate-400">Taxa de falhas</dt>
+                            <dd className="mt-1 text-sm font-semibold text-rose-300 tabular-nums">
+                              {playbackDiagnostics.summary.failureRate !== null
+                                ? `${(playbackDiagnostics.summary.failureRate * 100).toFixed(1)}%`
+                                : '—'}
+                            </dd>
+                          </div>
+                          <div className="bg-[#090B10] border border-white/[0.08] rounded-xl p-3">
+                            <dt className="text-[11px] text-slate-400">Início médio</dt>
+                            <dd className="mt-1 text-sm font-semibold text-slate-100 tabular-nums">
+                              {playbackDiagnostics.summary.averageStartupMs !== null
+                                ? `${playbackDiagnostics.summary.averageStartupMs} ms`
+                                : '—'}
+                            </dd>
+                          </div>
+                          <div className="bg-[#090B10] border border-white/[0.08] rounded-xl p-3">
+                            <dt className="text-[11px] text-slate-400">Buffering</dt>
+                            <dd className="mt-1 text-sm font-semibold text-amber-300 tabular-nums">
+                              {playbackDiagnostics.summary.bufferingCount}
+                            </dd>
+                          </div>
+                          <div className="bg-[#090B10] border border-white/[0.08] rounded-xl p-3">
+                            <dt className="text-[11px] text-slate-400">Recup. HLS OK</dt>
+                            <dd className="mt-1 text-sm font-semibold text-emerald-300 tabular-nums">
+                              {playbackDiagnostics.summary.hlsSuccessfulRecoveries}
+                            </dd>
+                          </div>
+                          <div className="bg-[#090B10] border border-white/[0.08] rounded-xl p-3">
+                            <dt className="text-[11px] text-slate-400">Failovers</dt>
+                            <dd className="mt-1 text-sm font-semibold text-amber-300 tabular-nums">
+                              {playbackDiagnostics.summary.failoverCount}
+                            </dd>
+                          </div>
+                          <div className="bg-[#090B10] border border-white/[0.08] rounded-xl p-3">
+                            <dt className="text-[11px] text-slate-400">HTTP 403/404/429/5xx</dt>
+                            <dd className="mt-1 text-[11px] font-semibold text-slate-200 tabular-nums">
+                              {playbackDiagnostics.summary.httpErrorsByCode[403]}/
+                              {playbackDiagnostics.summary.httpErrorsByCode[404]}/
+                              {playbackDiagnostics.summary.httpErrorsByCode[429]}/
+                              {playbackDiagnostics.summary.httpErrorsByCode['5xx']}
+                            </dd>
+                          </div>
+                        </dl>
+
+                        {playbackDiagnostics.summary.topErrorCategories.length > 0 && (
+                          <div className="bg-[#090B10] border border-white/[0.08] rounded-xl p-3 space-y-2">
+                            <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                              Categorias de fontes com mais erros
+                            </div>
+                            <div className="space-y-1.5">
+                              {playbackDiagnostics.summary.topErrorCategories.map((cat) => (
+                                <div
+                                  key={cat.category}
+                                  className="flex flex-wrap items-center justify-between gap-2 text-xs font-mono"
+                                >
+                                  <span className="text-slate-200">{cat.label}</span>
+                                  <span className="text-slate-400 tabular-nums">
+                                    erros: <strong className="text-rose-300">{cat.errorCount}</strong>
+                                    {' · '}failovers: {cat.failoverCount}
+                                    {' · '}buffering: {cat.bufferingCount}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+
+                        {playbackDiagnostics.recentEvents.length > 0 && (
+                          <div className="bg-[#090B10] border border-white/[0.08] rounded-xl p-3 space-y-2">
+                            <div className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
+                              Últimos eventos técnicos (sanitizados)
+                            </div>
+                            <div className="max-h-44 overflow-y-auto space-y-1 font-mono text-[11px]">
+                              {playbackDiagnostics.recentEvents.slice(0, 15).map((ev, idx) => (
+                                <div
+                                  key={`${ev.sessionId}-${ev.timestamp}-${ev.type}-${idx}`}
+                                  className="flex flex-wrap items-center justify-between gap-2 text-slate-300 border-b border-white/[0.04] pb-1 last:border-0 last:pb-0"
+                                >
+                                  <span>
+                                    <span className="text-slate-100">{ev.type}</span>
+                                    {' · '}
+                                    {PLAYBACK_SOURCE_CATEGORY_LABELS[ev.sourceCategory]} (Slot {ev.slot}
+                                    {ev.deliveryMode === 'proxy' ? ' · proxy' : ''})
+                                    {ev.httpStatus ? ` · HTTP ${ev.httpStatus}` : ''}
+                                    {ev.errorCode ? ` · ${ev.errorCode}` : ''}
+                                  </span>
+                                  <span className="text-slate-500 tabular-nums">
+                                    {ev.durationMs !== undefined && ev.durationMs !== null
+                                      ? `${ev.durationMs}ms`
+                                      : ''}
+                                  </span>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </>
                     )}
                   </div>
                 )}

@@ -53,6 +53,11 @@ import {
   getStableProxyExpiry,
 } from '@/lib/proxy-signing';
 import {
+  clearPlaybackDiagnosticsStore,
+  getPlaybackDiagnosticsSnapshot,
+  type PlaybackDiagnosticsSnapshot,
+} from '@/lib/playback-diagnostics-store';
+import {
   attemptControlledR2Resolution,
   type ControlledR2ResolutionDeps,
   type ControlledR2ResolutionResult,
@@ -749,4 +754,50 @@ export const adminResolveR2SourceFn = createServerFn({ method: 'POST' })
     }
   );
 
+export const adminGetPlaybackDiagnosticsFn = createServerFn({ method: 'GET' }).handler(
+  async (): Promise<
+    { ok: true; snapshot: PlaybackDiagnosticsSnapshot } | { ok: false; error: string }
+  > => {
+    trySetResponseHeader('Cache-Control', 'private, no-store');
+    try {
+      requireAdminSession();
+      return {
+        ok: true,
+        snapshot: getPlaybackDiagnosticsSnapshot(30),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Falha ao carregar diagnóstico de reprodução.',
+      };
+    }
+  }
+);
+
+export const adminClearPlaybackDiagnosticsFn = createServerFn({ method: 'POST' }).handler(
+  async (): Promise<
+    { ok: true; snapshot: PlaybackDiagnosticsSnapshot } | { ok: false; error: string }
+  > => {
+    trySetResponseHeader('Cache-Control', 'private, no-store');
+    try {
+      requireAdminSession();
+      clearPlaybackDiagnosticsStore();
+      return {
+        ok: true,
+        snapshot: getPlaybackDiagnosticsSnapshot(30),
+      };
+    } catch (err) {
+      return {
+        ok: false,
+        error:
+          err instanceof Error
+            ? err.message
+            : 'Falha ao limpar diagnóstico de reprodução.',
+      };
+    }
+  }
+);
 
