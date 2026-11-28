@@ -20,6 +20,7 @@ import {
   Film,
   FolderOpen,
   Globe,
+  Hash,
   Image as ImageIcon,
   ListPlus,
   Loader2,
@@ -65,6 +66,13 @@ import {
   extractVideoThumbnails,
   revokeThumbnailCandidates,
 } from '@/lib/client-thumbnail-extractor';
+import {
+  copyEpisodeField,
+  createEpisodeCopyKey,
+  type EpisodeCopyField,
+  type EpisodeCopyOutcome,
+  getEpisodeCopyPosterUrl,
+} from '@/lib/episode-copy';
 import { getOptimizedImageProps } from '@/lib/image-optimization';
 import { formatOpeningTimestamp, parseOpeningRange } from '@/lib/opening-skip';
 import { PLAYBACK_SOURCE_CATEGORY_LABELS } from '@/lib/playback-diagnostics';
@@ -342,6 +350,10 @@ function AdminPage() {
   // Episode actions state
   const [openMenuId, setOpenMenuId] = useState<string | null>(null);
   const [copiedId, setCopiedId] = useState<string | null>(null);
+  const [episodeCopyFeedback, setEpisodeCopyFeedback] = useState<
+    Record<string, EpisodeCopyOutcome>
+  >({});
+  const episodeCopyTimersRef = useRef<Record<string, number>>({});
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null);
   const [deleteBusyId, setDeleteBusyId] = useState<string | null>(null);
   const [duplicatingEpisodeId, setDuplicatingEpisodeId] = useState<string | null>(null);
@@ -651,6 +663,38 @@ function AdminPage() {
     }
   };
 
+  useEffect(() => {
+    return () => {
+      Object.values(episodeCopyTimersRef.current).forEach((timerId) => {
+        window.clearTimeout(timerId);
+      });
+      episodeCopyTimersRef.current = {};
+    };
+  }, []);
+
+  const handleCopyEpisodeField = async (ep: EpisodeDto, field: EpisodeCopyField) => {
+    const key = createEpisodeCopyKey(ep.id, field);
+    const activeTimer = episodeCopyTimersRef.current[key];
+    if (activeTimer !== undefined) {
+      window.clearTimeout(activeTimer);
+      delete episodeCopyTimersRef.current[key];
+    }
+
+    const outcome = await copyEpisodeField(ep, field);
+    setEpisodeCopyFeedback((prev) => ({ ...prev, [key]: outcome }));
+
+    const durationMs = outcome.ok ? 2200 : 3500;
+    episodeCopyTimersRef.current[key] = window.setTimeout(() => {
+      delete episodeCopyTimersRef.current[key];
+      setEpisodeCopyFeedback((prev) => {
+        if (!(key in prev)) return prev;
+        const next = { ...prev };
+        delete next[key];
+        return next;
+      });
+    }, durationMs);
+  };
+
   const handleLogin = async (e: FormEvent) => {
     e.preventDefault();
     setLoginError(null);
@@ -682,6 +726,11 @@ function AdminPage() {
     setGroupPage(1);
     setSearchQuery('');
     setSavedBanner(null);
+    Object.values(episodeCopyTimersRef.current).forEach((timerId) => {
+      window.clearTimeout(timerId);
+    });
+    episodeCopyTimersRef.current = {};
+    setEpisodeCopyFeedback({});
     setShowDiagnostic(false);
     setDiagnostic(null);
     setDiagnosticError(null);
@@ -3568,6 +3617,15 @@ function AdminPage() {
                                   const googleVideoBadge = episodeSources.find(
                                     (src) => src.googleVideoInspection.badgeLabel
                                   )?.googleVideoInspection.badgeLabel;
+                                  const idCopyFeedback =
+                                    episodeCopyFeedback[createEpisodeCopyKey(ep.id, 'id')];
+                                  const posterCopyFeedback =
+                                    episodeCopyFeedback[createEpisodeCopyKey(ep.id, 'poster')];
+                                  const hasRegisteredPoster = Boolean(getEpisodeCopyPosterUrl(ep));
+                                  const inlineCopyErrors = [idCopyFeedback, posterCopyFeedback].filter(
+                                    (entry): entry is Extract<EpisodeCopyOutcome, { ok: false }> =>
+                                      Boolean(entry && !entry.ok)
+                                  );
 
                                   return (
                                     <li
@@ -3652,25 +3710,63 @@ function AdminPage() {
                                         </div>
 
                                         {/* Episode actions */}
-                                        <div className="flex items-center flex-wrap sm:flex-nowrap gap-1.5 shrink-0">
-                                          <button
-                                            type="button"
-                                            onClick={() => void copyLink(ep.id, ep.public_url)}
-                                            aria-label={`Copiar link de ${epLabel}`}
-                                            className="min-h-[40px] sm:h-9 px-3 rounded-xl border border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-xs font-medium text-slate-200 inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors"
-                                          >
-                                            {copiedId === ep.id ? (
-                                              <>
-                                                <Check className="w-3.5 h-3.5 text-emerald-400" />
-                                                <span>Copiado</span>
-                                              </>
-                                            ) : (
-                                              <>
-                                                <Copy className="w-3.5 h-3.5" />
-                                                <span>Copiar link</span>
-                                              </>
-                                            )}
-                                          </button>
+                                        <div className="flex items-center flex-wrap gap-1.5 shrink-0">
+                                          <div className="flex items-center flex-wrap gap-1.5">
+                                            <button
+                                              type="button"
+                                              onClick={() => void handleCopyEpisodeField(ep, 'id')}
+                                              aria-label={`Copiar ID de ${epLabel}`}
+                                              className={`min-h-[40px] sm:h-9 px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors ${
+                                                idCopyFeedback?.ok
+                                                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+                                                  : 'border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-slate-200'
+                                              }`}
+                                            >
+                                              {idCopyFeedback?.ok ? (
+                                                <>
+                                                  <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                                  <span>{idCopyFeedback.message}</span>
+                                                </>
+                                              ) : (
+                                                <>
+                                                  <Hash className="w-3.5 h-3.5 shrink-0" />
+                                                  <span>Copiar ID</span>
+                                                </>
+                                              )}
+                                            </button>
+
+                                            <button
+                                              type="button"
+                                              onClick={() =>
+                                                void handleCopyEpisodeField(ep, 'poster')
+                                              }
+                                              aria-label={`Copiar link da imagem de ${epLabel}`}
+                                              title={
+                                                hasRegisteredPoster
+                                                  ? 'Copiar URL da thumbnail cadastrada'
+                                                  : 'Sem imagem cadastrada para este episódio'
+                                              }
+                                              className={`min-h-[40px] sm:h-9 px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors ${
+                                                posterCopyFeedback?.ok
+                                                  ? 'border-emerald-500/40 bg-emerald-500/10 text-emerald-200'
+                                                  : !hasRegisteredPoster
+                                                    ? 'border-white/10 bg-white/[0.02] hover:bg-white/[0.06] text-slate-400'
+                                                    : 'border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-slate-200'
+                                              }`}
+                                            >
+                                              {posterCopyFeedback?.ok ? (
+                                                <>
+                                                  <Check className="w-3.5 h-3.5 text-emerald-400 shrink-0" />
+                                                  <span>{posterCopyFeedback.message}</span>
+                                                </>
+                                              ) : (
+                                                <>
+                                                  <ImageIcon className="w-3.5 h-3.5 shrink-0" />
+                                                  <span>Copiar link da imagem</span>
+                                                </>
+                                              )}
+                                            </button>
+                                          </div>
 
                                           <a
                                             href={`/e/${encodeURIComponent(ep.id)}`}
@@ -3783,6 +3879,30 @@ function AdminPage() {
                                           </div>
                                         </div>
                                       </div>
+
+                                      {inlineCopyErrors.length > 0 && (
+                                        <div
+                                          role="status"
+                                          aria-live="polite"
+                                          className="flex flex-wrap items-center gap-x-3 gap-y-1 text-[11px]"
+                                        >
+                                          {inlineCopyErrors.map((notice) => (
+                                            <span
+                                              key={createEpisodeCopyKey(
+                                                notice.episodeId,
+                                                notice.field
+                                              )}
+                                              className={
+                                                notice.status === 'missing_poster'
+                                                  ? 'text-amber-300'
+                                                  : 'text-rose-300'
+                                              }
+                                            >
+                                              {notice.message}
+                                            </span>
+                                          ))}
+                                        </div>
+                                      )}
 
                                       {/* Delete confirmation bar */}
                                       {isDeleting && (
