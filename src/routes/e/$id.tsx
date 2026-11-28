@@ -9,8 +9,8 @@ export const Route = createFileRoute('/e/$id')({
     return await getPublicEpisodeFn({ data: { id: params.id } });
   },
   headers: () => ({
-    'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300, stale-if-error=86400',
-    'CDN-Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300, stale-if-error=86400',
+    'Cache-Control': 'private, no-store',
+    'CDN-Cache-Control': 'private, no-store',
   }),
   head: ({ loaderData }) => {
     const title =

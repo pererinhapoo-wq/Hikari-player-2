@@ -6,8 +6,8 @@ let hasPlayedLogoEntrance = false;
 
 export const Route = createFileRoute('/')({
   headers: () => ({
-    'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=900',
-    'CDN-Cache-Control': 'public, s-maxage=300, stale-while-revalidate=900',
+    'Cache-Control': 'private, no-store',
+    'CDN-Cache-Control': 'private, no-store',
   }),
   component: HomePage,
 });

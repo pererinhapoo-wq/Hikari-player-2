@@ -7,6 +7,7 @@ export const SECURITY_HEADER_VALUES = {
   referrerPolicyDefault: 'strict-origin-when-cross-origin',
   xFrameOptionsSameOrigin: 'SAMEORIGIN',
   hsts: 'max-age=31536000',
+  htmlNonceCacheControl: 'private, no-store',
 } as const;
 
 const globalRegistry = globalThis as Record<symbol, CspNonceStore | undefined>;
@@ -207,7 +208,13 @@ export function applySecurityHeaders(
     !isBodylessOrRedirect &&
     (contentType.includes('text/html') || (!isApiOrServerFnPath(pathname) && contentType === ''));
 
+  const hasNonce = typeof options.nonce === 'string' && options.nonce.length > 0;
+
   if (isHtmlDocument) {
+    if (hasNonce) {
+      headers.set('Cache-Control', SECURITY_HEADER_VALUES.htmlNonceCacheControl);
+      headers.set('CDN-Cache-Control', SECURITY_HEADER_VALUES.htmlNonceCacheControl);
+    }
     if (!headers.has('X-Frame-Options')) {
       headers.set('X-Frame-Options', SECURITY_HEADER_VALUES.xFrameOptionsSameOrigin);
     }

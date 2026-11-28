@@ -310,17 +310,20 @@ describe('Cache das rotas de página e otimização de imagens/JS', () => {
   it('configura cabeçalhos de cache corretos para Home, /e/$id e /admin', async () => {
     const homeHeaders = await HomeRoute.options.headers?.({} as never);
     expect(homeHeaders).toMatchObject({
-      'Cache-Control': 'public, s-maxage=300, stale-while-revalidate=900',
+      'Cache-Control': 'private, no-store',
+      'CDN-Cache-Control': 'private, no-store',
     });
 
     const episodeHeaders = await EpisodeRoute.options.headers?.({} as never);
     expect(episodeHeaders).toMatchObject({
-      'Cache-Control': 'public, s-maxage=60, stale-while-revalidate=300, stale-if-error=86400',
+      'Cache-Control': 'private, no-store',
+      'CDN-Cache-Control': 'private, no-store',
     });
 
     const adminHeaders = await AdminRoute.options.headers?.({} as never);
     expect(adminHeaders).toMatchObject({
       'Cache-Control': 'private, no-store',
+      'CDN-Cache-Control': 'private, no-store',
     });
   });
 
