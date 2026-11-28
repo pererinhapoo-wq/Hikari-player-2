@@ -37,7 +37,7 @@ interface EpisodePlayerProps {
   openingEndSeconds?: number | null;
 }
 
-const SPEED_OPTIONS = [0.5, 0.75, 1, 1.25, 1.5, 2] as const;
+const SPEED_OPTIONS = [0.75, 1, 1.25, 1.5, 2] as const;
 
 function formatTime(seconds: number): string {
   if (!Number.isFinite(seconds) || seconds < 0) return '00:00';
@@ -265,6 +265,21 @@ export function EpisodePlayer({
       window.removeEventListener('pointercancel', stopAdjusting);
     };
   }, [isAdjustingVolume]);
+
+  // Close speed menu when clicking outside
+  useEffect(() => {
+    if (!speedMenuOpen) return;
+    const handleClickOutside = (e: MouseEvent | TouchEvent) => {
+      const target = e.target as HTMLElement | null;
+      if (!target?.closest('[data-speed-control]')) {
+        setSpeedMenuOpen(false);
+      }
+    };
+    document.addEventListener('pointerdown', handleClickOutside);
+    return () => {
+      document.removeEventListener('pointerdown', handleClickOutside);
+    };
+  }, [speedMenuOpen]);
 
   const triggerFailover = useCallback(
     (failedSlot: number, reason: string, errorKind: 'iframe' | 'media' = 'media') => {
@@ -685,10 +700,15 @@ export function EpisodePlayer({
   const togglePlayPause = useCallback(() => {
     const video = videoRef.current;
     if (!video) return;
-    if (video.paused) {
+    if (video.paused || video.ended) {
+      if (video.ended) {
+        video.currentTime = 0;
+      }
       void video.play();
+      setIsPlaying(true);
     } else {
       video.pause();
+      setIsPlaying(false);
     }
     scheduleHideControls();
   }, [scheduleHideControls]);
@@ -1100,6 +1120,18 @@ export function EpisodePlayer({
 
   const displayedTime = scrubTime ?? currentTime;
 
+  const isVideoPaused = videoRef.current ? videoRef.current.paused : !isPlaying;
+  const isActuallyPlaying = isPlaying && !isVideoPaused;
+
+  const showCenterPlay =
+    hasStarted &&
+    resolvedRuntime &&
+    resolvedRuntime.mode !== 'iframe' &&
+    !fatalError &&
+    !isLoadingSource &&
+    !isActuallyPlaying &&
+    isVideoPaused;
+
   const showSkipOpening = isOpeningSkipVisible({
     currentTime,
     openingStartSeconds,
@@ -1222,7 +1254,7 @@ export function EpisodePlayer({
 
             <div className="absolute inset-0 bg-gradient-to-t from-black/85 via-black/35 to-black/30" />
 
-            <div className="absolute inset-0 flex flex-col items-center justify-center p-6 text-center">
+            <div className="absolute inset-0 flex flex-col items-center justify-center p-4 sm:p-6 text-center">
               <button
                 type="button"
                 onClick={() => {
@@ -1230,11 +1262,11 @@ export function EpisodePlayer({
                   scheduleHideControls();
                 }}
                 aria-label={`Reproduzir ${title}`}
-                className="w-20 h-20 rounded-full bg-[#a855f7] hover:bg-[#9333ea] active:scale-95 text-white flex items-center justify-center shadow-[0_0_30px_rgba(168,85,247,0.45)] transition-transform duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#a855f7]/50 cursor-pointer"
+                className="w-12 h-12 sm:w-14 sm:h-14 md:w-16 md:h-16 rounded-full bg-[#a855f7] hover:bg-[#9333ea] active:scale-95 text-white flex items-center justify-center shadow-[0_0_24px_rgba(168,85,247,0.45)] transition-transform duration-150 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#a855f7]/50 cursor-pointer"
               >
-                <Play className="w-8 h-8 fill-current ml-1" />
+                <Play className="w-5 h-5 sm:w-6 sm:h-6 md:w-7 md:h-7 fill-current ml-0.5 md:ml-1" />
               </button>
-              <span className="mt-4 text-sm font-medium text-white/90">
+              <span className="mt-2.5 sm:mt-3 text-xs sm:text-sm font-medium text-white/90">
                 Clique para reproduzir
               </span>
             </div>
@@ -1295,14 +1327,28 @@ export function EpisodePlayer({
                 setIsLoadingSource(false);
                 scheduleHideControls();
               }}
+              onPlaying={() => {
+                setIsPlaying(true);
+                setIsLoadingSource(false);
+              }}
               onPause={() => {
                 setIsPlaying(false);
                 setControlsVisible(true);
+              }}
+              onEnded={() => {
+                setIsPlaying(false);
+                setControlsVisible(true);
+              }}
+              onWaiting={() => {
+                setIsLoadingSource(true);
               }}
               onTimeUpdate={() => {
                 const v = videoRef.current;
                 if (!v) return;
                 setCurrentTime(v.currentTime);
+                if (!v.paused && !isPlaying) {
+                  setIsPlaying(true);
+                }
                 if (v.buffered.length > 0) {
                   setBufferedEnd(v.buffered.end(v.buffered.length - 1));
                 }
@@ -1391,8 +1437,8 @@ export function EpisodePlayer({
               </div>
             )}
 
-            {/* Center Play button when paused */}
-            {!isPlaying && !isLoadingSource && (
+            {/* Center Play button when paused or ended */}
+            {showCenterPlay && (
               <button
                 type="button"
                 onPointerDown={(e) => e.stopPropagation()}
@@ -1402,9 +1448,9 @@ export function EpisodePlayer({
                   togglePlayPause();
                 }}
                 aria-label="Continuar reprodução"
-                className="absolute inset-0 m-auto z-20 w-16 h-16 rounded-full bg-black/65 hover:bg-[#a855f7] text-white flex items-center justify-center border border-white/20 backdrop-blur-md shadow-[0_8px_28px_rgba(0,0,0,0.5)] transition-all duration-150 hover:scale-105 active:scale-95 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer"
+                className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 z-20 w-12 h-12 sm:w-14 sm:h-14 md:w-16 md:h-16 rounded-full bg-[#a855f7] hover:bg-[#9333ea] text-white flex items-center justify-center shadow-[0_0_24px_rgba(168,85,247,0.45)] transition-all duration-150 hover:scale-105 active:scale-95 focus-visible:outline-none focus-visible:ring-4 focus-visible:ring-[#a855f7]/50 cursor-pointer"
               >
-                <Play className="w-7 h-7 fill-current ml-0.5" />
+                <Play className="w-5 h-5 sm:w-6 sm:h-6 md:w-7 md:h-7 fill-current ml-0.5 md:ml-1" />
               </button>
             )}
 
@@ -1464,7 +1510,7 @@ export function EpisodePlayer({
               onPointerDown={(e) => e.stopPropagation()}
               onPointerUp={(e) => e.stopPropagation()}
               onClick={(e) => e.stopPropagation()}
-              className={`absolute inset-x-2.5 bottom-2.5 sm:inset-x-4 sm:bottom-4 z-20 rounded-2xl bg-black/70 backdrop-blur-md border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.55)] px-2.5 sm:px-4 pt-2 pb-2 transition-all duration-200 ${
+              className={`absolute inset-x-2 bottom-2 sm:inset-x-4 sm:bottom-4 z-30 rounded-xl sm:rounded-2xl bg-black/75 backdrop-blur-md border border-white/10 shadow-[0_8px_32px_rgba(0,0,0,0.55)] px-2 sm:px-4 pt-1.5 pb-1.5 sm:pt-2 sm:pb-2 transition-all duration-200 ${
                 controlsVisible || !isPlaying || speedMenuOpen || isSeeking || isAdjustingVolume
                   ? 'opacity-100 translate-y-0'
                   : 'opacity-0 translate-y-2 pointer-events-none'
@@ -1488,7 +1534,7 @@ export function EpisodePlayer({
                     setHoverTime(null);
                   }
                 }}
-                className="relative h-5 flex items-center cursor-pointer group/bar touch-none"
+                className="relative h-4 sm:h-5 flex items-center cursor-pointer group/bar touch-none"
               >
                 {hoverTime && (
                   <div
@@ -1531,13 +1577,13 @@ export function EpisodePlayer({
               </div>
 
               {/* Control buttons row */}
-              <div className="mt-1 flex items-center justify-between gap-1.5 sm:gap-2">
-                <div className="flex items-center gap-1 sm:gap-2 min-w-0">
+              <div className="mt-1 flex items-center justify-between gap-1 sm:gap-2">
+                <div className="flex items-center gap-1 sm:gap-1.5 min-w-0">
                   <button
                     type="button"
                     onClick={togglePlayPause}
                     aria-label={isPlaying ? 'Pausar' : 'Reproduzir'}
-                    className="w-9 h-9 flex items-center justify-center rounded-xl text-white hover:bg-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer shrink-0"
+                    className="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center rounded-lg sm:rounded-xl text-white hover:bg-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer shrink-0"
                   >
                     {isPlaying ? (
                       <Pause className="w-4 h-4 sm:w-5 sm:h-5 fill-current" />
@@ -1547,17 +1593,17 @@ export function EpisodePlayer({
                   </button>
 
                   {/* Mute + Volume slider (available on mobile and desktop) */}
-                  <div className="flex items-center gap-1 sm:gap-1.5 shrink-0">
+                  <div className="flex items-center gap-0.5 sm:gap-1.5 shrink-0">
                     <button
                       type="button"
                       onClick={toggleMute}
                       aria-label={isMuted ? 'Ativar som' : 'Silenciar'}
-                      className="w-9 h-9 flex items-center justify-center rounded-xl text-slate-200 hover:text-white hover:bg-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer shrink-0"
+                      className="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center rounded-lg sm:rounded-xl text-slate-200 hover:text-white hover:bg-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer shrink-0"
                     >
                       {isMuted || volume === 0 ? (
-                        <VolumeX className="w-4 h-4" />
+                        <VolumeX className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                       ) : (
-                        <Volume2 className="w-4 h-4" />
+                        <Volume2 className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                       )}
                     </button>
                     <input
@@ -1575,12 +1621,12 @@ export function EpisodePlayer({
                       onPointerCancel={() => setIsAdjustingVolume(false)}
                       onBlur={() => setIsAdjustingVolume(false)}
                       onChange={(e) => changeVolume(Number(e.target.value))}
-                      className="w-12 sm:w-20 h-1.5 accent-[#a855f7] cursor-pointer touch-none"
+                      className="w-10 sm:w-16 md:w-20 h-1.5 accent-[#a855f7] cursor-pointer touch-none"
                     />
                   </div>
 
                   {/* Timecode */}
-                  <div className="ml-0.5 sm:ml-1 text-[11px] sm:text-xs font-mono tabular-nums text-slate-200 whitespace-nowrap truncate">
+                  <div className="ml-0.5 sm:ml-1 text-[10px] sm:text-xs font-mono tabular-nums text-slate-200 whitespace-nowrap truncate">
                     {formatTime(displayedTime)}{' '}
                     <span className="text-slate-400">/ {formatTime(duration)}</span>
                   </div>
@@ -1588,37 +1634,45 @@ export function EpisodePlayer({
 
                 {/* Right controls: Speed + Fullscreen */}
                 <div className="flex items-center gap-1 relative shrink-0">
-                  <div className="relative">
+                  <div className="relative" data-speed-control>
                     <button
                       type="button"
                       onClick={() => setSpeedMenuOpen((prev) => !prev)}
                       aria-label="Velocidade de reprodução"
                       aria-expanded={speedMenuOpen}
-                      className={`px-2 sm:px-2.5 h-9 rounded-xl text-xs font-mono tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer whitespace-nowrap ${
+                      className={`px-1.5 sm:px-2 h-7 sm:h-8 rounded-lg text-[11px] sm:text-xs font-mono tabular-nums transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer whitespace-nowrap shrink-0 flex items-center justify-center ${
                         speedMenuOpen
-                          ? 'bg-[#a855f7]/25 text-white border border-[#a855f7]/50'
-                          : 'text-slate-200 hover:text-white hover:bg-white/10'
+                          ? 'bg-[#a855f7]/30 text-white border border-[#a855f7]/60'
+                          : 'text-slate-200 hover:text-white hover:bg-white/10 border border-transparent'
                       }`}
                     >
                       {playbackRate}x
                     </button>
 
                     {speedMenuOpen && (
-                      <div className="absolute right-0 bottom-12 bg-[#11151E]/95 backdrop-blur-md border border-white/15 rounded-xl p-1.5 shadow-2xl min-w-[82px] z-30">
-                        {SPEED_OPTIONS.map((rate) => (
-                          <button
-                            key={rate}
-                            type="button"
-                            onClick={() => changePlaybackRate(rate)}
-                            className={`w-full text-left px-2.5 py-1.5 rounded-lg text-xs font-mono tabular-nums transition-colors cursor-pointer ${
-                              playbackRate === rate
-                                ? 'bg-[#a855f7] text-white font-semibold'
-                                : 'text-slate-300 hover:bg-white/10 hover:text-white'
-                            }`}
-                          >
-                            {rate}x
-                          </button>
-                        ))}
+                      <div
+                        role="menu"
+                        aria-label="Opções de velocidade"
+                        className="absolute right-0 bottom-full mb-1.5 bg-[#11151E]/95 backdrop-blur-md border border-white/15 rounded-lg p-1 shadow-2xl min-w-[62px] sm:min-w-[68px] max-h-[140px] sm:max-h-[160px] overflow-y-auto z-40 space-y-0.5"
+                      >
+                        {SPEED_OPTIONS.map((rate) => {
+                          const isSelected = playbackRate === rate;
+                          return (
+                            <button
+                              key={rate}
+                              type="button"
+                              role="menuitem"
+                              onClick={() => changePlaybackRate(rate)}
+                              className={`w-full text-center px-1.5 py-1 rounded-md text-[11px] sm:text-xs font-mono tabular-nums transition-colors cursor-pointer ${
+                                isSelected
+                                  ? 'bg-[#a855f7] text-white font-semibold shadow-sm'
+                                  : 'text-slate-300 hover:bg-white/10 hover:text-white'
+                              }`}
+                            >
+                              {rate}x
+                            </button>
+                          );
+                        })}
                       </div>
                     )}
                   </div>
@@ -1627,12 +1681,12 @@ export function EpisodePlayer({
                     type="button"
                     onClick={() => void toggleFullscreen()}
                     aria-label={isFullscreen ? 'Sair da tela cheia' : 'Tela cheia'}
-                    className="w-9 h-9 flex items-center justify-center rounded-xl text-slate-200 hover:text-white hover:bg-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer shrink-0"
+                    className="w-8 h-8 sm:w-9 sm:h-9 flex items-center justify-center rounded-lg sm:rounded-xl text-slate-200 hover:text-white hover:bg-white/10 transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-[#a855f7] cursor-pointer shrink-0"
                   >
                     {isFullscreen ? (
-                      <Minimize className="w-4 h-4" />
+                      <Minimize className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                     ) : (
-                      <Maximize className="w-4 h-4" />
+                      <Maximize className="w-3.5 h-3.5 sm:w-4 sm:h-4" />
                     )}
                   </button>
                 </div>
