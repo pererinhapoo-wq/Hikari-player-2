@@ -323,3 +323,18 @@ export function countEpisodeSources(ep: Pick<
     ep.video_url_5,
   ].filter((u) => Boolean(u && u.trim())).length;
 }
+
+export function toggleSingleMirrorPanel(
+  currentOpenEpisodeId: string | null,
+  targetEpisodeId: string
+): string | null {
+  return currentOpenEpisodeId === targetEpisodeId ? null : targetEpisodeId;
+}
+
+export function isEpisodeMirrorPanelOpen(
+  currentOpenEpisodeId: string | null,
+  episodeId: string
+): boolean {
+  return currentOpenEpisodeId === episodeId;
+}
+

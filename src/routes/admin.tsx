@@ -50,11 +50,13 @@ import {
   countEpisodeSources,
   formatEpisodeIdentification,
   groupEpisodesByAnime,
+  isEpisodeMirrorPanelOpen,
   normalizeAnimeKey,
   paginateItems,
   sanitizeAnimeName,
   sanitizeEpisodeNumber,
   searchAndSortAnimeGroups,
+  toggleSingleMirrorPanel,
   UNASSIGNED_ANIME_KEY,
 } from '@/lib/anime-library';
 import {
@@ -339,7 +341,7 @@ function AdminPage() {
   const [pendingFocusGroupKey, setPendingFocusGroupKey] = useState<string | null>(null);
   const [groupPage, setGroupPage] = useState(1);
   const [episodePageMap, setEpisodePageMap] = useState<Record<string, number>>({});
-  const [openMirrorPanelIds, setOpenMirrorPanelIds] = useState<Record<string, boolean>>({});
+  const [openMirrorEpisodeId, setOpenMirrorEpisodeId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState('');
   const [sortBy, setSortBy] = useState<AnimeSortMode>('recent');
 
@@ -989,6 +991,7 @@ function AdminPage() {
     setGroupPage(1);
     setSearchQuery('');
     setSavedBanner(null);
+    setOpenMirrorEpisodeId(null);
     setOpenMenuId(null);
     setMenuPosition(null);
     setQuickOpeningEpisodeId(null);
@@ -3938,11 +3941,10 @@ function AdminPage() {
                                   const mirrorUrlValue = mirrorInputs[ep.id] ?? '';
                                   const mirrorError = mirrorErrorMap[ep.id];
                                   const mirrorSuccess = mirrorSuccessMap[ep.id];
-                                  const isMirrorPanelOpen =
-                                    Boolean(openMirrorPanelIds[ep.id]) ||
-                                    isMirroring ||
-                                    Boolean(mirrorError) ||
-                                    Boolean(mirrorSuccess);
+                                  const isMirrorPanelOpen = isEpisodeMirrorPanelOpen(
+                                    openMirrorEpisodeId,
+                                    ep.id
+                                  );
                                   const hasHashSource = episodeSources.some((src) =>
                                     hasUrlHashParams(src.url)
                                   );
@@ -4123,21 +4125,28 @@ function AdminPage() {
 
                                           <button
                                             type="button"
-                                            onClick={() =>
-                                              setOpenMirrorPanelIds((prev) => ({
-                                                ...prev,
-                                                [ep.id]: !isMirrorPanelOpen,
-                                              }))
-                                            }
+                                            onClick={() => {
+                                              setOpenMenuId(null);
+                                              setMenuPosition(null);
+                                              setOpenMirrorEpisodeId((current) =>
+                                                toggleSingleMirrorPanel(current, ep.id)
+                                              );
+                                            }}
                                             aria-expanded={isMirrorPanelOpen}
-                                            className={`min-h-[40px] sm:h-9 px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap transition-colors ${
+                                            aria-controls={`mirror-panel-${ep.id}`}
+                                            className={`min-h-[40px] sm:h-9 px-3 rounded-xl border text-xs font-medium inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap touch-manipulation transition-colors ${
                                               isMirrorPanelOpen
                                                 ? 'border-rose-500/40 bg-rose-600/15 text-rose-200'
                                                 : 'border-white/10 bg-white/[0.03] hover:bg-white/[0.08] text-slate-200'
                                             }`}
                                           >
-                                            <Download className="w-3.5 h-3.5" />
+                                            <Download className="w-3.5 h-3.5 shrink-0" />
                                             <span>Espelho</span>
+                                            <ChevronDown
+                                              className={`w-3.5 h-3.5 shrink-0 transition-transform ${
+                                                isMirrorPanelOpen ? 'rotate-180' : ''
+                                              }`}
+                                            />
                                           </button>
 
                                           {/* Three-dots secondary actions menu */}
@@ -4339,7 +4348,10 @@ function AdminPage() {
 
                                       {/* Collapsible Sources list & Vercel Blob mirror controls */}
                                       {isMirrorPanelOpen && (
-                                        <div className="rounded-xl bg-[#090B10] border border-white/[0.08] p-3.5 space-y-3">
+                                        <div
+                                          id={`mirror-panel-${ep.id}`}
+                                          className="rounded-xl bg-[#090B10] border border-white/[0.08] p-3.5 space-y-3"
+                                        >
                                           <div className="flex flex-wrap items-center justify-between gap-2">
                                             <span className="text-[11px] font-semibold uppercase tracking-wider text-slate-400">
                                               Fontes do episódio
